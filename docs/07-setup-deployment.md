@@ -26,6 +26,21 @@ VITE_SUPABASE_URL=<your-project-url>
 VITE_SUPABASE_ANON_KEY=<your-anon-key>
 ```
 
+Both are **required** (Phase G, `src/lib/backendConfig.ts`): the app refuses
+to start — and `vite build` refuses to build when the pin below is set —
+if either is missing/empty or the URL is malformed; there is no default
+backend. Optional pin:
+
+```bash
+VITE_SUPABASE_EXPECTED_HOST=lucashome.tail8a86e4.ts.net   # set by `npm run build:electron`
+```
+
+When set, the host of `VITE_SUPABASE_URL` must equal it exactly, otherwise
+the build fails and the app shows "The app cannot start … Backend host
+mismatch". The host the bundle talks to is shown in the login page footer
+and the sidebar footer (`backend: <host>`). See
+`deploy/lucashome/README.md` § "Building the desktop app".
+
 > Do **not** put a service-role key in any `VITE_*` variable — Vite inlines
 > those into the browser bundle. The anon key plus RLS is the security
 > boundary on the client. Service-role keys belong only in private
@@ -49,10 +64,16 @@ For a fresh Supabase project:
 3. Verify the `auth` and `public` schemas have the expected tables, RPCs,
    and policies (see the live verification checklist in
    [`archive/29-live-supabase-rls-rpc-verification.md`](./archive/29-live-supabase-rls-rpc-verification.md)).
-4. Create Supabase **Auth** users for staff.
-5. For each Auth user, insert a `public.users` row and set `auth_id` to
-   the Auth user's UUID (or let the email-fallback path in `authStore.ts`
-   self-heal the link on first login).
+4. Create the **first administrator** from the app's `/setup` page
+   (Electron: `#/setup`) — it is offered only while `app_setup_needed()`
+   (migration `067`) reports an empty `users` table, and asks for the
+   e-mail twice plus an explicit confirmation. Signing in on the login page
+   never creates an account (Phase G,
+   `docs/selfhost-migration/phase-g/login-signup-fix.md`).
+5. Create further staff from the Users page (admin → `auth.signUp` +
+   `create_app_user`). Rows inserted by hand must set `auth_id` to the Auth
+   user's UUID (or the email-fallback path in `authStore.ts` self-heals the
+   link on first login).
 6. Every non-admin user (MANAGER / CASHIER / BUYER) must have a `shop_id`.
 
 For an existing database, apply only new migrations in numeric order.
@@ -177,6 +198,50 @@ spec in [04-features-workflows.md](./04-features-workflows.md#admin-login-verifi
    ("Shwe PhaLar") so the entry reads sensibly in the authenticator app.
 3. **Recovery:** a lost phone falls back to the email-code path ("Use email
    code instead"), so no separate backup codes are required.
+
+## Platform Admin Console
+
+Internal, operator-only tool for provisioning new organizations
+(multi-tenant Phase 2 — see [09-roadmap-todo.md](./09-roadmap-todo.md#future-vision--multi-tenant-saas-2026-08-25-not-scheduled)).
+Reachable at `/console/login` — a URL deliberately not linked from
+anywhere in the app (not `/login`, not the sidebar). A platform admin's
+account is structurally unrelated to any org's `users` row: no
+`org_id`, no shared role, and its own `platform_admins` table with RLS
+enabled and **zero policies** (`REVOKE ALL FROM anon, authenticated`,
+same lockdown as `admin_login_codes`) — no client call can ever read or
+write it, so the only way in is the Edge Function below using the
+service-role key.
+
+1. **Migration:** apply `061_platform_admins.sql`.
+2. **Secrets:** none new — only the auto-injected `SUPABASE_URL` /
+   `SUPABASE_SERVICE_ROLE_KEY`. No email step in this pass.
+3. **Deploy:**
+   ```bash
+   supabase functions deploy platform-console
+   ```
+   `supabase/functions/platform-console/index.ts` — actions:
+   - `whoami` — confirms the caller is an active `platform_admins` row;
+     used as the console's own login/session gate.
+   - `list_organizations` — all orgs + their ADMIN's name/email + shop count.
+   - `create_organization` — creates the org, a temp-password auth
+     account, and its first ADMIN `users` row in one call; the temp
+     password is shown once in the console UI (never emailed, never
+     logged) for the operator to relay manually. Best-effort rolls back
+     the auth account if a later step fails.
+   - `create_platform_admin` — same primitive, for provisioning a second
+     operator account (no separate manual DB step needed after the
+     first one).
+4. **Bootstrapping the first platform admin:** the table has no
+   client-side write path by design, so the very first row is created
+   once via a manual `supabase.auth.admin.createUser()` + insert (ask
+   Claude, or run directly with the service-role key) — never scripted
+   into the repo, no plaintext password committed anywhere.
+5. **Frontend:** `src/stores/platformAuthStore.ts`,
+   `src/pages/PlatformConsoleLoginPage.tsx`,
+   `src/pages/PlatformConsolePage.tsx` — deliberately share no code or
+   state with `authStore.ts`, `RequireAuth`, `RequireRole`, or
+   `AppLayout`. Visually distinct (slate/graphite, "Internal Console")
+   from the real product login so it can't be mistaken for it.
 
 ## Business Profile (brand)
 
@@ -349,6 +414,8 @@ the recommended Playwright smoke tests.
 | --- | --- |
 | Bootstrap stuck on "Loading data…" | One of the parallel reads in `loadData()` failed. The new `AppLayout` should show the friendly Retry surface; if it does not, check console for the `[loadData]` log. |
 | "Permission denied" on a write the user should have | Check `granted_permissions` / `revoked_permissions` on the user — revokes win. Also confirm `users.is_active` is true. |
-| First admin login does nothing | The `users` table is empty: `authStore.login` creates the first ADMIN automatically. If it fails, check that auth signup is enabled in the Supabase project. |
+| First admin cannot sign in on a fresh install | The `users` table is empty and sign-in never creates accounts: use `/setup` (Phase G). If `/setup` says it "could not confirm", migration `067` (`app_setup_needed()`) is not applied, or the backend is unreachable. |
+| "The app cannot start" screen | Backend env missing (`VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`) or the host differs from `VITE_SUPABASE_EXPECTED_HOST` — the build is pinned to another backend on purpose. |
+| "Live stock paused — stock may be out of date" badge | The Realtime channel is down; stock is re-read from the server on the next periodic pull and on rejoin (`docs/selfhost-migration/phase-g/realtime-reconciliation.md`). Persistent = check the Realtime service / websocket path. |
 | Product photo upload "Bucket not found" | Apply `016_product_images_storage.sql` (or set up the bucket via the dashboard). |
 | RLS surprises | Re-read [03-database-security.md](./03-database-security.md) — direct authenticated writes to operational tables are blocked by design. Use RPCs. |

@@ -532,6 +532,27 @@ them — while an organization's own ADMIN (the business owner) must
 never be able to see another organization, or the platform-monitoring
 view itself.
 
+**Phase 1 — organization foundation (done, 2026-09-02).** Migrations
+`059_organizations_foundation.sql` and `060_organizations_rls.sql`:
+the `organizations` table (RLS enabled — SELECT open to authenticated,
+INSERT gated the same way as `users_ins`'s bootstrap escape hatch),
+`shops.org_id`/`users.org_id` (NOT NULL, backfilled to one seeded org),
+the re-scoped `users_only_one_admin` constraint (`UNIQUE (org_id) WHERE
+role = 'ADMIN'`), and the `app_org_id()` helper (mirrors `app_shop_id()`,
+not yet wired into any other RLS policy or RPC). `authStore.ts` now
+resolves and stores `org_id`/`currentOrgId` on login, restore, and the
+first-admin bootstrap path (which also creates its own org via
+`newId("org")`), matching the decided "one org per account, no
+org-picker" login shape below. **Also done (2026-09-03):** the platform
+admin console (`/console`, migration `061`) closes the "no way to
+create a second org" gap — see the "Platform-level admin access" item
+further down for the full writeup. **Still not done, and not started:**
+no RLS policy or RPC besides `app_org_id()` itself actually checks
+`org_id` yet (still only a couple of orgs in production today, so
+nothing meaningful is exposed by that gap yet), there's still no
+*self-serve* signup (org creation is operator-driven via `/console`,
+by design), and the full RLS/RPC org-scoping audit hasn't started.
+
 - [ ] **Sign-in/auth needs real redesign, not just a schema add.**
       Confirmed by reading `authStore.ts`: today's login is a single
       flat `supabase.auth.signInWithPassword({ email, password })`
@@ -578,19 +599,33 @@ view itself.
       "cashier-needs-manager" don't change at all, since a shop
       already belongs to exactly one org once `shops.org_id` exists —
       they're already correctly scoped by construction.
-- [ ] **Platform-level monitoring/admin access.** Some role above
-      today's per-organization `ADMIN` needs to see across all
-      organizations (health, usage, support). Shape undecided —
-      options are (a) a new role (e.g. `PLATFORM_ADMIN`) gated to a
-      new section of this same app, reusing existing auth/RBAC, or
-      (b) a fully separate internal app/site with its own auth that
-      queries across organizations. Whichever shape, the hard
-      requirement is the same: an organization's own `ADMIN` must have
-      **no path** to platform-level data or the monitoring surface —
-      today's `users_sel USING (true)` global-read pattern (see the
-      Security section's last open item) is exactly the kind of thing
-      that would need to become org-scoped rather than global once
-      this exists.
+- [x] **Platform-level admin access — org creation (done, 2026-09-03).**
+      Decided: neither pure option (a) nor (b) from the original
+      framing below — a **new identity (`platform_admins`, migration
+      `061`), reachable at its own unlinked route (`/console/login`,
+      `/console`), but living in this same codebase/deployment**.
+      Structurally separate from `users`/`ADMIN` (no `org_id`, no role
+      overlap), and locked down harder than any RLS-policy-based role
+      ever could be: `platform_admins` has RLS on with **zero
+      policies** and `REVOKE ALL FROM anon, authenticated` (same
+      pattern as `admin_login_codes`, migration `042`) — no client call
+      can read or write it under any circumstance, so a bug in some
+      other RLS policy can't leak into platform access. The only way in
+      is the `platform-console` Edge Function (service-role key),
+      mirroring `admin-2fa`'s exact auth pattern. See
+      `07-setup-deployment.md`'s "Platform Admin Console" section for
+      the full setup/deploy writeup.
+      **Built:** creating a new organization + its first ADMIN
+      (`create_organization`), listing all organizations
+      (`list_organizations`), and provisioning additional operator
+      accounts (`create_platform_admin`). **Not built:** platform-level
+      *monitoring* (health/usage/support views across orgs) — this
+      pass only solved the "no way to create a second org" gap, not the
+      broader monitoring surface the item below still describes. Also
+      still true: an organization's own `ADMIN` has no path to `/console`
+      (gated by `platform_admins` membership, which they aren't in), but
+      today's `users_sel USING (true)` global-read pattern (Security
+      section's last open item) is unrelated and still open.
 - [ ] **Everything currently assuming single-tenant needs an audit
       once this is scheduled** — every RLS policy, every RPC that
       trusts `shop_id` alone, `current_app_user()`/`app_role()` helpers,

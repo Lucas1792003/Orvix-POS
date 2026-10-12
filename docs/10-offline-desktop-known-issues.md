@@ -280,6 +280,23 @@ hash-verified against what's actually hosted before publishing — see
 "Current Windows release and recovery" at the top of this doc). Real-
 hardware confirmation of a v1.0.9 → v1.0.14 update still pending.
 
+## Phase D (self-host migration) — idempotency, outbox reliability, offline authorisation
+
+The outbox and offline-authorisation behaviour described further down this
+file was reworked for the self-host migration. The current design — the
+12 h offline write window measured from the last successful authenticated
+round trip, idempotency keys on every mutating RPC, transient-vs-permanent
+failure classification with backoff, the cross-window drain lock, the
+`needs-reauth` state and the drain triggers — is documented in
+[`selfhost-migration/phase-d/offline-authorization.md`](./selfhost-migration/phase-d/offline-authorization.md)
+(client) and
+[`selfhost-migration/phase-d/idempotency-contract.md`](./selfhost-migration/phase-d/idempotency-contract.md)
+(server). Where a statement below (e.g. "`OFFLINE_WRITE_TRUST_MS` 2 h",
+"a resolved `{error}` becomes a conflict", "the full load clears every
+Dexie table") contradicts those documents, the Phase D documents win.
+Tests: `stores/data/outbox.reliability.test.ts` (fake supabase-js client in
+`stores/data/testing/fakeSupabase.ts`).
+
 ## ✅ Fixed — offline login (was: 🔴 critical bug)
 
 **`src/stores/authStore.ts`'s `restoreSession()`** used to always require the
@@ -351,6 +368,13 @@ applies. Tests: `src/stores/authStore.login.test.ts`.
 This bug affected the web app too, not just desktop — it wasn't
 Electron-specific, just more likely to be hit there since offline/first
 runs increase the odds of a failed sign-in attempt.
+
+> **Superseded (Phase G, 2026-10-12).** The "just attempt `signUp()`" fix
+> above meant every failed sign-in could *create* an auth account when the
+> e-mail had none — which it did on the hosted project during Phase E.
+> `login()` now only signs in; the first-admin bootstrap is the explicit
+> `/setup` page gated by `app_setup_needed()` (migration `067`). See
+> `docs/selfhost-migration/phase-g/login-signup-fix.md`.
 
 ## Deliberately out of scope (not bugs)
 

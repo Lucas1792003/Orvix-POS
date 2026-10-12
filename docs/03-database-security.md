@@ -80,6 +80,15 @@ Apply in numeric order. The current ordered list:
 | `056_users_read_scoping.sql` | Replaces `users_sel USING (true)` — previously any authenticated user could read every other shop's staff roles/permissions. New rule: own row, same-shop rows, any ADMIN row, or everything if ADMIN. |
 | `057_manager_approve_po_cancel_transfer.sql` | Grants MANAGER `purchase:approve` (with a `created_by = v_user.id` self-approval guard, same pattern as `053`) and `transfer:cancel` (no guard — canceling is an undo on an internal movement, not an external commitment) — closes the ADMIN-single-point-of-failure gap for both. |
 | `058_realtime_inventory.sql` | Adds `inventory` to the `supabase_realtime` publication so stock-level changes push to clients instead of only refreshing on a full `loadData()` — `inventory` has no `updated_at`, so it was entirely outside the existing delta-sync polling. No RLS changes: `postgres_changes` already evaluates against the subscriber's own RLS context. |
+| `059_organizations_foundation.sql` | Multi-tenant Phase 1 (see `09-roadmap-todo.md`): `organizations` table (seeded with one row), `shops.org_id`/`users.org_id` (NOT NULL, backfilled), re-scopes `users_only_one_admin` from global to `UNIQUE (org_id) WHERE role = 'ADMIN'`, and adds `app_org_id()` (mirrors `app_shop_id()`). No RLS/RPC changes — deliberately a no-op for current single-org behavior. |
+| `060_organizations_rls.sql` | Enables RLS on `organizations` (migration `059` left it disabled — caught before the login flow started inserting into it). SELECT open to authenticated (same as `shops`/`suppliers`); INSERT uses the same bootstrap escape hatch as `users_ins` (`app_has_perm('user:create') OR NOT EXISTS (SELECT 1 FROM users)`); no UPDATE/DELETE policy yet. |
+| `061_platform_admins.sql` | `platform_admins` — the internal super-admin identity backing `/console` (see `07-setup-deployment.md`). Locked exactly like `admin_login_codes` (migration `042`): RLS on, **zero policies**, `REVOKE ALL FROM anon, authenticated`. No `org_id`, no overlap with any org role — the only access path is the `platform-console` Edge Function via the service-role key. |
+| `062_idempotency_keys.sql` | Phase D (`docs/selfhost-migration/phase-d/idempotency-contract.md`): `idempotency_keys` ledger (RLS on, no policies, service-role only) + `idem_begin`/`idem_finish`/`prune_idempotency_keys` SECURITY DEFINER helpers, executable only by the RPC owner and `service_role`. |
+| `063_rpc_idempotency.sql` | Adds a **required** trailing `p_idempotency_key uuid` to all 30 client-callable mutating RPCs (old signatures dropped, no overloads). A replay of a committed request returns the stored response; a different payload under the same key raises `IDEMPOTENCY_MISMATCH`; a failed transaction rolls the key back so a retry executes. Bodies are the production bodies plus the gate only; decision table for all 58 functions in the file header. |
+| `064_revoke_anon_execute.sql` | `REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM anon, authenticated, PUBLIC` + default-ACL fix for role `postgres`, then explicit grants: `service_role` everything, `authenticated` everything except `complete_stock_transfer` (052) and the idem helpers, `anon` exactly the two token-scoped phone-upload RPCs from `019`. |
+| `065_table_grant_parity.sql` | REVOKE ALL + GRANT per relation so table/view privileges on a fresh install equal the hosted snapshot (`hosted-grants.txt`, 92 rows) instead of whatever default ACL the restore picked up. |
+| `066_create_app_user_org_id.sql` | `create_app_user` sets `users.org_id` to the caller's org — the RPC had failed on every call since `059` made the column NOT NULL (found by `supabase/tests/phase-d/run.sh`). |
+| `067_app_setup_needed.sql` | Phase G (`docs/selfhost-migration/phase-g/login-signup-fix.md`): `app_setup_needed()` — read-only `SECURITY DEFINER STABLE` boolean, `NOT EXISTS (SELECT 1 FROM users)`, granted to `anon`, `authenticated`, `service_role`. Gates the explicit `/setup` first-admin page; the login flow no longer calls `auth.signUp`. After this, `anon` can execute exactly **three** public functions (the two `019` phone-upload RPCs + this one). **Not applied anywhere yet.** |
 
 > **Migration order warning.** Some later migrations depend on identity
 > helpers from `003` and the audit-write lockdown from `013`. Always apply
@@ -173,6 +182,13 @@ RLS is enabled on all listed tables.
   active manager in its shop, manager-deactivation safety) via partial
   unique indexes and the `enforce_user_assignment_rules()` trigger from
   migration `020`. See `05-roles-permissions.md` for the full list.
+- **First administrator (bootstrap).** `users_ins` (`010`) and
+  `organizations_ins` (`060`) allow an INSERT while `users` is empty — the
+  server-side authority for the one-time bootstrap. Since Phase G the
+  client only exercises it from the explicit `/setup` page, after
+  `app_setup_needed()` (`067`) confirmed the table is empty; a plain sign-in
+  never creates an auth account or a `users` row
+  (`docs/selfhost-migration/phase-g/login-signup-fix.md`).
 
 **Reads.** Permission-gated SELECT (migration `015` + extensions in `018`):
 

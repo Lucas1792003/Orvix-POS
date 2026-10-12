@@ -20,6 +20,14 @@ of truth**. The old coarse permissions are gone.
 > **BUYER is per-shop.** A shopless BUYER is a misconfiguration. The Users
 > page requires a `shopId` for every non-admin role.
 
+### How accounts come to exist
+
+| Who | How | Notes |
+| --- | --- | --- |
+| The first **ADMIN** on an empty install | the explicit **`/setup`** page (Phase G): server confirms `users` is empty via `app_setup_needed()` (migration `067`), operator types the e-mail twice + password + acknowledgement → auth account + organization + ADMIN row linked by `auth_id` | the login page never creates accounts; a failed sign-in just reports GoTrue's message. See `docs/selfhost-migration/phase-g/login-signup-fix.md` |
+| MANAGER / CASHIER / BUYER (and any later user) | Users page, by an ADMIN: `auth.signUp` + `create_app_user` RPC | unchanged |
+| Platform admins (`/console`) | manual service-role step, see `07-setup-deployment.md` | separate identity, no org role |
+
 ## User-Assignment Rules (DB-enforced)
 
 Enforced by `020_rbac_user_assignment_constraints.sql` — a frontend bug or
