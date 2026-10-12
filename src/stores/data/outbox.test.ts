@@ -2,13 +2,20 @@ import "fake-indexeddb/auto";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const rpc = vi.fn();
+// A valid, unexpired session: the drain checks the session before sending
+// anything (see ensureSessionForDrain in outbox.ts). Session-failure
+// scenarios live in outbox.reliability.test.ts.
 vi.mock("../../lib/supabase", () => ({
-  supabase: { rpc: (...args: unknown[]) => rpc(...args) },
+  supabase: {
+    rpc: (...args: unknown[]) => rpc(...args),
+    auth: { getSession: () => Promise.resolve({ data: { session: { user: { id: "auth-1" } } }, error: null }) },
+  },
 }));
 
 import { localDb } from "../../lib/localDb";
 import {
-  enqueueOutbox, drainOutbox, listOutboxConflicts, retryOutboxEntry, dismissOutboxEntry, recordIdMapping,
+  enqueueOutbox, drainOutbox, listOutboxConflicts, listOutboxEntries, retryOutboxEntry, dismissOutboxEntry,
+  recordIdMapping,
 } from "./outbox";
 
 beforeEach(async () => {
@@ -19,11 +26,34 @@ beforeEach(async () => {
 
 describe("drainOutbox", () => {
   it("is a no-op when the queue is empty", async () => {
-    await expect(drainOutbox()).resolves.toBeUndefined();
+    await expect(drainOutbox()).resolves.toBe("drained");
     expect(rpc).not.toHaveBeenCalled();
   });
 
-  it("leaves the entry pending and stops the pass on a network failure", async () => {
+  // supabase-js RESOLVES a fetch failure (postgrest-js catches it and
+  // returns `{ data: null, error: { message: "TypeError: Failed to fetch" },
+  // status: 0 }`) — it does not reject. This is the shape a flaky link
+  // actually produces, and it must stay pending, not become a conflict.
+  it("leaves the entry pending (with backoff) and stops the pass on a resolved network failure", async () => {
+    await enqueueOutbox({ kind: "rpc", name: "complete_sale", args: {}, shopId: "shop-1" });
+    await enqueueOutbox({ kind: "rpc", name: "adjust_stock", args: {}, shopId: "shop-1" });
+    rpc.mockResolvedValue({
+      data: null, status: 0, statusText: "",
+      error: { message: "TypeError: Failed to fetch", details: "", hint: "", code: "" },
+    });
+
+    await expect(drainOutbox()).resolves.toBe("network");
+
+    expect(rpc).toHaveBeenCalledTimes(1); // the pass stopped at the first failure
+    const entries = await listOutboxEntries(); // queue order, not the ms clock
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ status: "pending", attempts: 1, failureKind: "transient" });
+    expect(entries[0].lastError).toContain("fetch");
+    expect(Date.parse(entries[0].nextAttemptAt!)).toBeGreaterThan(Date.now());
+    expect(entries[1]).toMatchObject({ status: "pending", attempts: 0 });
+  });
+
+  it("also treats a rejected promise (the older mock shape) as a transient failure", async () => {
     await enqueueOutbox({ kind: "rpc", name: "complete_sale", args: {}, shopId: "shop-1" });
     rpc.mockRejectedValue(new TypeError("Failed to fetch"));
 
@@ -34,6 +64,33 @@ describe("drainOutbox", () => {
     expect(entries[0].status).toBe("pending");
     expect(entries[0].attempts).toBe(1);
     expect(entries[0].lastError).toContain("fetch");
+  });
+
+  it("stamps every rpc entry with an idempotency key and sends it as p_idempotency_key", async () => {
+    await enqueueOutbox({ kind: "rpc", name: "adjust_stock", args: { n: 1 }, shopId: "shop-1" });
+    rpc.mockResolvedValue({ data: { ok: true }, error: null });
+
+    const [queued] = await localDb.syncOutbox.toArray();
+    expect(queued.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
+    expect(queued.args?.p_idempotency_key).toBe(queued.idempotencyKey);
+
+    await drainOutbox();
+
+    expect(rpc).toHaveBeenCalledWith("adjust_stock", expect.objectContaining({ p_idempotency_key: queued.idempotencyKey }));
+  });
+
+  it("assigns a key on first drain to a legacy entry queued without one", async () => {
+    // An entry written by a pre-Phase-D build (no idempotencyKey, no key in args).
+    await localDb.syncOutbox.put({
+      localId: "outbox-legacy", kind: "rpc", name: "adjust_stock", args: { n: 1 }, shopId: "shop-1",
+      createdAt: new Date().toISOString(), status: "pending", attempts: 0,
+    });
+    rpc.mockResolvedValue({ data: { ok: true }, error: null });
+
+    await drainOutbox();
+
+    const sent = rpc.mock.calls[0][1] as Record<string, unknown>;
+    expect(typeof sent.p_idempotency_key).toBe("string");
   });
 
   it("flags a server-rejected entry as a conflict and keeps draining the rest", async () => {
@@ -87,7 +144,10 @@ describe("dependent entries (refs)", () => {
     await drainOutbox();
 
     expect(rpc).toHaveBeenCalledTimes(1);
-    expect(rpc).toHaveBeenCalledWith("adjust_stock", { n: 1, p_expected_actor_id: null });
+    expect(rpc).toHaveBeenCalledWith(
+      "adjust_stock",
+      { n: 1, p_expected_actor_id: null, p_idempotency_key: expect.any(String) },
+    );
     const remaining = await localDb.syncOutbox.toArray();
     expect(remaining).toHaveLength(1);
     expect(remaining[0].name).toBe("complete_sale");
@@ -108,7 +168,10 @@ describe("dependent entries (refs)", () => {
     await drainOutbox();
 
     expect(rpc).toHaveBeenCalledTimes(1);
-    expect(rpc).toHaveBeenCalledWith("complete_sale", { p_shift_id: "shift-server-9", p_paid_mmk: 5000 });
+    expect(rpc).toHaveBeenCalledWith(
+      "complete_sale",
+      { p_shift_id: "shift-server-9", p_paid_mmk: 5000, p_idempotency_key: expect.any(String) },
+    );
     expect(await localDb.syncOutbox.count()).toBe(0);
   });
 });

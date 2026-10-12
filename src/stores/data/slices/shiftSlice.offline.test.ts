@@ -155,7 +155,10 @@ describe("shift opened offline, sale rung up against it, then both sync", () => 
 
     expect(rpc).toHaveBeenCalledTimes(2);
     expect(rpc).toHaveBeenNthCalledWith(1, "open_shift", expect.anything());
-    expect(rpc).toHaveBeenNthCalledWith(2, "complete_sale", { p_shift_id: "shift-server-1", p_paid_mmk: 1000 });
+    expect(rpc).toHaveBeenNthCalledWith(
+      2, "complete_sale",
+      { p_shift_id: "shift-server-1", p_paid_mmk: 1000, p_idempotency_key: expect.any(String) },
+    );
     expect(await localDb.syncOutbox.count()).toBe(0);
     expect(getShiftStore().shifts[0].id).toBe("shift-server-1");
     expect(getShiftStore().shifts[0].pendingSync).toBeUndefined();

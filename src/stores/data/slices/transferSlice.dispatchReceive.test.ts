@@ -58,7 +58,9 @@ describe("dispatchTransfer flow", () => {
     await get().dispatchTransfer({ transferId: "tr-1" });
 
     expect(rpc.mock.calls[0][0]).toBe("dispatch_stock_transfer");
-    expect(rpc.mock.calls[0][1]).toEqual({ p_transfer_id: "tr-1", p_created_at: expect.any(String) });
+    expect(rpc.mock.calls[0][1]).toEqual({
+      p_transfer_id: "tr-1", p_created_at: expect.any(String), p_idempotency_key: expect.any(String),
+    });
     expect(get().stockTransfers[0].status).toBe("IN_TRANSIT");
     expect(get().inventory).toEqual(before); // hold at source — no movement yet
   });

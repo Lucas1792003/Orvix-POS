@@ -4,12 +4,15 @@ import {
   getErrorMessage,
   isDuplicateError,
   isExpiredSessionError,
+  isGatewayStatus,
   isInsufficientStockError,
   isNetworkError,
+  isTransientError,
   isNoOpenShiftError,
   isPermissionError,
   isStorageError,
   mapSupabaseError,
+  OFFLINE_AUTHORIZATION_ERROR,
 } from "./errors";
 
 describe("error classifiers", () => {
@@ -34,6 +37,39 @@ describe("error classifiers", () => {
     expect(isNetworkError({ message: "NetworkError when attempting to fetch resource." })).toBe(true);
     expect(isNetworkError({ message: "ETIMEDOUT connecting" })).toBe(true);
     expect(isNetworkError({ message: "boring error" })).toBe(false);
+  });
+
+  // Phase D (A3): gateway failures and supabase-js's own resolved fetch
+  // error shape count as network — the request may never have reached
+  // Postgres, so the online path must fall back to the outbox.
+  it("treats 502/503/504 and status-0 responses as network errors", () => {
+    expect(isNetworkError({ message: "TypeError: Failed to fetch", code: "", status: 0 })).toBe(true);
+    expect(isNetworkError({ message: "<html>502 Bad Gateway</html>", status: 502 })).toBe(true);
+    expect(isNetworkError({ message: "upstream connect error or disconnect/reset before headers", status: 503 })).toBe(true);
+    expect(isNetworkError({ message: "Gateway Time-out", status: 504 })).toBe(true);
+    expect(isNetworkError({ name: "AuthRetryableFetchError", message: "Failed to fetch", status: 0 })).toBe(true);
+    expect(isGatewayStatus(503)).toBe(true);
+    expect(isGatewayStatus(400)).toBe(false);
+    // A business message that merely contains digits is NOT a gateway error.
+    expect(isNetworkError({ message: "Only 502 units in stock", status: 400 })).toBe(false);
+  });
+
+  it("classifies transient (retry with the same key) vs permanent failures", () => {
+    // transient: network, gateway, 5xx, 429, timeouts, expired JWT
+    expect(isTransientError({ message: "TypeError: Failed to fetch", code: "" }, 0)).toBe(true);
+    expect(isTransientError({ message: "internal server error" }, 500)).toBe(true);
+    expect(isTransientError({ message: "Too Many Requests" }, 429)).toBe(true);
+    expect(isTransientError({ message: "complete_sale timed out after 30s", status: 0 })).toBe(true);
+    expect(isTransientError({ message: "AbortError: signal timed out" })).toBe(true);
+    expect(isTransientError({ message: "JWT expired", code: "PGRST301" }, 401)).toBe(true);
+    expect(isTransientError({ message: "JWT expired" })).toBe(true);
+    expect(isTransientError({ message: "canceling statement due to statement timeout", code: "57014" })).toBe(true);
+    // permanent: validation, RLS/permission, business rules, duplicate keys
+    expect(isTransientError({ message: "Insufficient stock for Tea Mix", code: "P0001" }, 400)).toBe(false);
+    expect(isTransientError({ message: "permission denied for table sales", code: "42501" }, 403)).toBe(false);
+    expect(isTransientError({ message: "IDEMPOTENCY_MISMATCH: key x was used for a different request", code: "23505" }, 409)).toBe(false);
+    expect(isTransientError({ message: "Shift is already closed." }, 400)).toBe(false);
+    expect(isTransientError(null)).toBe(false);
   });
 
   it("detects storage bucket / policy errors", () => {
@@ -119,5 +155,22 @@ describe("getErrorMessage", () => {
   it("strips multi-line and JSON-shaped raw messages", () => {
     const ugly = { message: "{ \"code\": 500, \"details\": \"server exploded\" }" };
     expect(getErrorMessage(ugly, "Save failed.")).toBe("Save failed.");
+  });
+});
+
+describe("offline authorisation errors", () => {
+  it("shows the gate's own message even while the device is offline", () => {
+    const onLine = Object.getOwnPropertyDescriptor(navigator, "onLine");
+    Object.defineProperty(navigator, "onLine", { configurable: true, get: () => false });
+    try {
+      const err = new Error("This device has been offline for more than 12 hours. Reconnect to the internet to verify your sign-in before recording new offline activity — anything already queued is kept and will sync.");
+      err.name = OFFLINE_AUTHORIZATION_ERROR;
+      expect(getErrorMessage(err)).toBe(err.message);
+      // an ordinary failure while offline still maps to the network message
+      expect(getErrorMessage(new TypeError("Failed to fetch"))).toBe(ERROR_MESSAGES.network);
+    } finally {
+      if (onLine) Object.defineProperty(navigator, "onLine", onLine);
+      else delete (navigator as unknown as Record<string, unknown>).onLine;
+    }
   });
 });

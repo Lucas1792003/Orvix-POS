@@ -40,6 +40,33 @@ describe("localSync", () => {
     expect(restored?.businessProfile).toEqual({ businessName: "Shwe Pha La" });
   });
 
+  // Phase D (02-production-dependencies.md §8, A8): a full load used to
+  // clear EVERY Dexie table — a sale queued while offline could be wiped by
+  // the reload that happens on reconnect, before it was ever replayed.
+  it("does not clear the outbox, id map, cursors, auth cache or sync state", async () => {
+    await localDb.syncOutbox.put({
+      localId: "outbox-1", kind: "rpc", name: "complete_sale", args: { p_idempotency_key: "k1" },
+      idempotencyKey: "k1", shopId: "shop-1", createdAt: "2026-01-01T00:00:00Z", status: "pending", attempts: 0,
+    });
+    await localDb.provisionalIdMap.put({ provisionalId: "shift-local-1", realId: "shift-1", createdAt: "2026-01-01T00:00:00Z" });
+    await localDb.syncMeta.put({ table: "categories", lastPulledAt: "2026-01-01T00:00:00Z" });
+    await localDb.authCache.put({
+      authId: "auth-1", userId: "user-1", role: "CASHIER", shopId: "shop-1", orgId: null,
+      isActive: true, hasTotp: false, cachedAt: "2026-01-01T00:00:00Z",
+    });
+    await localDb.syncState.put({ key: "needs-reauth", flag: true, updatedAt: "2026-01-01T00:00:00Z" });
+
+    await persistSnapshotToLocal({ ...emptySnapshot, shops: [shop("shop-1")] });
+
+    expect(await localDb.syncOutbox.get("outbox-1")).toMatchObject({ status: "pending", idempotencyKey: "k1" });
+    expect(await localDb.provisionalIdMap.get("shift-local-1")).toBeDefined();
+    expect((await localDb.syncMeta.get("categories"))?.lastPulledAt).toBe("2026-01-01T00:00:00Z");
+    expect(await localDb.authCache.get("auth-1")).toBeDefined();
+    expect((await localDb.syncState.get("needs-reauth"))?.flag).toBe(true);
+    // ...while the snapshot tables themselves are still fully replaced.
+    expect((await readLocalSnapshot())?.shops.map((s) => s.id)).toEqual(["shop-1"]);
+  });
+
   it("replaces stale rows instead of accumulating them across syncs", async () => {
     await persistSnapshotToLocal({ ...emptySnapshot, shops: [shop("shop-1")] });
     await persistSnapshotToLocal({ ...emptySnapshot, shops: [shop("shop-2")] });
