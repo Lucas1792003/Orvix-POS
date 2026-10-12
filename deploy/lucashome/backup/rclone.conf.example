@@ -1,0 +1,29 @@
+# /srv/supabase/backup/rclone.conf — TEMPLATE (non-secret). The real file is created by the OWNER
+# with `rclone config --config /srv/supabase/backup/rclone.conf` (OFFSITE-ENABLE.md §3) and is
+# 0600 lucario. Values in <angle brackets> are placeholders; `password`/`password2` are rclone's
+# obscured form (rclone writes them; never paste the plaintext here). Keep the plaintext crypt
+# password + salt in the password manager — they are the only way to read anything on R2.
+#
+# Two remotes: `r2` (the bucket, S3 API) and `offsite` (client-side encryption on top of it).
+# Every script uses OFFSITE_REMOTE=offsite: only; nothing is ever written to `r2:` directly.
+
+[r2]
+type = s3
+provider = Cloudflare
+access_key_id = <R2_ACCESS_KEY_ID>
+secret_access_key = <R2_SECRET_ACCESS_KEY>
+endpoint = https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+acl = private
+# bucket-scoped tokens cannot ListBuckets; without this every sync fails with AccessDenied
+no_check_bucket = true
+# single-part uploads up to 200 MB keep ETag = MD5, which rclone cryptcheck needs (proposal §11)
+upload_cutoff = 200M
+chunk_size = 16M
+
+[offsite]
+type = crypt
+remote = r2:shwephala-backups
+filename_encryption = standard
+directory_name_encryption = true
+password = <OBSCURED_CRYPT_PASSWORD>
+password2 = <OBSCURED_CRYPT_SALT>

@@ -1,0 +1,13 @@
+{"rows":[
+{"object":"auth.users","metric":"count","value":"10"},
+{"object":"auth.users","metric":"checksum","value":"0f343b0931126a20f133d67c2b018a3b"},
+{"object":"public.products","metric":"count","value":"539"},
+{"object":"public.products","metric":"checksum","value":"9e107d9d372bb6826bd81d3542a419d6"},
+{"object":"public.products","metric":"max_created_at","value":"2026-08-25T10:11:12.000000Z"},
+{"object":"public.sales","metric":"count","value":"0"},
+{"object":"storage.objects","metric":"count","value":"574"},
+{"object":"storage.objects","metric":"checksum","value":"e4d909c290d0fb1ca068ffaddf22cbd0"},
+{"object":"public.functions","metric":"anon_executable","value":"58"},
+{"object":"public.functions","metric":"count","value":"58"},
+{"object":"auth.refresh_tokens_id_seq","metric":"last_value","value":"120"}
+]}

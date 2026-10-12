@@ -53,3 +53,7 @@ coverage
 
 # Supabase CLI local state (links + cached metadata) — never commit
 supabase/.temp/
+
+# Python bytecode (tools/selfhost-migration)
+__pycache__/
+*.pyc

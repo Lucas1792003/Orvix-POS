@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- launchd template for the Mac tier (MAC-TIER.md §3). NOT installed by anything in this repo.
+     Install (owner, on the Mac):
+       sed "s#__HOME__#$HOME#g" com.shwephala.backup-pull.plist > ~/Library/LaunchAgents/com.shwephala.backup-pull.plist
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.shwephala.backup-pull.plist
+     Runs mac-pull.sh every 6 h (and once at login); the script itself skips silently when lucashome is offline. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.shwephala.backup-pull</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__HOME__/shwephala-backups/bin/mac-pull.sh</string>
+    <string>--snapshot</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>21600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/shwephala-pull.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/shwephala-pull.launchd.log</string>
+</dict>
+</plist>

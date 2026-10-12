@@ -1,0 +1,37 @@
+table_schema|table_name|column_name|data_type|is_nullable|column_default|ordinal_position
+auth|users|instance_id|uuid|YES||1
+auth|users|id|uuid|NO||2
+auth|users|aud|character varying|YES||3
+auth|users|role|character varying|YES||4
+auth|users|email|character varying|YES||5
+auth|users|encrypted_password|character varying|YES||6
+auth|users|raw_user_meta_data|jsonb|YES||7
+auth|users|created_at|timestamp with time zone|YES||8
+auth|users|updated_at|timestamp with time zone|YES||9
+auth|sessions|id|uuid|NO||1
+auth|sessions|user_id|uuid|NO||2
+auth|sessions|created_at|timestamp with time zone|YES||3
+auth|sessions|updated_at|timestamp with time zone|YES||4
+auth|sessions|user_agent|text|YES||5
+auth|sessions|ip|inet|YES||6
+auth|sessions|new_col|text|YES||7
+auth|one_time_tokens|id|uuid|NO||1
+auth|one_time_tokens|user_id|uuid|NO||2
+auth|one_time_tokens|token_type|USER-DEFINED|NO||3
+auth|one_time_tokens|token_hash|text|NO||4
+auth|one_time_tokens|relates_to|text|NO||5
+auth|one_time_tokens|created_at|timestamp without time zone|NO|now()|6
+auth|one_time_tokens|updated_at|timestamp without time zone|NO|now()|7
+auth|oauth_clients|id|uuid|NO||1
+auth|oauth_clients|client_secret_hash|text|NO||2
+storage|buckets|id|text|NO||1
+storage|buckets|name|text|NO||2
+storage|buckets|public|boolean|YES|false|3
+storage|buckets|file_size_limit|integer|YES||4
+storage|buckets|type|USER-DEFINED|NO|'STANDARD'::storage.buckettype|5
+storage|objects|id|uuid|NO|gen_random_uuid()|1
+storage|objects|bucket_id|text|YES||2
+storage|objects|name|text|YES||3
+storage|objects|metadata|jsonb|YES||4
+storage|objects|level|integer|YES||5
+(35 rows)

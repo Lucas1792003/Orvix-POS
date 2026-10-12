@@ -1,0 +1,32 @@
+# lucario crontab on lucashome — Supabase backups (host timezone is Etc/UTC)
+# install: crontab deploy/lucashome/backup/crontab.lucario  (or via deploy.sh --cron)
+MAILTO=""
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# hourly logical dump (globals + postgres + _supabase), promotes daily/weekly, prunes
+15 * * * *   /srv/supabase/backup/bin/backup-logical.sh  >>/srv/supabase/backups/logs/cron.log 2>&1
+# daily physical base backup, verified, prunes
+30 2 * * *   /srv/supabase/backup/bin/backup-base.sh     >>/srv/supabase/backups/logs/cron.log 2>&1
+# weekly restore drill (logical + physical) into throwaway containers
+30 3 * * 0   /srv/supabase/backup/bin/restore-test.sh    >>/srv/supabase/backups/logs/cron.log 2>&1
+# failure detection: ages, sizes, free space, leftovers -> logs/backup-status.log (+ healthchecks ping if configured)
+*/30 * * * * /srv/supabase/backup/bin/backup-status.sh --quiet >>/srv/supabase/backups/logs/cron.log 2>&1
+
+# --- offsite tier (Phase F, OFFSITE-ENABLE.md) — COMMENTED OUT until the owner has enabled it ---
+# Every script exits 0 with "offsite disabled" while OFFSITE_ENABLED != true in backup.env, so these
+# lines are safe to uncomment at step 7 of OFFSITE-ENABLE.md. Times are after the local jobs they copy.
+## WAL segments: incremental copy every 15 min; one full sync (remote prune) per day
+#*/15 * * * * /srv/supabase/backup/bin/offsite-sync.sh wal     >>/srv/supabase/backups/logs/cron.log 2>&1
+## logical dumps (hourly+daily+weekly), 5 min after backup-logical.sh
+#20 * * * *   /srv/supabase/backup/bin/offsite-sync.sh dump    >>/srv/supabase/backups/logs/cron.log 2>&1
+## base backups with 30-day versions, 15 min after backup-base.sh
+#45 2 * * *   /srv/supabase/backup/bin/offsite-sync.sh base    >>/srv/supabase/backups/logs/cron.log 2>&1
+## storage files with 30-day versions
+#0 */6 * * *  /srv/supabase/backup/bin/offsite-sync.sh storage >>/srv/supabase/backups/logs/cron.log 2>&1
+## age-encrypted config/secrets bundle (built by secrets-bundle.sh, keep 14) with 30-day versions
+#50 2 * * *   /srv/supabase/backup/bin/offsite-sync.sh bundle  >>/srv/supabase/backups/logs/cron.log 2>&1
+## cryptcheck of every prefix, remote size, .versions/ prune
+#30 4 * * *   /srv/supabase/backup/bin/offsite-sync.sh check   >>/srv/supabase/backups/logs/cron.log 2>&1
+## weekly restore FROM the remote into throwaways (after the local drill at 03:30)
+#30 5 * * 0   /srv/supabase/backup/bin/offsite-restore-test.sh >>/srv/supabase/backups/logs/cron.log 2>&1
+# (offsite-status.sh needs no line: backup-status.sh embeds it every 30 min)

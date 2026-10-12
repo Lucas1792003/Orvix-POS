@@ -1,0 +1,82 @@
+# ShwePhaLa — self-hosted Supabase on lucashome
+# Deployed copy: /srv/supabase/stack/docker-compose.override.yml
+# Base: upstream supabase/supabase tag self-hosted/v0.8.2 (commit 564eab8a), docker/docker-compose.yml untouched.
+# Every deviation from upstream lives here; see docs/selfhost-migration/04-target-architecture.md §4 (D1–D9).
+#
+# NOTE: no db.volumes override in Phase A (see db service comment).
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  # D1: gateway reachable from loopback only; Tailscale serve terminates TLS and proxies to 127.0.0.1:8000
+  api-gw:
+    ports: !override
+      - "127.0.0.1:${API_GW_HTTP_PORT:-8000}:8000/tcp"
+    mem_limit: 256m
+    logging: *default-logging
+
+  # D2: remove the pooler — it would publish 0.0.0.0:5432 (taken on this host) and 0.0.0.0:6543.
+  # The app uses PostgREST only; admin access is `docker compose exec db psql`.
+  supavisor: !reset null
+
+  # db keeps the upstream volume list (PGDATA bind mount + named volume db-config for the pgsodium key);
+  # the three entries below are ADDED to it (compose merges volume lists).
+  # D3 (bind-mounting db-config) is still deferred.
+  # WAL archiving (deploy/lucashome/backup/WAL-ARCHIVING.md, applied 2026-10-11 with owner approval):
+  #   wal_archive/        host dir owned 100:101 mode 0770 (lucario is in host gid 101 -> prune without sudo)
+  #   10-wal-archive.conf archive_mode=on, gzip archive_command, archive_timeout=300 (via include_dir conf.d)
+  #   pg_hba.conf         image file + `replication` lines for supabase_admin (pg_basebackup from inside the container)
+  db:
+    mem_limit: 2g
+    logging: *default-logging
+    volumes:
+      - ./volumes/db/wal_archive:/var/lib/postgresql/wal_archive
+      - ./volumes/db/custom-conf.d/10-wal-archive.conf:/etc/postgresql-custom/conf.d/10-wal-archive.conf:ro
+      - ./volumes/db/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+
+  auth:
+    environment:
+      # D9: pin TOTP MFA explicitly (upstream default is already true/true/10)
+      GOTRUE_MFA_TOTP_ENROLL_ENABLED: ${MFA_TOTP_ENROLL_ENABLED:-true}
+      GOTRUE_MFA_TOTP_VERIFY_ENABLED: ${MFA_TOTP_VERIFY_ENABLED:-true}
+      GOTRUE_MFA_MAX_ENROLLED_FACTORS: ${MFA_MAX_ENROLLED_FACTORS:-10}
+      # hosted parity (02 §2)
+      GOTRUE_PASSWORD_MIN_LENGTH: "6"
+    mem_limit: 256m
+    logging: *default-logging
+
+  functions:
+    environment:
+      # D7: function secrets; upstream forwards the whole container env to every function
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      REPORT_EMAIL_FROM: ${REPORT_EMAIL_FROM:-}
+    mem_limit: 512m
+    logging: *default-logging
+
+  rest:
+    mem_limit: 256m
+    logging: *default-logging
+
+  realtime:
+    mem_limit: 512m
+    logging: *default-logging
+
+  storage:
+    mem_limit: 512m
+    logging: *default-logging
+
+  imgproxy:
+    mem_limit: 256m
+    logging: *default-logging
+
+  meta:
+    mem_limit: 256m
+    logging: *default-logging
+
+  studio:
+    mem_limit: 512m
+    logging: *default-logging
