@@ -1,5 +1,5 @@
 import { supabase } from "../../lib/supabase";
-import { isNetworkError } from "../../lib/errors";
+import { isGatewayStatus, isNetworkError } from "../../lib/errors";
 import { localDb } from "../../lib/localDb";
 import { enqueueOutbox } from "./outbox";
 
@@ -73,8 +73,11 @@ export async function writeTableRow(
       : op === "update" ? supabase.from(table).update(row).eq("id", id)
       : supabase.from(table).delete().eq("id", id);
 
-    const { error } = await query;
-    if (error && isNetworkError(error)) {
+    const { error, status } = await query;
+    // postgrest-js reports the HTTP status beside `error`, not inside it —
+    // a gateway failure (502/503/504, or 0 for a fetch failure) means the
+    // write may not have reached Postgres, so queue it like a network error.
+    if (error && (isNetworkError(error) || isGatewayStatus(status))) {
       return queueForLater();
     }
     if (!error) await mirrorLocally(table, op, appRow, id);

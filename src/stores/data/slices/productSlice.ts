@@ -5,6 +5,7 @@ import { supabase, dbExec } from "../../../lib/supabase";
 import { findProductForScan } from "../../../features/pos/barcodeLookup";
 import { mapBarcodeWriteError, normalizeBarcodeValue } from "../../../lib/barcodeValidation";
 import { sanitizeProductUnits } from "../../../features/catalog/productUnits";
+import { callRpc, newIdempotencyKey, ONLINE_ONLY_RETRIES } from "../idempotentRpc";
 
 export const createProductSlice: StateCreator<DataState, [], [], ProductState> = (set, get) => ({
   products: [],
@@ -86,12 +87,14 @@ export const createProductSlice: StateCreator<DataState, [], [], ProductState> =
     // authenticated). The SECURITY DEFINER RPC checks `product:delete`,
     // clears inventory rows, then deletes the product — barcodes and
     // price tiers cascade automatically.
-    const { error } = await supabase.rpc("delete_product", {
-      p_product_id: productId,
-    });
+    const { error } = await callRpc(
+      "delete_product",
+      { p_product_id: productId, p_idempotency_key: newIdempotencyKey() },
+      { retries: ONLINE_ONLY_RETRIES },
+    );
     if (error) {
       console.error("[DB] deleteProduct failed:", error);
-      throw new Error(error.message);
+      throw error;
     }
 
     set((state) => ({

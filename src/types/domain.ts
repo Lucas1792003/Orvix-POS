@@ -139,6 +139,10 @@ export interface User {
   email?: string;
   role: Role;
   shopId?: string;
+  /** Migration 059 — every real user row has one; optional here (not
+   *  required) since plenty of call sites (tests, ad-hoc User construction)
+   *  don't know or care about org scoping yet — nothing enforces it. */
+  orgId?: string;
   authId?: string; // Supabase Auth account link (auth.users.id)
   /**
    * @deprecated Legacy replacement-model permissions. Superseded by
@@ -362,6 +366,10 @@ export interface PurchaseOrder {
   /** Set on a PO received locally while offline, cleared once the outbox
    *  entry that produced it has synced. See stores/data/outbox.ts. */
   pendingSync?: boolean;
+  /** Idempotency key of the operation that created/changed this row while
+   *  offline — the same UUID the queued RPC sends as `p_idempotency_key`.
+   *  Lets a provisional record be matched to its outbox entry. */
+  idempotencyKey?: string;
   /** Auto-touched on every UPDATE (migration 044) — drives delta pull-sync,
    *  see stores/data/deltaSync.ts. */
   updatedAt?: string;
@@ -405,6 +413,10 @@ export interface SupplierPayment {
   /** Set on a payment recorded locally while offline, cleared once the
    *  outbox entry that produced it has synced. See stores/data/outbox.ts. */
   pendingSync?: boolean;
+  /** Idempotency key of the operation that created/changed this row while
+   *  offline — the same UUID the queued RPC sends as `p_idempotency_key`.
+   *  Lets a provisional record be matched to its outbox entry. */
+  idempotencyKey?: string;
 }
 
 // Stock Transfer Between Shops
@@ -431,6 +443,10 @@ export interface StockTransfer {
    *  once the outbox entry that produced it has synced. See
    *  stores/data/outbox.ts. */
   pendingSync?: boolean;
+  /** Idempotency key of the operation that created/changed this row while
+   *  offline — the same UUID the queued RPC sends as `p_idempotency_key`.
+   *  Lets a provisional record be matched to its outbox entry. */
+  idempotencyKey?: string;
   /** Auto-touched on every UPDATE (migration 044) — drives delta pull-sync,
    *  see stores/data/deltaSync.ts. */
   updatedAt?: string;
@@ -496,6 +512,10 @@ export interface InventoryMovement {
   /** Set on a movement created locally while offline, cleared once the
    *  outbox entry that produced it has synced. See stores/data/outbox.ts. */
   pendingSync?: boolean;
+  /** Idempotency key of the operation that created/changed this row while
+   *  offline — the same UUID the queued RPC sends as `p_idempotency_key`.
+   *  Lets a provisional record be matched to its outbox entry. */
+  idempotencyKey?: string;
 }
 
 // Legacy movement type alias for backward compatibility
@@ -515,6 +535,10 @@ export interface Shift {
   /** Set on a shift opened/closed locally while offline, cleared once the
    *  outbox entry that produced it has synced. See stores/data/outbox.ts. */
   pendingSync?: boolean;
+  /** Idempotency key of the operation that created/changed this row while
+   *  offline — the same UUID the queued RPC sends as `p_idempotency_key`.
+   *  Lets a provisional record be matched to its outbox entry. */
+  idempotencyKey?: string;
   /** Auto-touched on every UPDATE (migration 044) — drives delta pull-sync,
    *  see stores/data/deltaSync.ts. */
   updatedAt?: string;
@@ -539,6 +563,10 @@ export interface Sale {
    *  receiptNo is a placeholder until the real complete_sale RPC runs).
    *  Cleared once the outbox entry syncs. See stores/data/outbox.ts. */
   pendingSync?: boolean;
+  /** Idempotency key of the operation that created/changed this row while
+   *  offline — the same UUID the queued RPC sends as `p_idempotency_key`.
+   *  Lets a provisional record be matched to its outbox entry. */
+  idempotencyKey?: string;
 }
 
 export interface SaleItem {
@@ -587,6 +615,10 @@ export interface RefundVoidRequest {
   /** Set on a request created locally while offline, cleared once the
    *  outbox entry that produced it has synced. See stores/data/outbox.ts. */
   pendingSync?: boolean;
+  /** Idempotency key of the operation that created/changed this row while
+   *  offline — the same UUID the queued RPC sends as `p_idempotency_key`.
+   *  Lets a provisional record be matched to its outbox entry. */
+  idempotencyKey?: string;
 }
 
 export interface AuditLog {

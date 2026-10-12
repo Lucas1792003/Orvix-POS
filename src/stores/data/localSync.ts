@@ -1,4 +1,4 @@
-import { localDb, type StoredBusinessProfile } from "../../lib/localDb";
+import { localDb, SNAPSHOT_TABLE_NAMES, type StoredBusinessProfile } from "../../lib/localDb";
 import type { DataState } from "./types";
 import type { BusinessProfile } from "../../types";
 
@@ -17,14 +17,16 @@ export type LocalSnapshot = Pick<DataState,
 >;
 
 /**
- * Replace the entire local mirror with a fresh full snapshot from
- * `loadData()`. Phase 1 only ever does a full replace (matching today's
- * full-reload semantics) — cursor-based delta merge is a later phase, once
- * `updated_at` exists broadly enough to support it.
+ * Replace the local mirror of the server snapshot with a fresh full load.
+ * Only the snapshot tables are cleared — `syncOutbox`, `provisionalIdMap`,
+ * `syncMeta`, `authCache` and `syncState` are device-local state that must
+ * survive every load (a queued sale lost here is a lost sale). Cursor-based
+ * delta merge lives in deltaSync.ts.
  */
 export async function persistSnapshotToLocal(snapshot: LocalSnapshot): Promise<void> {
-  await localDb.transaction("rw", localDb.tables, async () => {
-    await Promise.all(localDb.tables.map((table) => table.clear()));
+  const snapshotTables = SNAPSHOT_TABLE_NAMES.map((name) => localDb.table(name));
+  await localDb.transaction("rw", [...snapshotTables, localDb.syncMeta], async () => {
+    await Promise.all(snapshotTables.map((table) => table.clear()));
     await Promise.all([
       localDb.shops.bulkPut(snapshot.shops),
       localDb.users.bulkPut(snapshot.users),
@@ -58,6 +60,51 @@ export async function persistSnapshotToLocal(snapshot: LocalSnapshot): Promise<v
     ]);
     await localDb.syncMeta.put({ table: SNAPSHOT_MARKER, lastPulledAt: new Date().toISOString() });
   });
+}
+
+// Snapshot tables whose rows an offline write can *create* (as opposed to
+// update in place) — the ones outbox entries list under `provisional`.
+const PROVISIONAL_TABLES = new Set<keyof LocalSnapshot>([
+  "sales", "saleItems", "movements", "shifts", "refunds", "supplierPayments",
+]);
+
+/**
+ * A full load replaces every table with the server's rows — which would
+ * make a sale rung up offline vanish from the screen (and from the local
+ * mirror) until its replay lands, and for good if the replay is rejected.
+ * Merge back the provisional rows that still have a live outbox entry
+ * (pending, retrying or conflicted); rows whose entry was dismissed are
+ * dropped on the next load, as before. Never throws — on any failure the
+ * snapshot is returned unchanged.
+ */
+export async function mergeProvisionalRows(snapshot: LocalSnapshot): Promise<LocalSnapshot> {
+  try {
+    const entries = await localDb.syncOutbox.toArray();
+    const idsByTable = new Map<keyof LocalSnapshot, Set<string>>();
+    for (const entry of entries) {
+      for (const { table, ids } of entry.provisional ?? []) {
+        if (!PROVISIONAL_TABLES.has(table as keyof LocalSnapshot)) continue;
+        const set = idsByTable.get(table as keyof LocalSnapshot) ?? new Set<string>();
+        for (const id of ids) set.add(id);
+        idsByTable.set(table as keyof LocalSnapshot, set);
+      }
+    }
+    if (idsByTable.size === 0) return snapshot;
+
+    const merged: LocalSnapshot = { ...snapshot };
+    for (const [table, ids] of idsByTable) {
+      const serverRows = snapshot[table] as unknown as { id?: string }[];
+      const serverIds = new Set(serverRows.map((row) => row.id));
+      const localRows = (await localDb.table(table).bulkGet([...ids])) as ({ id?: string } | undefined)[];
+      const keep = localRows.filter((row): row is { id: string } => Boolean(row?.id) && !serverIds.has(row!.id));
+      if (keep.length === 0) continue;
+      (merged as unknown as Record<string, unknown[]>)[table] = [...keep, ...serverRows];
+    }
+    return merged;
+  } catch (err) {
+    console.error("[DB] Failed to merge provisional rows into the snapshot:", err);
+    return snapshot;
+  }
 }
 
 /** Read the full local mirror back out, or null if nothing was ever synced. */

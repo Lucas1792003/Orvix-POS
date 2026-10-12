@@ -20,6 +20,12 @@ export const ERROR_MESSAGES = {
   unknown: "Something went wrong. Please try again.",
 } as const;
 
+// Error name used by the client-side offline authorisation gate
+// (stores/authStore.ts assertOfflineWriteEligible). Its message is written
+// for the cashier and must be shown as is — while offline, the generic
+// mapping below would otherwise turn it into "Network error".
+export const OFFLINE_AUTHORIZATION_ERROR = "OfflineAuthorizationError";
+
 // Postgres SQLSTATE codes we care about.
 // 42501 - insufficient_privilege (RLS / RBAC deny)
 // 23505 - unique_violation
@@ -47,9 +53,45 @@ const NETWORK_PHRASES = [
   "load failed",
   "the network connection was lost",
   "ecconnrefused",
+  "econnrefused",
+  "econnreset",
   "enetunreach",
   "etimedout",
   "request timeout",
+  "request timed out",
+  "aborterror",
+  "signal timed out",
+  "the operation was aborted",
+  // Gateway-level failures (nginx / Envoy / Kong in front of PostgREST):
+  // the request never reached the database, so for the online path these
+  // are "network" (fall back to the queue), not a server rejection.
+  "bad gateway",
+  "service unavailable",
+  "gateway timeout",
+  "gateway time-out",
+  "upstream connect error",
+  "no healthy upstream",
+];
+
+// HTTP statuses that mean "the request may not have reached Postgres" —
+// gateway-level, retryable from the online path by falling back to the
+// outbox. (0 = fetch failure / abort, as postgrest-js reports it.)
+const GATEWAY_STATUSES = new Set([0, 502, 503, 504]);
+
+// Statuses that are transient during an outbox replay: everything a later
+// retry with the same idempotency key can legitimately succeed on. 401 is
+// here because PostgREST answers an expired JWT with 401 and the next pass
+// refreshes the token first (see outbox.ts ensureSessionForDrain).
+const TRANSIENT_STATUSES = new Set([0, 401, 408, 425, 429, 500, 502, 503, 504]);
+
+const TRANSIENT_PHRASES = [
+  "too many requests",
+  "rate limit",
+  "internal server error",
+  "statement timeout",
+  "canceling statement due to statement timeout",
+  "connection pool",
+  "too many connections",
 ];
 
 const STORAGE_BUCKET_MISSING_PHRASES = [
@@ -68,6 +110,7 @@ const EXPIRED_SESSION_PHRASES = [
   "jwt expired",
   "invalid jwt",
   "token has expired",
+  "token is expired",
   "session_not_found",
   "session has expired",
 ];
@@ -126,11 +169,44 @@ export const isPermissionError = (error: AnyError): boolean => {
   return containsAny(errorBlob(error), PERMISSION_PHRASES);
 };
 
+/** 0 (fetch failure/abort), 502, 503, 504 — the request may never have
+ *  reached Postgres. Callers that only have the response status (not the
+ *  error object) use this to decide on the offline fallback. */
+export const isGatewayStatus = (status: unknown): boolean =>
+  typeof status === "number" && GATEWAY_STATUSES.has(status);
+
+const httpStatus = (error: AnyError): number | undefined =>
+  typeof error?.status === "number" ? error.status : undefined;
+
 export const isNetworkError = (error: AnyError): boolean => {
   if (!error) return false;
   if (typeof navigator !== "undefined" && navigator.onLine === false) return true;
   if (error instanceof TypeError && lower(error.message).includes("fetch")) return true;
+  // supabase-js's auth client wraps fetch failures in AuthRetryableFetchError.
+  if (error?.name === "AuthRetryableFetchError") return true;
+  const status = httpStatus(error);
+  if (status !== undefined && GATEWAY_STATUSES.has(status)) return true;
   return containsAny(errorBlob(error), NETWORK_PHRASES);
+};
+
+/**
+ * Should a failed request be retried later with the same idempotency key?
+ * Broader than isNetworkError: also covers 5xx from PostgREST itself, rate
+ * limiting, timeouts and an expired JWT (the next attempt refreshes the
+ * token first). `status` is the HTTP status of the *response* when the
+ * caller has it (postgrest-js returns it next to `error`, not inside it).
+ * Anything that isn't transient is a permanent rejection of this exact
+ * request and must not be retried automatically.
+ */
+export const isTransientError = (error: AnyError, status?: number): boolean => {
+  if (status !== undefined && TRANSIENT_STATUSES.has(status)) return true;
+  if (!error) return false;
+  const own = httpStatus(error);
+  if (own !== undefined && TRANSIENT_STATUSES.has(own)) return true;
+  if (isNetworkError(error)) return true;
+  if (errorCode(error) === "PGRST301") return true;
+  if (isExpiredSessionError(error)) return true;
+  return containsAny(errorBlob(error), TRANSIENT_PHRASES);
 };
 
 export const isDuplicateError = (error: AnyError): boolean => {
@@ -219,6 +295,9 @@ const looksLikeFriendlyMessage = (message: string): boolean => {
 // `fallback` is shown only when nothing else is available.
 export const getErrorMessage = (error: AnyError, fallback?: string): string => {
   if (!error) return fallback ?? ERROR_MESSAGES.unknown;
+  if (error?.name === OFFLINE_AUTHORIZATION_ERROR && typeof error.message === "string" && error.message) {
+    return error.message;
+  }
 
   const mapped = mapSupabaseError(error);
   // If we got a *specific* mapping (anything other than the generic unknown),

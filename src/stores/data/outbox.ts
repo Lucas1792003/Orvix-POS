@@ -1,10 +1,40 @@
 import { supabase } from "../../lib/supabase";
-import { localDb, type SyncOutboxEntry } from "../../lib/localDb";
+import { localDb, SYNC_STATE_KEYS, type SyncOutboxEntry } from "../../lib/localDb";
 import { newId } from "../../lib/id";
+import { isDuplicateError, isNetworkError } from "../../lib/errors";
 import { replayTableWrite } from "./tableWrite";
+import { callRpc, IDEMPOTENCY_KEY_ARG, newIdempotencyKey, runRequest, type RpcOutcome } from "./idempotentRpc";
 import { useAuthStore } from "../authStore";
+import { useSyncStore } from "../syncStore";
+import { touchAuthCache } from "../authCache";
 
-type EnqueueInput = Pick<SyncOutboxEntry, "kind" | "name" | "args" | "shopId" | "provisional" | "refs" | "table" | "op" | "row" | "id">;
+type EnqueueInput = Pick<
+  SyncOutboxEntry,
+  "kind" | "name" | "args" | "shopId" | "provisional" | "refs" | "table" | "op" | "row" | "id" | "idempotencyKey"
+>;
+
+// Queue position, assigned inside the enqueue transaction. `createdAt` has
+// millisecond precision, so two entries queued in the same tick (a shift
+// opened and the first sale rung up against it) tie on it — and the
+// dependent one could be drained first. `seq` is the authoritative order;
+// createdAt is display/age only. Stored on the row (Dexie keeps undeclared
+// fields; it's never indexed — the queue is read whole and sorted in memory).
+type OutboxRow = SyncOutboxEntry & { seq?: number };
+
+/** Oldest-first by queue position. Entries written before `seq` existed
+ *  (none in production yet) sort first, by createdAt then id. */
+export const byQueueOrder = (a: OutboxRow, b: OutboxRow): number => {
+  if (a.seq != null && b.seq != null) return a.seq - b.seq;
+  if (a.seq == null && b.seq == null) {
+    return a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.localId.localeCompare(b.localId);
+  }
+  return a.seq == null ? -1 : 1;
+};
+
+async function pendingInQueueOrder(): Promise<OutboxRow[]> {
+  const rows = (await localDb.syncOutbox.where("status").anyOf("pending", "failed").toArray()) as OutboxRow[];
+  return rows.sort(byQueueOrder);
+}
 
 // RPCs that accept p_expected_actor_id (see migration 055) — the queuing
 // user's app id is stamped on at enqueue time and checked again at replay,
@@ -23,19 +53,40 @@ const ACTOR_STAMPED_RPCS = new Set([
   "receive_stock_transfer",
 ]);
 
+/**
+ * Queue a mutation for replay. RPC entries always carry an idempotency key
+ * (the caller's, minted when the operation was created — or a fresh one
+ * for legacy callers), stored both on the entry and inside `args` as
+ * `p_idempotency_key` so the replay payload is exactly what gets sent.
+ */
 export async function enqueueOutbox(entry: EnqueueInput): Promise<void> {
-  const args =
-    entry.kind === "rpc" && entry.args && ACTOR_STAMPED_RPCS.has(entry.name)
-      ? { ...entry.args, p_expected_actor_id: useAuthStore.getState().currentUserId ?? null }
-      : entry.args;
-  await localDb.syncOutbox.put({
+  let args = entry.args;
+  let idempotencyKey = entry.idempotencyKey;
+  if (entry.kind === "rpc") {
+    const existing = args?.[IDEMPOTENCY_KEY_ARG];
+    idempotencyKey = idempotencyKey ?? (typeof existing === "string" ? existing : newIdempotencyKey());
+    args = { ...(args ?? {}), [IDEMPOTENCY_KEY_ARG]: idempotencyKey };
+    if (ACTOR_STAMPED_RPCS.has(entry.name)) {
+      args = { ...args, p_expected_actor_id: useAuthStore.getState().currentUserId ?? null };
+    }
+  }
+  const row: OutboxRow = {
     ...entry,
     args,
+    idempotencyKey,
     localId: newId("outbox"),
     createdAt: new Date().toISOString(),
     status: "pending",
     attempts: 0,
+  };
+  // The read-max + put run in one transaction so two enqueues cannot be
+  // handed the same seq.
+  await localDb.transaction("rw", localDb.syncOutbox, async () => {
+    const existing = (await localDb.syncOutbox.toArray()) as OutboxRow[];
+    row.seq = existing.reduce((max, e) => Math.max(max, e.seq ?? 0), 0) + 1;
+    await localDb.syncOutbox.put(row);
   });
+  void refreshSyncStatus();
 }
 
 /** Record that a provisional (offline-minted) id turned out to be `realId`
@@ -87,6 +138,192 @@ export function registerOutboxReconciler(rpcName: string, reconciler: Reconciler
   reconcilers[rpcName] = reconciler;
 }
 
+// ----------------------------------------------------------------------
+// Backoff
+// ----------------------------------------------------------------------
+
+export const BACKOFF_BASE_MS = 1_000;
+export const BACKOFF_CAP_MS = 5 * 60 * 1_000;
+export const BACKOFF_JITTER = 0.2;
+
+/** Delay before attempt number `attempts + 1`, after `attempts` transient
+ *  failures: 1 s, 2 s, 4 s … capped at 5 min, ±20 % jitter so a fleet of
+ *  tills reconnecting after the same outage doesn't retry in lockstep.
+ *  Pure — `random` is injectable for tests. */
+export function computeBackoffMs(attempts: number, random: () => number = Math.random): number {
+  const exponential = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1));
+  const jitter = 1 + (random() * 2 - 1) * BACKOFF_JITTER;
+  return Math.min(BACKOFF_CAP_MS, Math.max(0, Math.round(exponential * jitter)));
+}
+
+// ----------------------------------------------------------------------
+// Persisted sync-state flags (survive reloads; never cleared by a load)
+// ----------------------------------------------------------------------
+
+export async function readNeedsReauth(): Promise<boolean> {
+  try {
+    return (await localDb.syncState.get(SYNC_STATE_KEYS.needsReauth))?.flag === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Flag that the server rejected this device's session. Set by the drain
+ *  preflight and by a full load that finds the session gone (see
+ *  stores/data/index.ts); cleared by clearNeedsReauth after a sign-in. */
+export async function setNeedsReauth(reason: string): Promise<void> {
+  await localDb.syncState.put({
+    key: SYNC_STATE_KEYS.needsReauth, flag: true, reason, updatedAt: new Date().toISOString(),
+  });
+  useSyncStore.getState().setStatus({ needsReauth: true });
+}
+
+/** Called after a successful sign-in / token refresh (AppLayout's auth
+ *  listener) and by the drain itself once a session is confirmed valid. */
+export async function clearNeedsReauth(): Promise<void> {
+  await localDb.syncState.delete(SYNC_STATE_KEYS.needsReauth);
+  useSyncStore.getState().setStatus({ needsReauth: false });
+}
+
+/** Recount the queue and push it to the UI store. */
+export async function refreshSyncStatus(): Promise<void> {
+  try {
+    const [pendingCount, conflictCount, needsReauth] = await Promise.all([
+      countPendingOutbox(),
+      localDb.syncOutbox.where("status").equals("conflict").count(),
+      readNeedsReauth(),
+    ]);
+    useSyncStore.getState().setStatus({ pendingCount, conflictCount, needsReauth });
+  } catch (err) {
+    console.error("[DB] Failed to read sync status:", err);
+  }
+}
+
+// ----------------------------------------------------------------------
+// Session preflight
+// ----------------------------------------------------------------------
+
+type SessionCheck = "ok" | "network" | "needs-reauth";
+
+// supabase-js refreshes a token that is within this margin of expiry; we
+// use the same margin so a token about to expire mid-drain is refreshed up
+// front instead of producing a 401 on the first entry.
+const EXPIRY_MARGIN_MS = 30_000;
+
+const sessionExpired = (session: { expires_at?: number } | null | undefined): boolean =>
+  typeof session?.expires_at === "number" && session.expires_at * 1000 - Date.now() < EXPIRY_MARGIN_MS;
+
+/**
+ * Make sure replaying is worth attempting: getSession() reads (and, if the
+ * access token is expired, refreshes) the persisted session. A refresh that
+ * fails because the network is down leaves everything pending for the next
+ * pass; one the server *rejects* (invalid/revoked refresh token — at which
+ * point supabase-js has already dropped the session) means this device
+ * must sign in again before anything is sent. Nothing is discarded either
+ * way. See docs/selfhost-migration/phase-d/offline-authorization.md §4.
+ */
+async function ensureSessionForDrain(): Promise<SessionCheck> {
+  let sessionResult: Awaited<ReturnType<typeof supabase.auth.getSession>>;
+  try {
+    sessionResult = await supabase.auth.getSession();
+  } catch (err) {
+    return isNetworkError(err) ? "network" : "needs-reauth";
+  }
+  if (sessionResult.error) return isNetworkError(sessionResult.error) ? "network" : "needs-reauth";
+  const session = sessionResult.data?.session;
+  if (!session) return "needs-reauth";
+  if (!sessionExpired(session)) return "ok";
+
+  // getSession() normally refreshes an expired token itself; if it handed
+  // back a stale one anyway, refresh explicitly before sending anything.
+  let refreshed: Awaited<ReturnType<typeof supabase.auth.refreshSession>>;
+  try {
+    refreshed = await supabase.auth.refreshSession();
+  } catch (err) {
+    return isNetworkError(err) ? "network" : "needs-reauth";
+  }
+  if (refreshed.error) return isNetworkError(refreshed.error) ? "network" : "needs-reauth";
+  return refreshed.data?.session ? "ok" : "needs-reauth";
+}
+
+// ----------------------------------------------------------------------
+// Cross-instance drain lock
+// ----------------------------------------------------------------------
+
+const DRAIN_LOCK_NAME = "pos-outbox-drain";
+const LEASE_TTL_MS = 60_000;
+// One id per JS context (window / worker / test module instance).
+const instanceId = newId("drain");
+let leaseHeld = false;
+
+async function acquireLease(): Promise<boolean> {
+  return localDb.transaction("rw", localDb.syncState, async () => {
+    const now = Date.now();
+    const lease = await localDb.syncState.get(SYNC_STATE_KEYS.drainLease);
+    const heldByOther =
+      lease?.ownerId && lease.ownerId !== instanceId && lease.expiresAt && Date.parse(lease.expiresAt) > now;
+    if (heldByOther) return false;
+    await localDb.syncState.put({
+      key: SYNC_STATE_KEYS.drainLease, ownerId: instanceId,
+      expiresAt: new Date(now + LEASE_TTL_MS).toISOString(), updatedAt: new Date(now).toISOString(),
+    });
+    return true;
+  });
+}
+
+async function renewLease(): Promise<void> {
+  if (!leaseHeld) return;
+  const now = Date.now();
+  await localDb.syncState.put({
+    key: SYNC_STATE_KEYS.drainLease, ownerId: instanceId,
+    expiresAt: new Date(now + LEASE_TTL_MS).toISOString(), updatedAt: new Date(now).toISOString(),
+  });
+}
+
+async function releaseLease(): Promise<void> {
+  const lease = await localDb.syncState.get(SYNC_STATE_KEYS.drainLease);
+  if (lease?.ownerId === instanceId) await localDb.syncState.delete(SYNC_STATE_KEYS.drainLease);
+}
+
+type LockManagerLike = {
+  request: (name: string, options: { ifAvailable: boolean }, callback: (lock: unknown) => Promise<unknown>) => Promise<unknown>;
+};
+
+const getLockManager = (): LockManagerLike | null => {
+  if (typeof navigator === "undefined") return null;
+  const locks = (navigator as Navigator & { locks?: LockManagerLike }).locks;
+  return locks && typeof locks.request === "function" ? locks : null;
+};
+
+/**
+ * Run `fn` while holding the drain lock. Web Locks (Chromium/Electron,
+ * shared across windows of the same origin) when available; otherwise a
+ * Dexie lease row with a 60 s TTL, renewed per entry while draining, so a
+ * crashed holder frees the queue within a minute. Either way a second
+ * instance finding the lock taken returns "locked" without sending.
+ */
+async function withDrainLock(fn: () => Promise<DrainResult>): Promise<DrainResult> {
+  const locks = getLockManager();
+  if (locks) {
+    const result = await locks.request(DRAIN_LOCK_NAME, { ifAvailable: true }, async (lock) =>
+      lock ? fn() : "locked",
+    );
+    return result as DrainResult;
+  }
+  if (!(await acquireLease())) return "locked";
+  leaseHeld = true;
+  try {
+    return await fn();
+  } finally {
+    leaseHeld = false;
+    await releaseLease().catch(() => undefined);
+  }
+}
+
+// ----------------------------------------------------------------------
+// Drain
+// ----------------------------------------------------------------------
+
 let draining = false;
 
 // How long an entry can sit blocked on an unresolved `refs` dependency
@@ -96,109 +333,194 @@ let draining = false;
 // resolve on its own.
 const STUCK_ENTRY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
+export type DrainResult =
+  | "drained"        // queue empty, or everything ready was sent (or conflicted)
+  | "already-running"
+  | "locked"         // another window/instance holds the drain lock
+  | "network"        // transient failure (or session refresh failed on the network) — pass stopped, entries pending
+  | "needs-reauth"   // server rejected the session — nothing sent, entries kept
+  | "backoff";       // the head-of-line entry is still in its backoff window
+
 /**
- * Replay queued mutations against Supabase, oldest first. Safe to call
- * repeatedly (on reconnect, on every background refresh) — a no-op while
- * already draining or when the queue is empty.
+ * Replay queued mutations against Supabase in queue order (see
+ * byQueueOrder — enqueue sequence, not the millisecond clock). Safe to call
+ * repeatedly (on reconnect, on every background refresh, after a token
+ * refresh) — a no-op while already draining, locked by another instance,
+ * or when the queue is empty.
  *
- * A network failure stops the whole pass (nothing else was going to reach
- * the server either) and leaves the entry `pending` for the next attempt. A
- * response the server actually returned an error for (e.g. "insufficient
- * stock" because another till sold the last unit first) is a real conflict,
- * not a retry candidate — it's flagged for manual review and draining
- * continues, since a rejected sale on one till shouldn't block another.
+ * A transient failure (network/gateway, timeout, 5xx, 429, expired JWT)
+ * stops the whole pass — later entries may depend on this one, and the
+ * server was probably unreachable for them too — and leaves the entry
+ * `pending` with a capped exponential backoff and no attempt cap. A
+ * permanent rejection (validation, RLS, business rule, IDEMPOTENCY_MISMATCH)
+ * is a real conflict: flagged for manual review, and draining continues so
+ * a rejected sale on one till doesn't block another.
  */
-export async function drainOutbox(): Promise<void> {
-  if (draining) return;
+export async function drainOutbox(): Promise<DrainResult> {
+  if (draining) return "already-running";
   draining = true;
+  useSyncStore.getState().setStatus({ isDraining: true });
   try {
-    await pruneProvisionalIdMap();
-    for (;;) {
-      const pending = await localDb.syncOutbox.where("status").anyOf("pending", "failed").sortBy("createdAt");
-
-      // Skip past entries still waiting on a dependency (e.g. a sale queued
-      // against a shift opened in the same offline session) rather than
-      // stalling the whole queue behind them.
-      let entry: SyncOutboxEntry | null = null;
-      let resolvedArgs: Record<string, unknown> | null = null;
-      for (const candidate of pending) {
-        const args = await resolveArgs(candidate);
-        if (args) {
-          entry = candidate;
-          resolvedArgs = args;
-          break;
-        }
-      }
-      if (!entry) {
-        // Nothing ready to send. Flag anything that's been blocked on a
-        // dependency for too long — otherwise it sits `pending` forever,
-        // indistinguishable from "hasn't had a chance yet".
-        const now = Date.now();
-        for (const candidate of pending) {
-          if (!candidate.refs?.length) continue;
-          if (now - Date.parse(candidate.createdAt) < STUCK_ENTRY_MAX_AGE_MS) continue;
-          await localDb.syncOutbox.update(candidate.localId, {
-            status: "conflict",
-            lastError: "Stuck waiting on a dependency that never synced — its parent entry may need to be retried or this one dismissed.",
-          });
-        }
-        return;
-      }
-
-      await localDb.syncOutbox.update(entry.localId, { status: "syncing" });
-
-      let response: { data?: unknown; error: { message: string } | null };
-      try {
-        response = entry.kind === "table_write"
-          ? await replayTableWrite(entry.table!, entry.op!, entry.row, entry.id!)
-          : await supabase.rpc(entry.name, resolvedArgs ?? {});
-      } catch (networkErr) {
-        await localDb.syncOutbox.update(entry.localId, {
-          status: "pending",
-          attempts: entry.attempts + 1,
-          lastError: networkErr instanceof Error ? networkErr.message : String(networkErr),
-        });
-        return;
-      }
-
-      if (response.error) {
-        await localDb.syncOutbox.update(entry.localId, {
-          status: "conflict",
-          attempts: entry.attempts + 1,
-          lastError: response.error.message,
-        });
-        continue;
-      }
-
-      // table_write entries need no reconciliation: the row content was
-      // already client-chosen and applied optimistically (last-write-wins),
-      // so a successful replay just confirms it — nothing new to merge in.
-      const reconcile = reconcilers[entry.name];
-      if (reconcile) reconcile(response.data, entry.provisional);
-      await localDb.syncOutbox.delete(entry.localId);
-    }
+    return await withDrainLock(runDrainPass);
   } finally {
     draining = false;
+    useSyncStore.getState().setStatus({ isDraining: false });
+    await refreshSyncStatus();
   }
 }
 
+async function runDrainPass(): Promise<DrainResult> {
+  await pruneProvisionalIdMap();
+  const queued = await localDb.syncOutbox.where("status").anyOf("pending", "failed").count();
+  if (queued === 0) return "drained";
+
+  const session = await ensureSessionForDrain();
+  if (session === "network") return "network";
+  if (session === "needs-reauth") {
+    await setNeedsReauth("The server rejected this device's sign-in. Sign in again to resume syncing.");
+    return "needs-reauth";
+  }
+  await clearNeedsReauth();
+
+  for (;;) {
+    await renewLease();
+    const pending = await pendingInQueueOrder();
+
+    // Skip past entries still waiting on a dependency (e.g. a sale queued
+    // against a shift opened in the same offline session) rather than
+    // stalling the whole queue behind them.
+    let entry: SyncOutboxEntry | null = null;
+    let resolvedArgs: Record<string, unknown> | null = null;
+    for (const candidate of pending) {
+      const args = await resolveArgs(candidate);
+      if (args) {
+        entry = candidate;
+        resolvedArgs = args;
+        break;
+      }
+    }
+    if (!entry) {
+      // Nothing ready to send. Flag anything that's been blocked on a
+      // dependency for too long — otherwise it sits `pending` forever,
+      // indistinguishable from "hasn't had a chance yet".
+      const now = Date.now();
+      for (const candidate of pending) {
+        if (!candidate.refs?.length) continue;
+        if (now - Date.parse(candidate.createdAt) < STUCK_ENTRY_MAX_AGE_MS) continue;
+        await localDb.syncOutbox.update(candidate.localId, {
+          status: "conflict",
+          failureKind: "permanent",
+          lastError: "Stuck waiting on a dependency that never synced — its parent entry may need to be retried or this one dismissed.",
+        });
+      }
+      return "drained";
+    }
+
+    // The head of the line is still backing off from a transient failure.
+    // Stop here rather than let later (possibly dependent) entries overtake
+    // it; the periodic trigger will come back once the window has passed.
+    if (entry.nextAttemptAt && Date.parse(entry.nextAttemptAt) > Date.now()) return "backoff";
+
+    // Entries queued before Phase D carry no key (the Dexie v2 upgrade
+    // assigns one, but be safe) — mint it now so that from this attempt on
+    // every retry is idempotent.
+    if (entry.kind === "rpc" && !entry.idempotencyKey) {
+      const key = typeof resolvedArgs?.[IDEMPOTENCY_KEY_ARG] === "string"
+        ? (resolvedArgs[IDEMPOTENCY_KEY_ARG] as string)
+        : newIdempotencyKey();
+      entry.idempotencyKey = key;
+      entry.args = { ...(entry.args ?? {}), [IDEMPOTENCY_KEY_ARG]: key };
+      resolvedArgs = { ...(resolvedArgs ?? {}), [IDEMPOTENCY_KEY_ARG]: key };
+      await localDb.syncOutbox.update(entry.localId, { idempotencyKey: key, args: entry.args });
+    }
+
+    await localDb.syncOutbox.update(entry.localId, { status: "syncing" });
+
+    const outcome: RpcOutcome = entry.kind === "table_write"
+      ? await runRequest(replayTableWrite(entry.table!, entry.op!, entry.row, entry.id!), entry.name)
+      : await callRpc(entry.name, resolvedArgs ?? {});
+
+    if (outcome.error) {
+      // A table_write insert's id is client-minted, so a duplicate-key
+      // reply on replay means our earlier attempt committed before the
+      // response was lost — the write is already on the server.
+      const alreadyApplied =
+        entry.kind === "table_write" && entry.op === "insert" && isDuplicateError(outcome.error);
+
+      if (!alreadyApplied && outcome.error.transient) {
+        const attempts = entry.attempts + 1;
+        await localDb.syncOutbox.update(entry.localId, {
+          status: "pending",
+          attempts,
+          failureKind: "transient",
+          lastError: outcome.error.message,
+          nextAttemptAt: new Date(Date.now() + computeBackoffMs(attempts)).toISOString(),
+        });
+        useSyncStore.getState().setStatus({ lastTransientError: outcome.error.message });
+        return "network";
+      }
+
+      if (!alreadyApplied) {
+        await localDb.syncOutbox.update(entry.localId, {
+          status: "conflict",
+          attempts: entry.attempts + 1,
+          failureKind: "permanent",
+          nextAttemptAt: undefined,
+          lastError: outcome.error.message,
+        });
+        continue;
+      }
+    }
+
+    // table_write entries need no reconciliation: the row content was
+    // already client-chosen and applied optimistically (last-write-wins),
+    // so a successful replay just confirms it — nothing new to merge in.
+    // An RPC replay that hit the server's idempotency table comes back with
+    // the original response, which is reconciled exactly like a first-time
+    // success (contract: "treat the stored response as a first-time success").
+    if (entry.kind === "table_write") void touchAuthCache();
+    const reconcile = reconcilers[entry.name];
+    if (reconcile) reconcile(outcome.data, entry.provisional);
+    await localDb.syncOutbox.delete(entry.localId);
+    useSyncStore.getState().setStatus({ lastTransientError: null });
+  }
+}
+
+// ----------------------------------------------------------------------
+// Queue inspection / management (Sync Conflicts page)
+// ----------------------------------------------------------------------
+
 export async function listOutboxConflicts(): Promise<SyncOutboxEntry[]> {
-  return localDb.syncOutbox.where("status").equals("conflict").sortBy("createdAt");
+  const rows = (await localDb.syncOutbox.where("status").equals("conflict").toArray()) as OutboxRow[];
+  return rows.sort(byQueueOrder);
 }
 
-/** Give a conflicted entry another chance — e.g. after a manager corrects
- *  the shop's stock so a re-run of the same sale might succeed. */
+/** Every entry that hasn't reached the server yet — pending (queued or
+ *  auto-retrying after a transient failure) and conflicts alike, in queue
+ *  order (the order the drain replays them), so the Sync page can show
+ *  both and tell them apart. */
+export async function listOutboxEntries(): Promise<SyncOutboxEntry[]> {
+  const rows = (await localDb.syncOutbox.toArray()) as OutboxRow[];
+  return rows.sort(byQueueOrder);
+}
+
+/** Give a conflicted (or backing-off) entry another chance right now —
+ *  e.g. after a manager corrects the shop's stock so a re-run of the same
+ *  sale might succeed. Clears the backoff window as well as the status. */
 export async function retryOutboxEntry(localId: string): Promise<void> {
-  await localDb.syncOutbox.update(localId, { status: "pending", lastError: undefined });
+  await localDb.syncOutbox.update(localId, {
+    status: "pending", lastError: undefined, nextAttemptAt: undefined, failureKind: undefined,
+  });
 }
 
-/** Stop retrying a conflicted entry. The provisional record it created
- *  (e.g. a sale flagged pendingSync) is deliberately left in place — the
- *  local write already happened and is real till activity; only the queued
- *  server replay is abandoned. A manager reconciles the record itself
- *  (refund, stock correction, etc.) separately. */
+/** Stop retrying an entry. The provisional record it created (e.g. a sale
+ *  flagged pendingSync) is deliberately left in place — the local write
+ *  already happened and is real till activity; only the queued server
+ *  replay is abandoned. A manager reconciles the record itself (refund,
+ *  stock correction, etc.) separately. */
 export async function dismissOutboxEntry(localId: string): Promise<void> {
   await localDb.syncOutbox.delete(localId);
+  void refreshSyncStatus();
 }
 
 export async function countPendingOutbox(): Promise<number> {

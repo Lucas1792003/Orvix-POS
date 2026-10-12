@@ -12,6 +12,18 @@ const isDev = !app.isPackaged;
 // non-default `npm run dev -- --port`.
 const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || "http://localhost:5173";
 
+// End-to-end automation hook (Playwright drives the real app — see
+// playwright.config.ts and e2e/). SHWE_POS_E2E=1 only (a) skips the
+// detached DevTools window in dev, which would otherwise race the app
+// window for Playwright's firstWindow(), and (b) when
+// SHWE_POS_E2E_USER_DATA is also set, redirects userData there so an
+// automated run never touches a real install's local database or session.
+// Both are no-ops for real users (neither variable is ever set by the app).
+const isE2E = process.env.SHWE_POS_E2E === "1";
+if (isE2E && process.env.SHWE_POS_E2E_USER_DATA) {
+  app.setPath("userData", process.env.SHWE_POS_E2E_USER_DATA);
+}
+
 let mainWindow = null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -110,7 +122,7 @@ function createWindow() {
 
   if (isDev) {
     void mainWindow.loadURL(DEV_SERVER_URL);
-    mainWindow.webContents.openDevTools({ mode: "detach" });
+    if (!isE2E) mainWindow.webContents.openDevTools({ mode: "detach" });
   } else {
     void mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
@@ -317,14 +329,24 @@ ipcMain.handle("printers:print-receipt", async (_event, options) => {
     }
     deviceName = match.name;
   }
+  // webContents.print() is callback-based and returns void — awaiting it
+  // directly always "succeeded", so a missing printer never reached the
+  // renderer's dialog fallback (found by the Phase E print-path check).
+  // Resolve from the callback: `success=false` with Chromium's reason (e.g.
+  // no valid printers) becomes a clean { ok: false, error } reply.
   try {
-    await mainWindow.webContents.print({
-      silent: true,
-      printBackground: true,
-      deviceName,
-      margins: { marginType: "none" },
+    const result = await new Promise((resolve) => {
+      mainWindow.webContents.print(
+        {
+          silent: true,
+          printBackground: true,
+          deviceName,
+          margins: { marginType: "none" },
+        },
+        (success, failureReason) => resolve(success ? { ok: true } : { ok: false, error: failureReason || "Print failed" }),
+      );
     });
-    return { ok: true };
+    return result;
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

@@ -1,11 +1,13 @@
 import type { StateCreator } from "zustand";
 import type { DataState, SaleState, CreateSaleInput } from "../types";
 import type { AuditLog, Inventory, InventoryMovement, Refund, Sale, SaleItem } from "../../../types";
-import { supabase } from "../../../lib/supabase";
 import { isNetworkError } from "../../../lib/errors";
 import { newId } from "../../../lib/id";
 import { calculateCartTotals } from "../../../features/pos/service";
 import { enqueueOutbox, recordIdMapping } from "../outbox";
+import {
+  beginOperation, callRpc, newIdempotencyKey, ONLINE_ONLY_RETRIES, type OperationContext,
+} from "../idempotentRpc";
 import { deleteLocalRows, putLocalRows } from "../localWrites";
 import { assertOfflineWriteEligible } from "../../authStore";
 
@@ -52,11 +54,12 @@ const mergeRefundRequest = (current: Refund[], request: Refund): Refund[] => {
 
 // Builds the complete_sale RPC payload from the cart. Shared by the online
 // call and the offline path (which stores the same payload in the outbox to
-// replay verbatim once back online) so the two can never drift apart.
+// replay verbatim once back online) so the two can never drift apart — the
+// same event time AND the same idempotency key on every attempt.
 const buildCompleteSaleArgs = (
   { shopId, shiftId, cartItems, cartDiscountPct, paymentMethod, paidMmk }: CreateSaleInput,
   get: () => DataState,
-  createdAt: string,
+  { createdAt, idempotencyKey }: OperationContext,
 ) => {
   const items = cartItems.map((item) => {
     const baseQuantitySold = item.qty * item.unitBaseQuantity;
@@ -104,6 +107,9 @@ const buildCompleteSaleArgs = (
     // offline queue-and-replay so a sale rung up at 3pm that doesn't sync
     // until 9pm still records/reports as a 3pm sale. See migration 045.
     p_created_at: createdAt,
+    // Minted when the sale was created; a retry after a lost response
+    // returns the original result instead of a second sale (Phase D).
+    p_idempotency_key: idempotencyKey,
   };
 };
 
@@ -111,12 +117,9 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   // POS checkout: a single atomic Supabase RPC. The database validates
   // permission, shop scope, the open shift, stock and overrides, then writes
   // the sale, items, inventory, movements and audit rows in one transaction.
-  const createSaleOnline = async (input: CreateSaleInput): Promise<string> => {
-    const { data, error } = await supabase.rpc(
-      "complete_sale",
-      buildCompleteSaleArgs(input, get, new Date().toISOString()),
-    );
-    if (error) throw new Error(error.message);
+  const createSaleOnline = async (input: CreateSaleInput, op: OperationContext): Promise<string> => {
+    const { data, error } = await callRpc("complete_sale", buildCompleteSaleArgs(input, get, op));
+    if (error) throw error;
     if (!data) throw new Error("Checkout returned no data.");
 
     const result = data as CompleteSaleResult;
@@ -143,10 +146,10 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   // call for replay once back online. The server is still the final say:
   // reconcileCompleteSale() below replaces this provisional record with
   // whatever the server actually accepts.
-  const createSaleOffline = async (input: CreateSaleInput): Promise<string> => {
+  const createSaleOffline = async (input: CreateSaleInput, op: OperationContext): Promise<string> => {
     await assertOfflineWriteEligible();
     const { shopId, shiftId, cashierId, cartItems, cartDiscountPct, paymentMethod, paidMmk } = input;
-    const now = new Date().toISOString();
+    const now = op.createdAt;
     const saleId = newId("sale");
 
     const items: SaleItem[] = [];
@@ -212,7 +215,7 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
       cashierId, status: "NORMAL",
       subtotalMmk: subtotal, discountMmk: itemDiscount + cartDiscount, cartDiscountPct,
       totalMmk: total, paymentMethod, paidMmk, changeMmk: Math.max(0, paidMmk - total),
-      createdAt: now, pendingSync: true,
+      createdAt: now, pendingSync: true, idempotencyKey: op.idempotencyKey,
     };
 
     set((state) => ({
@@ -231,7 +234,8 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
     await enqueueOutbox({
       kind: "rpc",
       name: "complete_sale",
-      args: buildCompleteSaleArgs(input, get, now),
+      args: buildCompleteSaleArgs(input, get, op),
+      idempotencyKey: op.idempotencyKey,
       shopId,
       refs: shiftIsProvisional ? [{ field: "p_shift_id", provisionalId: shiftId }] : undefined,
       provisional: [
@@ -247,12 +251,13 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   const createRefundVoidRequestOnline = async (
     saleId: string, type: "VOID" | "PARTIAL", reason: string,
     items: { productId: string; qtyUnits: number; amountMmk: number }[] | null,
+    op: OperationContext,
   ): Promise<void> => {
-    const { data, error } = await supabase.rpc("create_refund_void_request", {
+    const { data, error } = await callRpc("create_refund_void_request", {
       p_sale_id: saleId, p_type: type, p_reason: reason, p_items: items,
-      p_created_at: new Date().toISOString(),
+      p_created_at: op.createdAt, p_idempotency_key: op.idempotencyKey,
     });
-    if (error) throw new Error(error.message);
+    if (error) throw error;
     if (!data) throw new Error("Request returned no data.");
     const result = data as RequestResult;
 
@@ -272,16 +277,17 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   const createRefundVoidRequestOffline = async (
     saleId: string, type: "VOID" | "PARTIAL", reason: string,
     items: { productId: string; qtyUnits: number; amountMmk: number }[] | undefined, actorId: string,
+    op: OperationContext,
   ): Promise<void> => {
     await assertOfflineWriteEligible();
     const sale = get().sales.find((s) => s.id === saleId);
     if (!sale) throw new Error("Sale not found.");
 
-    const now = new Date().toISOString();
+    const now = op.createdAt;
     const request: Refund = {
       id: newId("refund"), saleId, shopId: sale.shopId, type, reason,
       createdBy: actorId, createdAt: now,
-      items, status: "REQUESTED", pendingSync: true,
+      items, status: "REQUESTED", pendingSync: true, idempotencyKey: op.idempotencyKey,
     };
     set((state) => ({
       refunds: mergeRefundRequest(state.refunds, request),
@@ -292,7 +298,11 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
     await enqueueOutbox({
       kind: "rpc",
       name: "create_refund_void_request",
-      args: { p_sale_id: saleId, p_type: type, p_reason: reason, p_items: items ?? null, p_created_at: now },
+      args: {
+        p_sale_id: saleId, p_type: type, p_reason: reason, p_items: items ?? null,
+        p_created_at: now, p_idempotency_key: op.idempotencyKey,
+      },
+      idempotencyKey: op.idempotencyKey,
       shopId: sale.shopId,
       refs: sale.pendingSync ? [{ field: "p_sale_id", provisionalId: saleId }] : undefined,
       provisional: [{ table: "refunds", ids: [request.id] }],
@@ -306,13 +316,18 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   refundVoidRequests: [],
 
   createSale: async (input: CreateSaleInput) => {
+    // One key + one event time per checkout, minted before the first
+    // attempt: if the online call fails on the network after the server
+    // committed, the queued replay carries the same key and gets the
+    // original sale back instead of ringing it up twice.
+    const op = beginOperation();
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      return createSaleOffline(input);
+      return createSaleOffline(input, op);
     }
     try {
-      return await createSaleOnline(input);
+      return await createSaleOnline(input, op);
     } catch (err) {
-      if (isNetworkError(err)) return createSaleOffline(input);
+      if (isNetworkError(err)) return createSaleOffline(input, op);
       throw err;
     }
   },
@@ -325,12 +340,21 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
     const provisionalItemIds = new Set(provisional.find((p) => p.table === "saleItems")?.ids ?? []);
     const provisionalMovementIds = new Set(provisional.find((p) => p.table === "movements")?.ids ?? []);
 
+    // The server's rows may already be in the store: a full reload that
+    // ran between the (lost-response) commit and this replay returns them
+    // alongside the still-queued provisional ones. Drop both the
+    // provisional ids and any existing copy of the authoritative ids, so a
+    // sale is never listed twice (it would inflate the shift's expected
+    // cash — Phase E finding).
+    const resultItemIds = new Set(result.items.map((i) => i.id));
+    const resultMovementIds = new Set(result.movements.map((m) => m.id));
+    const resultAuditIds = new Set(result.auditLogs.map((a) => a.id));
     set((state) => ({
-      sales: [result.sale, ...state.sales.filter((s) => !provisionalSaleIds.has(s.id))],
-      saleItems: [...result.items, ...state.saleItems.filter((i) => !i.id || !provisionalItemIds.has(i.id))],
+      sales: [result.sale, ...state.sales.filter((s) => !provisionalSaleIds.has(s.id) && s.id !== result.sale.id)],
+      saleItems: [...result.items, ...state.saleItems.filter((i) => !i.id || (!provisionalItemIds.has(i.id) && !resultItemIds.has(i.id)))],
       inventory: mergeInventory(state.inventory, result.inventory),
-      movements: [...result.movements, ...state.movements.filter((m) => !provisionalMovementIds.has(m.id))],
-      auditLogs: [...result.auditLogs, ...state.auditLogs],
+      movements: [...result.movements, ...state.movements.filter((m) => !provisionalMovementIds.has(m.id) && !resultMovementIds.has(m.id))],
+      auditLogs: [...result.auditLogs, ...state.auditLogs.filter((a) => !resultAuditIds.has(a.id))],
     }));
     void deleteLocalRows(provisional);
     void putLocalRows({
@@ -345,13 +369,14 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   },
 
   voidSale: async ({ saleId, reason }) => {
-    const { data, error } = await supabase.rpc("create_refund_void_request", {
+    const { data, error } = await callRpc("create_refund_void_request", {
       p_sale_id: saleId,
       p_type: "VOID",
       p_reason: reason,
       p_items: null,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Void request returned no data.");
     const result = data as RequestResult;
 
@@ -363,13 +388,14 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   },
 
   requestVoid: async ({ saleId, reason, actorId }) => {
+    const op = beginOperation();
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      return createRefundVoidRequestOffline(saleId, "VOID", reason, undefined, actorId);
+      return createRefundVoidRequestOffline(saleId, "VOID", reason, undefined, actorId, op);
     }
     try {
-      await createRefundVoidRequestOnline(saleId, "VOID", reason, null);
+      await createRefundVoidRequestOnline(saleId, "VOID", reason, null, op);
     } catch (err) {
-      if (isNetworkError(err)) return createRefundVoidRequestOffline(saleId, "VOID", reason, undefined, actorId);
+      if (isNetworkError(err)) return createRefundVoidRequestOffline(saleId, "VOID", reason, undefined, actorId, op);
       throw err;
     }
   },
@@ -378,13 +404,14 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
     const payload = items.map((item) => ({
       productId: item.productId, qtyUnits: item.qtyUnits, amountMmk: item.amountMmk,
     }));
+    const op = beginOperation();
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      return createRefundVoidRequestOffline(saleId, "PARTIAL", reason, payload, actorId);
+      return createRefundVoidRequestOffline(saleId, "PARTIAL", reason, payload, actorId, op);
     }
     try {
-      await createRefundVoidRequestOnline(saleId, "PARTIAL", reason, payload);
+      await createRefundVoidRequestOnline(saleId, "PARTIAL", reason, payload, op);
     } catch (err) {
-      if (isNetworkError(err)) return createRefundVoidRequestOffline(saleId, "PARTIAL", reason, payload, actorId);
+      if (isNetworkError(err)) return createRefundVoidRequestOffline(saleId, "PARTIAL", reason, payload, actorId, op);
       throw err;
     }
   },
@@ -413,8 +440,10 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
     if (!request) throw new Error("Refund or void request not found.");
 
     const rpcName = request.type === "VOID" ? "approve_void_request" : "approve_refund_request";
-    const { data, error } = await supabase.rpc(rpcName, { p_request_id: refundId });
-    if (error) throw new Error(error.message);
+    const { data, error } = await callRpc(
+      rpcName, { p_request_id: refundId, p_idempotency_key: newIdempotencyKey() }, { retries: ONLINE_ONLY_RETRIES },
+    );
+    if (error) throw error;
     if (!data) throw new Error("Approval returned no data.");
 
     const result = data as ApprovalResult;

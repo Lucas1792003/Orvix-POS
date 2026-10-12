@@ -854,6 +854,12 @@ export const translations: Record<Language, Record<string, Record<string, string
       showPassword: "Show password",
       hidePassword: "Hide password",
       firstTimeHint: "First time? Sign in with any email to create the admin account. Staff accounts are created by the admin.",
+      // Phase G: signing in never creates an account any more. The setup
+      // link appears only when the server confirms the install is empty.
+      staffCreatedByAdmin: "Staff accounts are created by the administrator. Signing in never creates an account.",
+      setupNeededHint: "This backend has no administrator yet.",
+      setupLink: "Run first-time setup",
+      backendLabel: "Backend",
       // Admin email-code verification
       verifyTitle: "Verify it's you",
       verifySubtitle: "Enter the 6-digit code sent to {email}.",
@@ -1753,6 +1759,10 @@ export const translations: Record<Language, Record<string, Record<string, string
       showPassword: "စကားဝှက် ပြရန်",
       hidePassword: "စကားဝှက် ဖျောက်ရန်",
       firstTimeHint: "ပထမဆုံးအကြိမ်လား? မည်သည့်အီးမေးလ်ဖြင့်မဆို ဝင်၍ အက်ဒမင်အကောင့် ဖန်တီးနိုင်သည်။ ဝန်ထမ်းအကောင့်များကို အက်ဒမင်က ဖန်တီးပေးသည်။",
+      staffCreatedByAdmin: "ဝန်ထမ်းအကောင့်များကို အက်ဒမင်က ဖန်တီးပေးသည်။ ဝင်ရောက်ခြင်းဖြင့် အကောင့်အသစ် မဖန်တီးပါ။",
+      setupNeededHint: "ဤ backend တွင် အက်ဒမင် မရှိသေးပါ။",
+      setupLink: "ပထမဆုံးအကြိမ် တပ်ဆင်မှု စတင်ရန်",
+      backendLabel: "Backend",
       // Admin email-code verification
       verifyTitle: "သင်ဖြစ်ကြောင်း အတည်ပြုပါ",
       verifySubtitle: "{email} သို့ ပို့ထားသော ၆ လုံး ကုဒ်ကို ထည့်ပါ။",

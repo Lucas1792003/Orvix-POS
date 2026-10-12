@@ -4,6 +4,7 @@ import { useAuthStore } from "../../stores/authStore";
 import { useAppStore } from "../../stores/appStore";
 import { useDataStore } from "../../stores/dataStore";
 import { cn } from "../../lib/utils";
+import { backendHost } from "../../lib/supabase";
 import type { Permission, Role } from "../../types";
 import { hasPermission, ROUTE_PERMISSIONS } from "../../lib/permissions";
 import { ShopSwitcher } from "./ShopSwitcher";
@@ -220,6 +221,11 @@ export const Sidebar = () => {
         <div className="sidebar-user">
           <div className="user-name">{currentUser?.name ?? "User"}</div>
           <div className="user-role">{currentUser?.role ?? ""}</div>
+          {/* Which backend this till talks to (Phase G): shown next to the
+              user so a mis-targeted build is visible from any screen. */}
+          <div className="sidebar-backend" title={`Backend: ${backendHost}`} data-testid="sidebar-backend">
+            backend: {backendHost}
+          </div>
         </div>
         <div className="sidebar-footer-actions">
           {!window.electronAPI && (

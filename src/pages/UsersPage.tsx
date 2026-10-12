@@ -200,8 +200,12 @@ export const UsersPage = () => {
     }
 
     setIsSubmitting(false);
-    setFeedback({ type: "success", message: `${name} created. They can now log in with ${email}.` });
+    // resetForm() clears the feedback too, so set the success message after
+    // it (otherwise the confirmation is wiped the moment it is shown).
+    const createdName = name;
+    const createdEmail = email;
     resetForm();
+    setFeedback({ type: "success", message: `${createdName} created. They can now log in with ${createdEmail}.` });
   };
 
   const handleEdit = (id: string) => {

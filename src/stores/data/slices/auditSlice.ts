@@ -1,7 +1,7 @@
 import type { StateCreator } from "zustand";
 import type { DataState, AuditState } from "../types";
 import type { AuditLog, ReprintLog } from "../../../types";
-import { supabase } from "../../../lib/supabase";
+import { callRpc, newIdempotencyKey, ONLINE_ONLY_RETRIES } from "../idempotentRpc";
 
 interface AuditEventResult {
   auditLog: AuditLog;
@@ -17,14 +17,15 @@ export const createAuditSlice: StateCreator<DataState, [], [], AuditState> = (se
   reprintLogs: [],
 
   addAuditLog: async (log: AuditLog) => {
-    const { data, error } = await supabase.rpc("log_audit_event", {
+    const { data, error } = await callRpc("log_audit_event", {
       p_action_type: log.actionType,
       p_message: log.message,
       p_entity_type: log.entityType,
       p_entity_id: log.entityId,
       p_shop_id: log.shopId ?? null,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Audit event returned no data.");
     const result = data as AuditEventResult;
 
@@ -32,10 +33,11 @@ export const createAuditSlice: StateCreator<DataState, [], [], AuditState> = (se
   },
 
   addReprintLog: async ({ saleId }) => {
-    const { data, error } = await supabase.rpc("log_receipt_reprint", {
+    const { data, error } = await callRpc("log_receipt_reprint", {
       p_sale_id: saleId,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Receipt reprint returned no data.");
     const result = data as ReprintResult;
 
