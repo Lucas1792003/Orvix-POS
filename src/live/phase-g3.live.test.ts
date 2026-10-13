@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // ---------------------------------------------------------------------------
 // Phase G follow-up LIVE checks for migrations 077-079 against the
-// self-hosted Supabase stack (lucashome, schema 079), through the public API
+// self-hosted Supabase stack (lucashome, schema 080 since 2026-10-13: test 8
+// asserts 080's server-derived completion URL), through the public API
 // with the real @supabase/supabase-js client (and plain fetch where the exact
 // HTTP status matters).
 //   077  every new organization gets Retail (default) / Wholesale / Special
@@ -159,7 +160,10 @@ ROLLBACK;`);
     process.stdout.write(`[real org before] ${realBefore}\n`);
     expect(realBefore).toContain(`pl_md5=${PL_MD5}`);
     expect(realBefore).toContain(`pup_md5=${PUP_MD5}`);
-    expect(sql1(`SELECT string_agg(version, ',' ORDER BY version) FROM (SELECT version FROM supabase_migrations.schema_migrations ORDER BY version DESC LIMIT 3) x;`)).toBe("077,078,079");
+    // 077-079 applied; since 2026-10-13 the stack is at 080 (completion URL
+    // derived server-side, object must exist) - test 8 asserts that behaviour.
+    expect(sql1(`SELECT string_agg(version, ',' ORDER BY version) FROM supabase_migrations.schema_migrations WHERE version IN ('077','078','079','080');`)).toBe("077,078,079,080");
+    expect(sql1(`SELECT max(version) FROM supabase_migrations.schema_migrations;`)).toBe("080");
   });
 
   afterAll(async () => {
@@ -659,17 +663,34 @@ SELECT 'R|can_write_new_own_path=' || public.app_storage_can_write_path('org/${R
   });
 
   // =========================================================================
-  it("8. host check gap: completion URL on a DIFFERENT host ending with the exact session path (record only)", async () => {
+  it("8. 080: a completion URL on a DIFFERENT host is ignored - refused while the object is missing, then COMPLETED with the trusted URL only", async () => {
+    // 079 stored this URL (host not checked, object not required; recorded
+    // live 2026-10-13). 080: the object must exist, and what is stored,
+    // returned and polled is app_config origin + bucket + session path.
+    const trusted = sql1(`SELECT value FROM public.app_config WHERE key = 'supabase_public_url';`);
     const s = ok(await rpc(A.admin, "create_product_image_upload_session", { p_shop_id: A.shop, p_product_id: A.prod }), "session");
     const foreign = `https://example.invalid/storage/v1/object/public/${BUCKET}/${s.storagePath}`;
-    const r = await rpc(anon, "complete_product_image_upload_session", { p_token: s.token, p_storage_path: s.storagePath, p_public_url: foreign, p_bytes: TINY_WEBP.length, p_mime_type: "image/webp" });
+    const args = { p_token: s.token, p_storage_path: s.storagePath, p_public_url: foreign, p_bytes: TINY_WEBP.length, p_mime_type: "image/webp" };
+    const r0 = await rpc(anon, "complete_product_image_upload_session", args);
+    expect(r0.error?.message).toBe("Uploaded image was not found in storage");
+    expect(sql1(`SELECT status || '|' || COALESCE(public_url, '<null>') FROM product_image_upload_sessions WHERE id = '${s.sessionId}';`)).toBe("PENDING|<null>");
+    const up = await svc.storage.from(BUCKET).upload(s.storagePath, TINY_WEBP, { contentType: "image/webp" });
+    expect(up.error, `upload: ${up.error?.message}`).toBeNull();
+    uploaded.add(s.storagePath);
+    const r = await rpc(anon, "complete_product_image_upload_session", args);
+    const derived = `${trusted}/storage/v1/object/public/${BUCKET}/${s.storagePath}`;
+    expect(r.error).toBeNull();
+    expect(r.data.status).toBe("COMPLETED");
+    expect(r.data.publicUrl).toBe(derived);
     const row = sql1(`SELECT status || '|' || COALESCE(public_url, '<null>') FROM product_image_upload_sessions WHERE id = '${s.sessionId}';`);
-    const poll = await rpc(A.admin, "get_product_image_upload_session_status", { p_session_id: s.sessionId });
-    const objs = objCount(s.storagePath);
-    const accepted = r.error === null;
-    ev.info("8 host-check gap (079 checks suffix, not host)", `complete with ${foreign} -> ${accepted ? `ACCEPTED: status ${r.data?.status}, publicUrl ${r.data?.publicUrl}` : `rejected "${r.error.message}"`}; DB row status|public_url = ${row}; desktop status poll -> ${poll.data?.status} publicUrl ${poll.data?.publicUrl}; storage object at that path = ${objs} (nothing was uploaded: completion does not check the object exists either)`);
-    // record-only: assert the DB agrees with the API answer
-    expect(row.startsWith(accepted ? `COMPLETED|${foreign}` : "PENDING|")).toBe(true);
+    expect(row).toBe(`COMPLETED|${derived}`);
+    const poll = ok(await rpc(A.admin, "get_product_image_upload_session_status", { p_session_id: s.sessionId }), "status");
+    expect(poll.publicUrl).toBe(derived);
+    const byToken = ok(await rpc(anon, "get_product_image_upload_session_by_token", { p_token: s.token }), "by_token");
+    expect(byToken.publicUrl).toBe(derived);
+    expect(sql1(`SELECT count(*) FROM product_image_upload_sessions WHERE id = '${s.sessionId}' AND to_jsonb(product_image_upload_sessions)::text LIKE '%example.invalid%';`)).toBe("0");
+    expect(trusted).toBe(cfg.url);
+    ev.pass("8 080: foreign host ignored", `complete with https://example.invalid/<exact session path> before the upload -> "${r0.error.message}", row PENDING|<null>; after the object exists -> COMPLETED; returned / stored / desktop poll / by_token publicUrl = <app_config origin>/storage/v1/object/public/${BUCKET}/<session path> (x4); "example.invalid" nowhere in the row`);
   });
 
   // =========================================================================

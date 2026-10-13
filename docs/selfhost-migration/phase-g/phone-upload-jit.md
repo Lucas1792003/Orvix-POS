@@ -1,6 +1,12 @@
 # Phone upload: just-in-time signed upload token (`phone-upload-token`)
 
-**Status 2026-10-13: implemented and verified locally; NOT deployed.** The
+**Status 2026-10-13: deployed on lucashome** (`/functions/v1/phone-upload-token`,
+route smoke-tested by the owner) **and verified live in the real UI against
+the deployed function** (§6 "Live UI, deployed function"; spec D now runs
+`E2E_PHONE_FN=deployed` by default). The paragraph below is the
+pre-deployment status, kept for history.
+
+Pre-deployment status (earlier on 2026-10-13): implemented and verified locally; NOT deployed. The
 Edge Function exists in this repo only. It was exercised in the real UI
 (Electron desktop + iPhone-profile phone page) against the real lucashome
 stack, with the function itself running in a disposable local
@@ -114,21 +120,47 @@ nor read. A refresh is just another call.
   by the QR session token. Turning `VERIFY_JWT` off would not weaken it, and
   leaving it on only means callers need the public anon key.
 
-### Rate limiting
+### Rate limiting (measured live 2026-10-13; not implemented)
 
-Not implemented. A per-session counter needs a new column, which means a
-migration, and that is out of scope here. In-memory counters are not
-reliable: edge-runtime workers are recycled and the limit would be
-per-worker. The cost of abuse is bounded:
-- every token is for the session's single path;
-- `upsert` is false, so extra tokens add no capability;
-- issuing stops at expiry (≤ 10 min);
-- a caller needs the 128-hex QR token.
+Measured against the deployed function on lucashome
+(`src/live/phase-g4.live.test.ts` test 8, one live QA session, from the Mac
+over the tailnet):
 
-If wanted later: add `product_image_upload_sessions.token_issued_count int` +
-`last_token_at`, and do an atomic `UPDATE … SET token_issued_count =
-token_issued_count + 1 WHERE id = … AND token_issued_count < 20 RETURNING`
-before signing.
+| Load | Result |
+|---|---|
+| 50 sequential requests, same session | 50 × 200 in ~2.0 s (~25/s), latency p50 36 ms / p95 ~60 ms |
+| 50 concurrent requests, same session | 50 × 200 in ~0.65 s, p50 ~0.6 s (serialised in the worker) |
+| tokens returned (100) | **3 distinct**: storage signs `{url, iat, exp}` with second resolution, so requests in the same second get an identical JWT and every new second a new one; lifetime 60 s; all for the one path |
+| capability | unchanged: first PUT 200, any other of the 100 tokens → 400 `409 Duplicate`; 1 object; the function then answers `alreadyUploaded` |
+| state written while issuing | none (session row md5 identical, 0 objects) |
+| 50 concurrent requests with random tokens | 50 × 404 in ~0.35 s (one indexed `token_hash` lookup each) |
+| server-side limit | **none**: no 429 from Envoy, the runtime or storage |
+| resources | functions container 166 → 178 MiB (limit 512 MiB), db CPU blip ~2 → 3.5 %, storage/envoy unchanged |
+
+Cost per accepted call: 1 POST through Envoy → edge-runtime worker → 4 service-role
+PostgREST reads (session, creator, product, shop) + storage `HEAD` + storage
+`POST upload/sign` (≈ 6 internal requests). An invalid token costs 1 read.
+
+Impact: no security impact (one path, `upsert:false`, ≤ 10 min, needs the
+128-hex QR token, writes nothing). The risk is **load amplification on a home
+server shared with the tills**: a QR-token holder can drive ~25+ signed-token
+requests/s per connection, and anyone with the public anon key (it is in every
+web bundle) can spam invalid tokens. Exposure today is the tailnet only
+(`tailscale serve`, "tailnet only", proxy to Envoy on 127.0.0.1:8000; no
+Funnel), which limits who can do either.
+
+**Requirements** (for a later change; none implemented):
+
+| # | Scope | Limit | Where it can live |
+|---|---|---|---|
+| R1 | per session | ≤ 10 tokens per session lifetime and ≤ 3 per 10 s (normal flow 1, stale/lost-response retry 2, double tap 1); beyond → 429 `{code:"rate_limited"}` + `Retry-After`, phone shows "Please wait a moment" | function, with a counter in the row: migration adding `product_image_upload_sessions.token_issued_count int NOT NULL DEFAULT 0`, `last_token_at timestamptz`; atomic `UPDATE … SET token_issued_count = token_issued_count + 1, last_token_at = now() WHERE id = $1 AND status = 'PENDING' AND token_issued_count < 10 AND (last_token_at IS NULL OR last_token_at < now() - interval '3 s' OR …) RETURNING` **before** signing (in-memory counters are per worker and are lost on recycle) |
+| R2 | per client | 30 req/min, burst 10, on `/functions/v1/phone-upload-token` (valid and invalid tokens alike) | Envoy `local_ratelimit` HTTP filter on that route with a descriptor keyed on the client identity. Behind `tailscale serve` Envoy sees 127.0.0.1, so key on `X-Forwarded-For` / `Tailscale-User-Login` set by tailscale serve (**verify which headers serve sets before relying on them**) |
+| R3 | per organization | ≤ 60 tokens/min across its sessions; ≤ 30 session creations per user per hour | DB: count in `create_product_image_upload_session` (sessions per `created_by` in the last hour, no new column needed) + a per-org counter for R1's UPDATE (migration) |
+| R4 | whole route | global token bucket ~20 req/s so POS RPCs keep capacity | Envoy route-level `local_ratelimit` (no descriptor) |
+| R5 | observability | count 404/410/429/503 per minute in the function log; alert on sustained 404s (token guessing) | function `console.log` aggregate + backup-status style check |
+
+Until then the mitigating context is: tailnet-only exposure, 10-minute
+sessions, single-path tokens, `upsert:false`, and no writes on issue.
 
 ## 4. Client changes
 

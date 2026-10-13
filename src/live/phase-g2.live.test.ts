@@ -20,7 +20,8 @@
 //                             `authenticated`, and users_ins has no setup
 //                             branch - the platform console / service role is
 //                             the only way to create an organization)
-// No storage object is uploaded (the upload RPCs validate the URL string only).
+// Since 080 one storage object is uploaded (075 check, session 3: completion
+// requires the object); it is removed again through the Storage API.
 // ---------------------------------------------------------------------------
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -35,6 +36,8 @@ vi.setConfig({ testTimeout: 300_000, hookTimeout: 300_000 });
 const SEED_SQL = new URL("../../supabase/tests/phase-d/live/seed.sql", import.meta.url).pathname;
 const REAL_ORG = "org-shwe-pha-lar";
 const INACTIVE = "Upload link is no longer active";
+// 34-byte lossless WebP (same constant as phase-g3/g4): 080 completes only an existing object.
+const TINY_WEBP = Buffer.from("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==", "base64");
 
 type Rpc = { data: any; error: any; status: number };
 const rpc = async (client: SupabaseClient, name: string, args: Record<string, unknown>): Promise<Rpc> => {
@@ -306,18 +309,30 @@ describe.skipIf(!LIVE)("Phase G live checks for 074-076 (self-hosted stack)", ()
     const s3 = await newSession();
     const g3 = ok(await rpc(anon, "get_product_image_upload_session_by_token", { p_token: s3.token }), "by-token read (active)");
     expect(g3.status).toBe("PENDING");
+    // 080: the object must exist before completion (session stays PENDING);
+    // bytes then come from the object's storage metadata (34), not the
+    // client's claim (100).
+    const c3pre = await rpc(anon, "complete_product_image_upload_session", completeArgs(s3));
+    expect(c3pre.error?.message).toBe("Uploaded image was not found in storage");
+    expect(row(s3.sessionId)).toBe("PENDING|false|<null>|<null>");
+    const up3 = await svc.storage.from("product-images").upload(s3.storagePath, TINY_WEBP, { contentType: "image/webp" });
+    expect(up3.error).toBeNull();
     const c3 = ok(await rpc(anon, "complete_product_image_upload_session", completeArgs(s3)), "complete active session");
-    expect(c3).toMatchObject({ sessionId: s3.sessionId, status: "COMPLETED", bytes: 100, mimeType: "image/webp", storagePath: s3.storagePath });
+    expect(c3).toMatchObject({ sessionId: s3.sessionId, status: "COMPLETED", bytes: TINY_WEBP.length, mimeType: "image/webp", storagePath: s3.storagePath });
     const r3 = row(s3.sessionId);
-    expect(r3).toBe("COMPLETED|false|<null>|100");
+    expect(r3).toBe(`COMPLETED|false|<null>|${TINY_WEBP.length}`);
     const st3 = ok(await rpc(A.admin, "get_product_image_upload_session_status", { p_session_id: s3.sessionId }), "status (completed)");
     expect(st3.status).toBe("COMPLETED");
     const c3b = await rpc(anon, "complete_product_image_upload_session", completeArgs(s3));
     expect(c3b.error?.message).toBe(INACTIVE);
-    notes.push(`S3 ${s3.sessionId} (active): by-token -> ${g3.status}; anon complete -> ${c3.status} bytes=${c3.bytes}; row -> ${r3}; admin status -> ${st3.status}; second complete -> "${c3b.error.message}"`);
-    const objs = sql1(`SELECT count(*) FROM storage.objects WHERE name IN ('${s1.storagePath}', '${s2.storagePath}', '${s3.storagePath}');`);
-    expect(objs).toBe("0");
-    notes.push(`storage objects for the 3 session paths: ${objs} (no upload performed)`);
+    notes.push(`S3 ${s3.sessionId} (active): by-token -> ${g3.status}; anon complete before the upload -> "${c3pre.error.message}" (080), still PENDING; after the object exists -> ${c3.status} bytes=${c3.bytes} (object metadata; client claimed 100); row -> ${r3}; admin status -> ${st3.status}; second complete -> "${c3b.error.message}"`);
+    const objSql = `SELECT count(*) FROM storage.objects WHERE name IN ('${s1.storagePath}', '${s2.storagePath}', '${s3.storagePath}');`;
+    const objs = sql1(objSql);
+    expect(objs).toBe("1");
+    const rm = await svc.storage.from("product-images").remove([s3.storagePath]);
+    expect(rm.error).toBeNull();
+    expect(sql1(objSql)).toBe("0");
+    notes.push(`storage objects for the 3 session paths: ${objs} (S3's, uploaded for 080) -> removed via the Storage API -> 0`);
     ev.pass("075 expired upload session", notes.join(" || "));
   });
 });

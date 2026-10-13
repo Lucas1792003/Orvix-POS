@@ -22,6 +22,8 @@ import {
 } from "./liveHelpers";
 
 const LIVE = Boolean(process.env.LIVE_SUPABASE_URL);
+// 34-byte lossless WebP (same constant as phase-g3/g4): the phone object 080 requires before completion.
+const TINY_WEBP = Buffer.from("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==", "base64");
 vi.setConfig({ testTimeout: 180_000, hookTimeout: 240_000 });
 
 const SEED_SQL = new URL("../../supabase/tests/phase-d/live/seed.sql", import.meta.url).pathname;
@@ -732,13 +734,20 @@ describe.skipIf(!LIVE)("Phase D live integration (self-hosted stack)", () => {
     const compCan = await rpc(anon, "complete_product_image_upload_session", { p_token: c2.data.token, p_storage_path: c2.data.storagePath, p_public_url: publicUrl(c2.data.storagePath), p_bytes: 1000, p_mime_type: "image/webp" });
     check("canceled: get shows CANCELED, complete rejected", gCan.data?.status === "CANCELED" && compCan.error !== null, `get.status=${gCan.data?.status} complete="${compCan.error?.message}"`);
 
-    // Complete twice with a valid token
+    // Complete twice with a valid token. Since 080 the object must exist
+    // first (completion before the upload is refused and the session stays
+    // PENDING); bytes/mime then come from the object's storage metadata.
     const c3 = await rpc(admin, "create_product_image_upload_session", { p_shop_id: ids.shop, p_product_id: ids.prod1 });
     const compArgs = { p_token: c3.data.token, p_storage_path: c3.data.storagePath, p_public_url: publicUrl(c3.data.storagePath), p_bytes: 1234, p_mime_type: "image/webp" };
+    const comp0 = await rpc(anon, "complete_product_image_upload_session", compArgs);
+    const c3Pending = (await row("product_image_upload_sessions", { id: c3.data.sessionId })).status;
+    check("080: complete before the upload -> rejected, still PENDING", comp0.error?.message === "Uploaded image was not found in storage" && c3Pending === "PENDING", `"${comp0.error?.message}" status=${c3Pending}`);
+    const up = await svc.storage.from("product-images").upload(c3.data.storagePath, TINY_WEBP, { contentType: "image/webp" });
+    expect(up.error).toBeNull();
     const comp1 = await rpc(anon, "complete_product_image_upload_session", compArgs);
     const comp2 = await rpc(anon, "complete_product_image_upload_session", compArgs);
     const c3Row = await row("product_image_upload_sessions", { id: c3.data.sessionId });
-    check("complete once", comp1.error === null && comp1.data.status === "COMPLETED" && c3Row.status === "COMPLETED" && c3Row.bytes === 1234, `status=${comp1.data?.status} db.bytes=${c3Row.bytes}`);
+    check("complete once", comp1.error === null && comp1.data.status === "COMPLETED" && c3Row.status === "COMPLETED" && c3Row.bytes === TINY_WEBP.length && c3Row.public_url === publicUrl(c3.data.storagePath), `status=${comp1.data?.status} db.bytes=${c3Row.bytes} (object size ${TINY_WEBP.length}; client claimed 1234) public_url=trusted:${c3Row.public_url === publicUrl(c3.data.storagePath)}`);
     notes.push(`second complete: ${comp2.error ? `REJECTED ("${comp2.error.message}") - not idempotent, by design (PENDING guard)` : "ACCEPTED (idempotent replay)"}`);
     check("complete twice -> second rejected or identical", comp2.error !== null || JSON.stringify(comp2.data) === JSON.stringify(comp1.data), comp2.error?.message ?? "identical");
     // bad inputs on a fresh session: wrong path, oversized, bad mime, data: URL
@@ -774,13 +783,17 @@ describe.skipIf(!LIVE)("Phase D live integration (self-hosted stack)", () => {
     // scoping: all QA sessions point at QA product/shop only
     const qaSessions = await svc.from("product_image_upload_sessions").select("id, product_id, shop_id, created_by, storage_path").eq("created_by", ids.admin);
     check("session scoping", (qaSessions.data ?? []).length >= 4 && qaSessions.data!.every((s) => s.product_id === ids.prod1 && s.shop_id === ids.shop), `${qaSessions.data?.length} sessions, all product_id=${ids.prod1} shop_id=${ids.shop}`);
-    // No upload is performed in this suite (the RPC validates the URL string
-    // only), so no QA storage object must exist for any QA session path.
-    // (PostgREST does not expose the storage schema here, so this goes over SQL.)
+    // Exactly one QA object exists (c3's, uploaded above for 080's existence
+    // check); none for any other QA session path. It is removed again
+    // through the Storage API. (PostgREST does not expose the storage schema
+    // here, so the counts go over SQL.)
     // the session's own path: temp/<id> before migration 079, org/<org>/temp/<id> after
     const qaPaths = (qaSessions.data ?? []).map((s) => s.storage_path as string);
-    const qaObjs = runSql(cfg, `SELECT count(*) FROM storage.objects WHERE name = ANY(ARRAY[${qaPaths.map((p) => `'${p}'`).join(",")}]::text[]);`).trim();
-    check("no QA storage object created", qaObjs === "0", `storage.objects rows for ${qaPaths.length} QA session paths = ${qaObjs}`);
+    const qaObjSql = `SELECT count(*) FROM storage.objects WHERE name = ANY(ARRAY[${qaPaths.map((p) => `'${p}'`).join(",")}]::text[]);`;
+    const qaObjs = runSql(cfg, qaObjSql).trim();
+    const removed = await svc.storage.from("product-images").remove([c3.data.storagePath]);
+    const qaObjsAfter = runSql(cfg, qaObjSql).trim();
+    check("only the completed session's QA object, removed afterwards", qaObjs === "1" && removed.error === null && qaObjsAfter === "0", `storage.objects rows for ${qaPaths.length} QA session paths = ${qaObjs} (c3) -> removed via Storage API -> ${qaObjsAfter}`);
 
     ev.pass("13 phone-upload token security", notes.join("; "));
     process.stdout.write(`[13 phone-upload]\n - ${notes.join("\n - ")}\n`);

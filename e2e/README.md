@@ -14,8 +14,9 @@ export E2E_SERVICE_KEY="$(ssh -o BatchMode=yes lucashome 'grep "^SERVICE_ROLE_KE
 unset ELECTRON_RUN_AS_NODE          # set by some shells; it turns the Electron binary into plain Node
 
 npx playwright install chromium     # once
-npm run e2e                         # all specs, in order: a-workflows, b-failures, c-offline-auth, d-phone-upload
-npx playwright test e2e/d-phone-upload.e2e.ts   # only the phone-upload spec (needs Docker; docs/selfhost-migration/phase-g/phone-upload-jit.md)
+npm run e2e                         # all specs, in order: a-workflows, b-failures, c-offline-auth, d-phone-upload, e-consistency-gate
+npx playwright test e2e/d-phone-upload.e2e.ts   # only the phone-upload spec (docs/selfhost-migration/phase-g/phone-upload-jit.md)
+E2E_PHONE_FN=local npx playwright test e2e/d-phone-upload.e2e.ts   # same, function from this repo in a local container (needs Docker)
 npm run e2e:cleanup                 # cleanup.sql -> audit_purge.sql -> verify_clean.sql (+ storage file count)
 ```
 
@@ -26,6 +27,7 @@ npm run e2e:cleanup                 # cleanup.sql -> audit_purge.sql -> verify_c
 | `E2E_QA_TS` | re-use an existing QA tenant instead of seeding (the admin's TOTP secret is read back from `auth.mfa_factors`) |
 | `E2E_QA_PASSWORD` | password for the QA accounts (random per run when unset; required with `E2E_QA_TS`) |
 | `E2E_DEV_PORT` | dev-server port (default 5179) |
+| `E2E_PHONE_FN` | spec D only: `deployed` (default) = the phone page calls the stack's own `/functions/v1/phone-upload-token` (no container, no request routing; the answers are only observed); `local` = run `supabase/functions/phone-upload-token` from this repo in a disposable local edge-runtime container and route the phone's function request to it (for testing an undeployed change) |
 
 `global-setup` creates the QA tenant (Phase D `seed.sql` + `supabase/tests/phase-e/live/seed_extra.sql`)
 and enrols a TOTP factor for the QA admin through the auth API. The tenant is
@@ -42,13 +44,15 @@ on purpose: both would write the anon key / QA bearer tokens to disk
 |---|---|
 | `playwright.config.ts` | serial, one worker, dev server + global setup/teardown |
 | `helpers/terminal.ts` | the terminal abstraction: launch Electron (`SHWE_POS_E2E=1`, isolated `userData`) or Chromium; login / TOTP / shift / POS / toast helpers; failure injection (origin cut, 503 routes, commit-then-abort, Realtime proxy); IndexedDB/localStorage access |
-| `helpers/consistency.ts` | `assertConsistency()` — the data-consistency gate run after every spec |
+| `helpers/consistency.ts` | `assertConsistency()` — the data-consistency gate run after every spec (duplicate sales via `helpers/saleLedger.ts`) |
 | `helpers/db.ts` | service-role reads and `psql` over ssh (re-uses `src/live/liveHelpers.ts`) |
 | `helpers/totp.ts`, `helpers/evidence.ts`, `helpers/env.ts` | TOTP generator, evidence ledger, environment |
 | `seed/cleanup.ts` | the cleanup step |
 | `a-workflows.e2e.ts`, `b-failures.e2e.ts`, `c-offline-auth.e2e.ts` | the specs (`*.e2e.ts` so vitest ignores them) |
-| `d-phone-upload.e2e.ts` | phone QR upload with the just-in-time token (`phone-upload-token`), Electron desktop + iPhone-profile Chromium phone, real timing (30/65/120/300 s, stale token, double tap, race, lost response, expired, cancelled); ~13 min |
-| `helpers/edgeRuntime.ts` | runs `supabase/functions/phone-upload-token` in a disposable local `supabase/edge-runtime:v1.76.2` container (127.0.0.1 only, keys passed as env names only); the phone's `/functions/v1/phone-upload-token` request is routed to it, so nothing is deployed to lucashome |
+| `d-phone-upload.e2e.ts` | phone QR upload with the just-in-time token (`phone-upload-token`), Electron desktop + iPhone-profile Chromium phone, real timing (30/65/120/300 s, stale token, double tap, race, lost response, expired, cancelled); each success also saves the product and checks `products.image_url` = the server-derived URL (080: `public.app_config` origin + `/storage/v1/object/public/product-images/<session path>`); ~14 min |
+| `helpers/edgeRuntime.ts` | `E2E_PHONE_FN=local` only: runs `supabase/functions/phone-upload-token` in a disposable local `supabase/edge-runtime:v1.76.2` container (127.0.0.1 only, keys passed as env names only) and the phone's function request is routed to it |
+| `helpers/saleLedger.ts` (+ `.test.ts`) | duplicate/lost-sale detection used by the consistency gate: sale ↔ committed `complete_sale` idempotency key (exactly one each way), one client operation (cashier + shift + client event time) → one sale, receipt numbers unique per shop, and the terminals' own request ledger (one operation → one key) |
+| `e-consistency-gate.e2e.ts` | proves the gate: two distinct identical-basket queued sales PASS; a forged second sale row and one UI operation re-sent under a new key FAIL; both forgeries reverted |
 
 Hard guards: every terminal aborts and records any request to `*.supabase.co`
 (the hosted project must never be touched); the dev-server target is checked

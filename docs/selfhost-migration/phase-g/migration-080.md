@@ -1,6 +1,15 @@
 # Migration 080: phone-upload completion stores a server-derived URL
 
-**Status 2026-10-12: prepared, not applied.** Nothing here has run against
+**Status 2026-10-13: applied on lucashome** (schema 080; `app_config.supabase_public_url`
+set to the stack's public origin, 1 row). Live verification 2026-10-13:
+`src/live/phase-g4.live.test.ts` (8/8: refused session creation, 25 path + 26
+URL variants refused with the object present, 6 external-host variants ignored
+with the trusted URL stored/returned/polled, missing object, duplicate and
+concurrent completion, expired/cancelled, `app_config`/helper denied to anon and
+authenticated), the updated phase-d/g2/g3 live suites, and spec D in the real
+UI (`products.image_url` = derived URL in every successful case).
+
+Earlier status (2026-10-12): prepared, not applied. Nothing here has run against
 lucashome, the hosted project or any real database. Every database result
 below comes from the disposable harness (`supabase/tests/phase-d/run.sh`,
 throwaway container, synthetic data). Production facts come read-only from
