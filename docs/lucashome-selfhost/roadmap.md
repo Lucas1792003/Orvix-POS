@@ -24,7 +24,7 @@ Decision-ready proposals for the open items below (written 2026-10-13, nothing e
 - [ ] Decide signed-upload URL lifetime (60 s today) and the 17 orphan objects.
 - [ ] Owner TOTP login test.
 - [ ] Push branch, open PR (via `Lucas1792003`).
-- [ ] Phase F: enable offsite backups to R2 + Mac pull tier; first offsite restore test.
+- [ ] ~~Phase F: enable offsite backups to R2 + Mac pull tier~~ — superseded 2026-10-13: owner chose **email**. Email tier (weekly encrypted archive, secrets file, daily report) built + tested on synthetic data (194/0), **not deployed**: owner checklist in [`email-backup-design.md` §10](../selfhost-migration/phase-f/email-backup-design.md); restore runbook [`restore-from-email.md`](../selfhost-migration/phase-f/restore-from-email.md); audit [`email-audit.md`](../selfhost-migration/phase-f/email-audit.md).
 - [ ] Maintenance window: reboot (pending kernel), G3 persistence test, restart `tailscaled` to clear stale 443 listener.
 - [ ] Host hardening: firewall, sshd keys-only/tailnet bind, Tailscale ACLs (tills → 443 only, Studio admin-only), second tailnet admin.
 - [ ] Tailscale on shop tills + real-device latency tests (G10).

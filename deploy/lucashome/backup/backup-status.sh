@@ -183,6 +183,18 @@ if [[ -x "$(bin_dir)/offsite-status.sh" ]]; then
   fi
 fi
 
+# email tier (Phase F): lines + problems from email-status.sh; one "disabled" line while EMAIL_ENABLED != true
+if [[ -x "$(bin_dir)/email-status.sh" ]]; then
+  EML="$("$(bin_dir)/email-status.sh" --json 2>/dev/null || true)"
+  if [[ -n "$EML" ]] && jq -e . <<<"$EML" >/dev/null 2>&1; then
+    while IFS= read -r l; do say "$l"; done < <(jq -r '.lines[]' <<<"$EML")
+    while IFS= read -r p; do [[ -n "$p" ]] && PROBLEMS+=("$p"); done < <(jq -r '.problems[]' <<<"$EML")
+  else
+    say "email tier: email-status.sh --json produced no output"
+    PROBLEMS+=("email-status.sh --json failed")
+  fi
+fi
+
 say ""
 if (( ${#PROBLEMS[@]} == 0 )); then
   say "STATUS: OK"
