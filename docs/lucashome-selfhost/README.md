@@ -9,5 +9,6 @@ Self-hosted Supabase (`supabase/supabase` tag `self-hosted/v0.8.2`, commit `564e
 | [`incidents.md`](incidents.md) | Breakages and near-misses on this stack |
 | [`risks.md`](risks.md) | Open exposure and owner decisions |
 | [`roadmap.md`](roadmap.md) | Migration phases done and what is next |
+| [`orphan-objects.md`](orphan-objects.md) | The 17 preserved orphan storage objects (paths, sizes, ages, references) |
 
 Engineering detail (plan, runbook, evidence per gate) lives in the repo: [`../selfhost-migration/MIGRATION-PLAN.md`](../selfhost-migration/MIGRATION-PLAN.md) and [`../selfhost-migration/evidence/`](../selfhost-migration/evidence/). Deployment manifest: [`../../deploy/lucashome/README.md`](../../deploy/lucashome/README.md).

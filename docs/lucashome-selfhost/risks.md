@@ -7,7 +7,7 @@ Opened 2026-10-12 from the migration audit and phase reports. Full register: [`.
 ### RESOLVED 2026-10-13 (migrations 074–076 applied) — Migrations 074–076 not applied, client already depends on 076
 The committed client's `/setup` calls `bootstrap_first_admin()` (076). Applied 2026-10-13 00:48 UTC after owner approval; see [`status.md`](status.md).
 
-### New organizations cannot sell (no price level) — fix prepared as 077, not applied
+### RESOLVED 2026-10-13 (077 applied) — New organizations cannot sell (no price level)
 A console-created org has no price level; `complete_sale` (072) looks up the default only within the caller's org → "No active price level available". Found by the live two-org suite 2026-10-12. **Decision:** approve a migration (077) seeding a default price level on org creation, or add it to the console.
 
 ### Owner has not yet verified the migrated TOTP factor
@@ -16,14 +16,18 @@ Procedure: [`../selfhost-migration/phase-g/owner-totp-verification.md`](../selfh
 ### Single disk, no offsite copy
 Every backup is on the same NVMe. Phase F scripts are ready but disabled. **Decision:** owner creates R2 bucket + token, `age` keypair, healthchecks project ([`../../deploy/lucashome/backup/OFFSITE-ENABLE.md`](../../deploy/lucashome/backup/OFFSITE-ENABLE.md)).
 
-### Phone-upload signed URLs live only 60 s (found 2026-10-13)
+### Phone-upload signed URLs live only 60 s (found 2026-10-13) — owner decided 2026-10-13: keep 60 s; investigate a fresh token right before upload instead
+**Confirmed live 2026-10-13:** measured token expiry 60 s; an upload at t+50 s succeeded, at t+65 s storage returned `400 InvalidJWT "exp" claim timestamp check failed`. With the current client (token minted once when the desktop modal opens) **phone upload fails whenever the photo is sent more than 60 s after the QR appears** — a real defect. Server already supports re-issuing a token for a live PENDING session (proved live). A client-only fix is prototyped (desktop re-issues every 30 s while PENDING; phone re-reads the token right before transfer) with 14 unit tests — **uncommitted, not yet UI-tested, awaiting owner review**.
 `UPLOAD_SIGNED_URL_EXPIRATION_TIME` is unset in the storage container (checked read-only: `docker compose exec -T storage printenv …` → unset), so storage-api v1.74 uses its 60 s default. A phone upload started more than a minute after the token is issued fails. Tokens cannot be revoked once issued. **Decision:** set it to 600 (the session length) in `docker-compose.override.yml` (stack config change + storage container recreate — needs approval); trade-off: a leaked token stays usable up to 10 min instead of 1. See [`../selfhost-migration/phase-g/upload-security-and-077.md`](../selfhost-migration/phase-g/upload-security-and-077.md).
 
-### Upload security fixes prepared as 078–079, not applied
+### RESOLVED 2026-10-13 (078–079 applied) — Upload security fixes prepared as 078–079, not applied
 Org-scoped upload paths, path-based authorization for the 574 legacy objects (no move/rename), tokens only for live own-org sessions, completion URL must match the session path, attach-token rollback fix. Harness 467/0. Client change (org-scoped path builder) is on the branch; either deploy order is safe.
 
-### 17 storage objects nobody but service_role can manage
+### 17 storage objects nobody but service_role can manage — owner decided 2026-10-13: preserve all; inventory in [`orphan-objects.md`](orphan-objects.md)
 16 `temp/` objects with no session row and 1 `products/` object whose product no longer exists (from the hosted snapshot). Not referenced by any product. **Decision:** delete via the Storage API as service_role, or leave.
+
+### Upload completion checks the path suffix, not the host (found 2026-10-13)
+079 requires the submitted public URL to end with the session's exact object path, so another session's URL is rejected, but a URL on a different host ending in that path is not. A phone-token holder could make the desktop store an external image URL. Fix options: compare against the server's public URL prefix, or have the desktop build the URL itself from `storagePath`. Not applied. **Confirmed live 2026-10-13:** `https://example.invalid/storage/v1/object/public/product-images/<session path>` was accepted and returned to the desktop poll; completion also does not check that the object exists.
 
 ## Host and availability
 

@@ -1,6 +1,6 @@
 # lucashome — status
 
-Last verified **2026-10-13 ~00:50 UTC** unless stated otherwise.
+Last verified **2026-10-13 ~02:00 UTC** unless stated otherwise.
 
 ## Stack
 
@@ -15,11 +15,11 @@ Last verified **2026-10-13 ~00:50 UTC** unless stated otherwise.
 
 | Item | State | How verified |
 |---|---|---|
-| Schema version | **076** (76 rows). 062–066 applied 2026-10-12 01:22 UTC; 067–073 applied 2026-10-12 16:56 UTC; **074–076 applied 2026-10-13 00:48 UTC** (hashes `e717402c…`/`c615d617…`/`e5884a99…`, the bytes that passed 371/0 in the harness) | `apply-migrations.sh` output + `max(version)`; business manifest 149/149 unchanged |
-| Not applied | 077+ (new-org price levels, upload security) — being prepared, see [`risks.md`](risks.md) | — |
+| Schema version | **076** (76 rows). 062–066 applied 2026-10-12 01:22 UTC; 067–073 applied 2026-10-12 16:56 UTC; **074–076 applied 2026-10-13 00:48 UTC** (hashes `e717402c…`/`c615d617…`/`e5884a99…`, the bytes that passed 371/0 in the harness); **077–079 applied 2026-10-13 01:56 UTC** (hashes `2319775b…`/`5f0b1c13…`/`a49ed009…`, passed 467/0); schema version now **079** | `apply-migrations.sh` output + `max(version)`; business manifest 148/148 unchanged; price levels (3) and unit prices (956) checksums unchanged |
 | Data | 1 organization (`org-shwe-pha-lar`), 1 shop, 3 app users, 10 auth users (2 verified TOTP factors on the ADMIN), 539 products, 18 inventory rows, 0 sales, 574 storage objects (5.3 MB) | SQL counts after QA cleanup, 2026-10-12 |
+| Storage objects | 574 migrated objects intact: all 574 public URLs verify by SHA-256 against the export manifest before and after 077–079; 17 orphans preserved — [`orphan-objects.md`](orphan-objects.md) | `verify_objects.py` 574/574, 2026-10-13 |
 | Origin of data | restored from the hosted export of 2026-10-11 23:47 UTC (manifest 148/149 equal, 574/574 objects SHA-256 verified) | `../selfhost-migration/evidence/G4/2026-10-12-restoration.md` |
-| Security shape | org isolation enforced (RLS + RPC guards + storage); anon may execute only `app_setup_needed`, `get_product_image_upload_session_by_token`, `complete_product_image_upload_session`; 30 mutating RPCs require an idempotency key, replays bound to the caller's org (074); first-time setup only via `bootstrap_first_admin()` under an install-wide lock (076) | live two-org suite 12/12, 2026-10-12 |
+| Security shape | org isolation enforced (RLS + RPC guards + storage); anon may execute only `app_setup_needed`, `get_product_image_upload_session_by_token`, `complete_product_image_upload_session`; 30 mutating RPCs require an idempotency key, replays bound to the caller's org (074); first-time setup only via `bootstrap_first_admin()` under an install-wide lock (076); new orgs auto-seeded with Retail/Wholesale/Special (077); storage authorized by org path, legacy objects by path→product/session→org (078); uploads on `org/<org>/temp/<session>`, completion URL must end with the session path (079) | live two-org suite 12/12, 2026-10-12 |
 | Realtime | publication `supabase_realtime` = `public.inventory` | `pg_publication_tables` |
 | Cron / email | **none** — no cron jobs, no Resend key, SMTP password empty | `cron.job` = 0; `.env` key presence check |
 
@@ -32,7 +32,7 @@ Last verified **2026-10-13 ~00:50 UTC** unless stated otherwise.
 | WAL | archiving on, `archive_timeout = 300`, measured lag 0.1–0.3 s; PITR drill passed 2026-10-11 |
 | Restore drill | weekly Sun 03:30 UTC (logical + physical into throwaway containers) |
 | Latest verified | logical + base taken 2026-10-12 22:38 UTC after QA cleanup; LSN `1/26000058`; archiver 291 archived / 0 failed; `backup-status.sh` STATUS OK |
-| Recovery points | pre-062 LSN `0/22000090` (2026-10-12 01:22); pre-067 LSN `0/E0000000` (2026-10-12 16:56); pre-074 LSN `1/41000000` (2026-10-13 00:48, base `20261013T004814Z` verified) — all in `/srv/supabase/backups/migration-checkpoints.txt` |
+| Recovery points | pre-062 LSN `0/22000090` (2026-10-12 01:22); pre-067 LSN `0/E0000000` (2026-10-12 16:56); pre-074 LSN `1/41000000` (2026-10-13 00:48, base `20261013T004814Z` verified); pre-077 LSN `1/50000058` (2026-10-13 01:56, base `20261013T015650Z` verified); post-079 verified backup LSN `1/5B000058` (2026-10-13 02:37, base `20261013T023734Z`) — all in `/srv/supabase/backups/migration-checkpoints.txt` |
 | Offsite | scripts deployed **disabled** (`OFFSITE_ENABLED=false`); no rclone config, no cron lines. All copies are on the same NVMe |
 
 ## Host

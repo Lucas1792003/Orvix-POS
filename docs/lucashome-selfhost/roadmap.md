@@ -16,6 +16,8 @@ Phases from [`../selfhost-migration/MIGRATION-PLAN.md`](../selfhost-migration/MI
 
 ## Next (each needs owner approval)
 
+Decision-ready proposals for the open items below (written 2026-10-13, nothing executed): [reboot + G3 + hardening](../selfhost-migration/next-phase/reboot-and-hardening.md), [offsite backups](../selfhost-migration/next-phase/offsite-backup-enable.md), [owner TOTP test](../selfhost-migration/next-phase/owner-totp-test.md), [1.0.16 canary](../selfhost-migration/next-phase/electron-1.0.16-canary.md).
+
 - [x] **2026-10-13** Apply 074–076 (00:48 UTC, pre-LSN `1/41000000`).
 - [x] **2026-10-13** Prepare 077 (new-org price levels) and 078–079 (upload security); harness 467/0.
 - [ ] Apply 077–079 (owner approval).

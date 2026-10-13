@@ -15,5 +15,9 @@ Reusable procedures. The scripts live in the repo; this table says which one to 
 | Edge-function tests (mocked email, no network) | Mac | `bash supabase/tests/functions/run.sh` |
 | Owner TOTP verification on lucashome | lucashome | [`../selfhost-migration/phase-g/owner-totp-verification.md`](../selfhost-migration/phase-g/owner-totp-verification.md) |
 | Cutover and rollback | all | [`../selfhost-migration/08-cutover-rollback.md`](../selfhost-migration/08-cutover-rollback.md) |
+| Next phase (proposals, 2026-10-13, not yet approved): maintenance window: reboot + G3 persistence test, then host hardening steps H1–H10 | lucashome | [`../selfhost-migration/next-phase/reboot-and-hardening.md`](../selfhost-migration/next-phase/reboot-and-hardening.md) |
+| Next phase: enable offsite backups (R2 + Mac tier), first offsite restore test, bundle decrypt on the Mac | lucashome + Mac | [`../selfhost-migration/next-phase/offsite-backup-enable.md`](../selfhost-migration/next-phase/offsite-backup-enable.md) |
+| Next phase: owner TOTP login test against lucashome (supersedes the phase-g procedure) | lucashome | [`../selfhost-migration/next-phase/owner-totp-test.md`](../selfhost-migration/next-phase/owner-totp-test.md) |
+| Next phase: Electron 1.0.16 release checklist: gates, build, rollback build, pre-release canary, promotion, keep-alive | desktop app | [`../selfhost-migration/next-phase/electron-1.0.16-canary.md`](../selfhost-migration/next-phase/electron-1.0.16-canary.md) |
 
 Rule for every lucashome procedure: check `backup-status.sh` is OK first, never `docker compose down -v` / `reset.sh`, always `</dev/null` on `docker compose exec` in scripts, never print `.env` values.
