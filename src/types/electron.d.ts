@@ -24,6 +24,13 @@ export interface ElectronUpdateStatus {
   message?: string;
 }
 
+export interface ElectronQueueExportSaveResult {
+  ok: boolean;
+  canceled?: boolean;
+  filePath?: string;
+  error?: string;
+}
+
 export interface ElectronAPI {
   isElectron: true;
   platform: string;
@@ -33,6 +40,9 @@ export interface ElectronAPI {
   checkForUpdates: () => Promise<ElectronUpdateCheckResult>;
   installUpdate: () => Promise<{ ok: boolean }>;
   onUpdateStatus: (callback: (status: ElectronUpdateStatus) => void) => () => void;
+  /** Save an ENCRYPTED pending-queue export through the native save dialog
+   *  (main process writes; the renderer has no file-system access). */
+  saveQueueExport?: (request: { defaultFileName: string; contents: string }) => Promise<ElectronQueueExportSaveResult>;
 }
 
 declare global {

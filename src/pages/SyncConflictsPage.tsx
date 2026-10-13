@@ -9,6 +9,8 @@ import { Table, THead, TBody, TR, TH, TD } from "../components/ui/Table";
 import { useToast } from "../components/ui/Toast";
 import { dismissOutboxEntry, drainOutbox, listOutboxEntries, retryOutboxEntry } from "../stores/data/outbox";
 import type { SyncOutboxEntry } from "../lib/localDb";
+import { ExportQueueDialog } from "../components/sync/ExportQueueDialog";
+import { useTranslation } from "../hooks/useTranslation";
 
 const RPC_LABELS: Record<string, string> = {
   complete_sale: "POS Sale",
@@ -81,6 +83,8 @@ export const SyncConflictsPage = () => {
   const [loadedAt, setLoadedAt] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
+  const { t } = useTranslation();
 
   const refresh = useCallback(async () => {
     setIsLoading(true);
@@ -149,10 +153,16 @@ export const SyncConflictsPage = () => {
       )}
       <div className="mt-4 flex items-center justify-between">
         <span className="text-sm text-slate-500">{summary}</span>
-        <Button variant="secondary" size="sm" onClick={() => void refresh()} disabled={isLoading}>
-          Refresh
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="secondary" size="sm" onClick={() => setExportOpen(true)} disabled={entries.length === 0}>
+            {t("queueExport", "buttonLong")}
+          </Button>
+          <Button variant="secondary" size="sm" onClick={() => void refresh()} disabled={isLoading}>
+            Refresh
+          </Button>
+        </div>
       </div>
+      <ExportQueueDialog open={exportOpen} onClose={() => setExportOpen(false)} />
       <div className="mt-4">
         {!isLoading && entries.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-300/70 bg-slate-50/60 p-6 text-center text-sm text-slate-500">

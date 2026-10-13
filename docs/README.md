@@ -68,6 +68,8 @@ outside this public repository.
 | [phase-g/phone-upload-jit.md](./selfhost-migration/phase-g/phone-upload-jit.md) | Just-in-time phone upload tokens (`phone-upload-token` function) |
 | [phase-g/migration-080.md](./selfhost-migration/phase-g/migration-080.md) | Trusted upload completion URL (080) |
 | [phase-g/realtime-reconciliation.md](./selfhost-migration/phase-g/realtime-reconciliation.md) | Realtime gap reconciliation |
+| [phase-f/rate-limiting.md](./selfhost-migration/phase-f/rate-limiting.md) | Phone-upload rate limits (081, prepared) |
+| [phase-f/queue-export.md](./selfhost-migration/phase-f/queue-export.md) | Encrypted Export Pending Transactions and the queue recovery tool |
 
 ## Code Layout (one-screen orientation)
 
