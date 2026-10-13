@@ -1,10 +1,10 @@
 import type { StateCreator } from "zustand";
 import type { DataState, ShiftState } from "../types";
 import type { AuditLog, Shift } from "../../../types";
-import { supabase } from "../../../lib/supabase";
 import { isNetworkError } from "../../../lib/errors";
 import { newId } from "../../../lib/id";
 import { enqueueOutbox, recordIdMapping } from "../outbox";
+import { beginOperation, callRpc, type OperationContext } from "../idempotentRpc";
 import { deleteLocalRows, putLocalRows } from "../localWrites";
 import { assertOfflineWriteEligible } from "../../authStore";
 
@@ -20,13 +20,14 @@ const replaceShift = (shifts: Shift[], shift: Shift): Shift[] => {
 };
 
 export const createShiftSlice: StateCreator<DataState, [], [], ShiftState> = (set, get) => {
-  const startShiftOnline = async (shopId: string, openingCashMmk: number): Promise<string> => {
-    const { data, error } = await supabase.rpc("open_shift", {
+  const startShiftOnline = async (shopId: string, openingCashMmk: number, op: OperationContext): Promise<string> => {
+    const { data, error } = await callRpc("open_shift", {
       p_shop_id: shopId,
       p_opening_cash_mmk: openingCashMmk,
-      p_created_at: new Date().toISOString(),
+      p_created_at: op.createdAt,
+      p_idempotency_key: op.idempotencyKey,
     });
-    if (error) throw new Error(error.message);
+    if (error) throw error;
     if (!data) throw new Error("Open shift returned no data.");
 
     const result = data as ShiftRpcResult;
@@ -41,12 +42,14 @@ export const createShiftSlice: StateCreator<DataState, [], [], ShiftState> = (se
   // No network: open the shift locally and queue open_shift for replay. A
   // sale rung up against this provisional shift (see saleSlice.ts) carries a
   // `refs` entry so it waits for THIS entry's real shift id before sending.
-  const startShiftOffline = async (shopId: string, cashierId: string, openingCashMmk: number): Promise<string> => {
+  const startShiftOffline = async (
+    shopId: string, cashierId: string, openingCashMmk: number, op: OperationContext,
+  ): Promise<string> => {
     await assertOfflineWriteEligible();
-    const now = new Date().toISOString();
+    const now = op.createdAt;
     const shift: Shift = {
       id: newId("shift"), shopId, cashierId,
-      startedAt: now, openingCashMmk, pendingSync: true,
+      startedAt: now, openingCashMmk, pendingSync: true, idempotencyKey: op.idempotencyKey,
     };
     set((state) => ({ shifts: [shift, ...state.shifts] }));
     void putLocalRows({ shifts: [shift] });
@@ -54,7 +57,11 @@ export const createShiftSlice: StateCreator<DataState, [], [], ShiftState> = (se
     await enqueueOutbox({
       kind: "rpc",
       name: "open_shift",
-      args: { p_shop_id: shopId, p_opening_cash_mmk: openingCashMmk, p_created_at: now },
+      args: {
+        p_shop_id: shopId, p_opening_cash_mmk: openingCashMmk, p_created_at: now,
+        p_idempotency_key: op.idempotencyKey,
+      },
+      idempotencyKey: op.idempotencyKey,
       shopId,
       provisional: [{ table: "shifts", ids: [shift.id] }],
     });
@@ -63,15 +70,16 @@ export const createShiftSlice: StateCreator<DataState, [], [], ShiftState> = (se
   };
 
   const endShiftOnline = async (
-    shiftId: string, closingCashMmk: number, varianceReason: string | undefined,
+    shiftId: string, closingCashMmk: number, varianceReason: string | undefined, op: OperationContext,
   ): Promise<void> => {
-    const { data, error } = await supabase.rpc("close_shift", {
+    const { data, error } = await callRpc("close_shift", {
       p_shift_id: shiftId,
       p_closing_cash_mmk: closingCashMmk,
       p_variance_reason: varianceReason ?? null,
-      p_created_at: new Date().toISOString(),
+      p_created_at: op.createdAt,
+      p_idempotency_key: op.idempotencyKey,
     });
-    if (error) throw new Error(error.message);
+    if (error) throw error;
     if (!data) throw new Error("Close shift returned no data.");
 
     const result = data as ShiftRpcResult;
@@ -88,7 +96,7 @@ export const createShiftSlice: StateCreator<DataState, [], [], ShiftState> = (se
   // it actually runs (e.g. a sale from another device syncs first) surfaces
   // there like any other conflict.
   const endShiftOffline = async (
-    shiftId: string, closingCashMmk: number, varianceReason: string | undefined,
+    shiftId: string, closingCashMmk: number, varianceReason: string | undefined, op: OperationContext,
   ): Promise<void> => {
     await assertOfflineWriteEligible();
     const shift = get().shifts.find((s) => s.id === shiftId);
@@ -109,11 +117,11 @@ export const createShiftSlice: StateCreator<DataState, [], [], ShiftState> = (se
       throw new Error("Variance reason is required when closing cash does not match expected cash.");
     }
 
-    const now = new Date().toISOString();
+    const now = op.createdAt;
     const closedShift: Shift = {
       ...shift, endedAt: now, closingCashMmk,
       expectedCashMmk, varianceMmk, varianceReason: varianceReason?.trim() || undefined,
-      pendingSync: true,
+      pendingSync: true, idempotencyKey: op.idempotencyKey,
     };
     set((state) => ({ shifts: replaceShift(state.shifts, closedShift) }));
     void putLocalRows({ shifts: [closedShift] });
@@ -124,7 +132,9 @@ export const createShiftSlice: StateCreator<DataState, [], [], ShiftState> = (se
       args: {
         p_shift_id: shiftId, p_closing_cash_mmk: closingCashMmk,
         p_variance_reason: varianceReason ?? null, p_created_at: now,
+        p_idempotency_key: op.idempotencyKey,
       },
+      idempotencyKey: op.idempotencyKey,
       shopId: shift.shopId,
       // If this shift was itself opened offline and hasn't synced yet, wait
       // for its real id before sending — see resolveArgs() in outbox.ts.
@@ -139,25 +149,27 @@ export const createShiftSlice: StateCreator<DataState, [], [], ShiftState> = (se
       const existing = get().shifts.find((shift) => shift.cashierId === cashierId && !shift.endedAt);
       if (existing) return existing.id;
 
+      const op = beginOperation();
       if (typeof navigator !== "undefined" && navigator.onLine === false) {
-        return startShiftOffline(shopId, cashierId, openingCashMmk);
+        return startShiftOffline(shopId, cashierId, openingCashMmk, op);
       }
       try {
-        return await startShiftOnline(shopId, openingCashMmk);
+        return await startShiftOnline(shopId, openingCashMmk, op);
       } catch (err) {
-        if (isNetworkError(err)) return startShiftOffline(shopId, cashierId, openingCashMmk);
+        if (isNetworkError(err)) return startShiftOffline(shopId, cashierId, openingCashMmk, op);
         throw err;
       }
     },
 
     endShift: async ({ shiftId, closingCashMmk, varianceReason }) => {
+      const op = beginOperation();
       if (typeof navigator !== "undefined" && navigator.onLine === false) {
-        return endShiftOffline(shiftId, closingCashMmk, varianceReason);
+        return endShiftOffline(shiftId, closingCashMmk, varianceReason, op);
       }
       try {
-        return await endShiftOnline(shiftId, closingCashMmk, varianceReason);
+        return await endShiftOnline(shiftId, closingCashMmk, varianceReason, op);
       } catch (err) {
-        if (isNetworkError(err)) return endShiftOffline(shiftId, closingCashMmk, varianceReason);
+        if (isNetworkError(err)) return endShiftOffline(shiftId, closingCashMmk, varianceReason, op);
         throw err;
       }
     },

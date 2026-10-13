@@ -22,6 +22,7 @@ import { DashboardPage } from "../../pages/DashboardPage";
 import { BarcodeLabelsPage } from "../../pages/BarcodeLabelsPage";
 import { PhoneProductImageUploadPage } from "../../pages/PhoneProductImageUploadPage";
 import { NotFoundPage } from "../../pages/NotFoundPage";
+import { SetupPage } from "../../pages/SetupPage";
 import { useAuthStore } from "../../stores/authStore";
 import { useDataStore } from "../../stores/dataStore";
 import { ROUTE_PERMISSIONS } from "../../lib/permissions";
@@ -68,10 +69,23 @@ const AuditLogPage = lazy(() =>
 const SyncConflictsPage = lazy(() =>
   import("../../pages/SyncConflictsPage").then((m) => ({ default: m.SyncConflictsPage })),
 );
+const PlatformConsoleLoginPage = lazy(() =>
+  import("../../pages/PlatformConsoleLoginPage").then((m) => ({ default: m.PlatformConsoleLoginPage })),
+);
+const PlatformConsolePage = lazy(() =>
+  import("../../pages/PlatformConsolePage").then((m) => ({ default: m.PlatformConsolePage })),
+);
 
 const DefaultAppRoute = () => {
   const currentUserId = useAuthStore((state) => state.currentUserId);
   const currentUser = useDataStore((state) => state.users.find((user) => user.id === currentUserId));
+  const isLoading = useDataStore((state) => state.isLoading);
+  const isLoaded = useDataStore((state) => state.isLoaded);
+  // Same guard as RequireRole: the cache-first render may predate this
+  // user's row; wait for the in-flight load before deciding.
+  // Not loaded yet for this sign-in (login() resets the mirror; AppLayout's
+  // effect starts the load after this render): wait, don't bounce.
+  if (!currentUser && (isLoading || !isLoaded)) return <RouteFallback />;
   if (!currentUser) return <Navigate to="/login" replace />;
   if (currentUser.role === "BUYER") return <Navigate to="/app/catalog" replace />;
   return <Navigate to="/app/pos" replace />;
@@ -90,7 +104,17 @@ export const AppRouter = () => (
     <Routes>
       <Route path="/phone-upload/product-image/:token" element={<PhoneProductImageUploadPage />} />
       <Route path="/login" element={<LoginPage />} />
+      {/* First-time setup (Phase G): the explicit first-admin bootstrap.
+          Public route, but the page itself only acts when the server's
+          app_setup_needed() (migration 067) confirms the install is empty. */}
+      <Route path="/setup" element={<SetupPage />} />
       <Route path="/verify" element={<AdminVerifyPage />} />
+      {/* Internal platform-admin console — not linked from anywhere in the
+          app (no nav, no link on /login). Own auth (platformAuthStore),
+          own Edge Function (platform-console), never touches authStore,
+          RequireAuth, or AppLayout's data loading. */}
+      <Route path="/console/login" element={<PlatformConsoleLoginPage />} />
+      <Route path="/console" element={<PlatformConsolePage />} />
       <Route
         path="/app"
         element={

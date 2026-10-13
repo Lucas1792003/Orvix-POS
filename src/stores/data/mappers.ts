@@ -32,7 +32,7 @@ export const mapBusinessProfile = (r: any): BusinessProfile => ({
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const mapUser = (r: any): User => ({
   id: r.id, name: r.name, email: r.email ?? undefined, role: r.role,
-  shopId: r.shop_id ?? undefined, authId: r.auth_id ?? undefined,
+  shopId: r.shop_id ?? undefined, orgId: r.org_id ?? undefined, authId: r.auth_id ?? undefined,
   permissions: r.permissions ?? undefined,
   grantedPermissions: r.granted_permissions ?? undefined,
   revokedPermissions: r.revoked_permissions ?? undefined,

@@ -3,10 +3,12 @@ import type { DataState, TransferState, CreateTransferInput } from "../types";
 import type {
   AuditLog, Inventory, InventoryMovement, StockTransfer, StockTransferItem,
 } from "../../../types";
-import { supabase } from "../../../lib/supabase";
 import { isNetworkError } from "../../../lib/errors";
 import { newId } from "../../../lib/id";
 import { enqueueOutbox } from "../outbox";
+import {
+  beginOperation, callRpc, newIdempotencyKey, ONLINE_ONLY_RETRIES, type OperationContext,
+} from "../idempotentRpc";
 import { deleteLocalRows, putLocalRows } from "../localWrites";
 import { assertOfflineWriteEligible } from "../../authStore";
 
@@ -47,12 +49,13 @@ const mergeInventory = (current: Inventory[], updates: Inventory[]): Inventory[]
 export const createTransferSlice: StateCreator<DataState, [], [], TransferState> = (set, get) => {
   // Dispatch: source releases the goods. Marks the transfer IN_TRANSIT with
   // no inventory change ("hold at source" — stock only moves on receipt).
-  const dispatchTransferOnline = async (transferId: string): Promise<void> => {
-    const { data, error } = await supabase.rpc("dispatch_stock_transfer", {
+  const dispatchTransferOnline = async (transferId: string, op: OperationContext): Promise<void> => {
+    const { data, error } = await callRpc("dispatch_stock_transfer", {
       p_transfer_id: transferId,
-      p_created_at: new Date().toISOString(),
+      p_created_at: op.createdAt,
+      p_idempotency_key: op.idempotencyKey,
     });
-    if (error) throw new Error(error.message);
+    if (error) throw error;
     if (!data) throw new Error("Dispatch transfer returned no data.");
     const result = data as ApproveTransferResult;
 
@@ -68,7 +71,7 @@ export const createTransferSlice: StateCreator<DataState, [], [], TransferState>
   // just a status flip — nothing to approximate. The transfer this
   // references is assumed to already have a real id (creation/approval stay
   // online-only).
-  const dispatchTransferOffline = async (transferId: string, actorId: string): Promise<void> => {
+  const dispatchTransferOffline = async (transferId: string, actorId: string, op: OperationContext): Promise<void> => {
     await assertOfflineWriteEligible();
     const transfer = get().stockTransfers.find((t) => t.id === transferId);
     if (!transfer) throw new Error("Stock transfer not found.");
@@ -76,16 +79,18 @@ export const createTransferSlice: StateCreator<DataState, [], [], TransferState>
       throw new Error(`Transfer cannot be dispatched from status ${transfer.status}.`);
     }
 
-    const now = new Date().toISOString();
+    const now = op.createdAt;
     const updated: StockTransfer = {
       ...transfer, status: "IN_TRANSIT", dispatchedBy: actorId,
-      dispatchedAt: now, pendingSync: true,
+      dispatchedAt: now, pendingSync: true, idempotencyKey: op.idempotencyKey,
     };
     set((s) => ({ stockTransfers: s.stockTransfers.map((t) => (t.id === transferId ? updated : t)) }));
     void putLocalRows({ stockTransfers: [updated] });
 
     await enqueueOutbox({
-      kind: "rpc", name: "dispatch_stock_transfer", args: { p_transfer_id: transferId, p_created_at: now },
+      kind: "rpc", name: "dispatch_stock_transfer",
+      args: { p_transfer_id: transferId, p_created_at: now, p_idempotency_key: op.idempotencyKey },
+      idempotencyKey: op.idempotencyKey,
       shopId: transfer.fromShopId,
     });
   };
@@ -93,14 +98,15 @@ export const createTransferSlice: StateCreator<DataState, [], [], TransferState>
   // Receive: destination confirms receipt; atomic RPC moves stock (source →
   // dest) for the received quantities and writes paired movements.
   const receiveTransferOnline = async (
-    transferId: string, receivedItems: { productId: string; receivedQty: number }[] | undefined,
+    transferId: string, receivedItems: { productId: string; receivedQty: number }[] | undefined, op: OperationContext,
   ): Promise<void> => {
-    const { data, error } = await supabase.rpc("receive_stock_transfer", {
+    const { data, error } = await callRpc("receive_stock_transfer", {
       p_transfer_id: transferId,
       p_received_items: receivedItems ? receivedItems.map((r) => ({ product_id: r.productId, received_qty: r.receivedQty })) : null,
-      p_created_at: new Date().toISOString(),
+      p_created_at: op.createdAt,
+      p_idempotency_key: op.idempotencyKey,
     });
-    if (error) throw new Error(error.message);
+    if (error) throw error;
     if (!data) throw new Error("Receive transfer returned no data.");
     const result = data as CompleteTransferResult;
 
@@ -123,6 +129,7 @@ export const createTransferSlice: StateCreator<DataState, [], [], TransferState>
   // references is assumed to already have a real id.
   const receiveTransferOffline = async (
     transferId: string, actorId: string, receivedItems: { productId: string; receivedQty: number }[] | undefined,
+    op: OperationContext,
   ): Promise<void> => {
     await assertOfflineWriteEligible();
     const transfer = get().stockTransfers.find((t) => t.id === transferId);
@@ -131,7 +138,7 @@ export const createTransferSlice: StateCreator<DataState, [], [], TransferState>
       throw new Error(`Transfer cannot be received from status ${transfer.status}.`);
     }
 
-    const now = new Date().toISOString();
+    const now = op.createdAt;
     const lines = get().stockTransferItems.filter((i) => i.transferId === transferId);
     const inputByProduct = new Map((receivedItems ?? []).map((r) => [r.productId, r.receivedQty]));
 
@@ -167,19 +174,20 @@ export const createTransferSlice: StateCreator<DataState, [], [], TransferState>
         qtyChange: -qty, qtyBefore: srcBefore, qtyAfter: srcAfter,
         reason: `Stock transfer ${transfer.transferNo} (offline — pending sync)`,
         referenceType: "transfer", referenceId: transfer.id, createdBy: actorId, createdAt: now,
-        pendingSync: true, ...unitFields,
+        pendingSync: true, idempotencyKey: op.idempotencyKey, ...unitFields,
       });
       movements.push({
         id: newId("move"), shopId: transfer.toShopId, productId: item.productId, type: "TRANSFER_IN",
         qtyChange: qty, qtyBefore: dstBefore, qtyAfter: dstAfter,
         reason: `Stock transfer ${transfer.transferNo} (offline — pending sync)`,
         referenceType: "transfer", referenceId: transfer.id, createdBy: actorId, createdAt: now,
-        pendingSync: true, ...unitFields,
+        pendingSync: true, idempotencyKey: op.idempotencyKey, ...unitFields,
       });
     }
 
     const updatedTransfer: StockTransfer = {
-      ...transfer, status: "COMPLETED", receivedBy: actorId, receivedAt: now, completedAt: now, pendingSync: true,
+      ...transfer, status: "COMPLETED", receivedBy: actorId, receivedAt: now, completedAt: now,
+      pendingSync: true, idempotencyKey: op.idempotencyKey,
     };
 
     set((s) => ({
@@ -200,7 +208,9 @@ export const createTransferSlice: StateCreator<DataState, [], [], TransferState>
         p_transfer_id: transferId,
         p_received_items: receivedItems ? receivedItems.map((r) => ({ product_id: r.productId, received_qty: r.receivedQty })) : null,
         p_created_at: now,
+        p_idempotency_key: op.idempotencyKey,
       },
+      idempotencyKey: op.idempotencyKey,
       shopId: transfer.toShopId,
       provisional: [{ table: "movements", ids: movements.map((m) => m.id) }],
     });
@@ -212,7 +222,7 @@ export const createTransferSlice: StateCreator<DataState, [], [], TransferState>
 
   // Transfer creation: atomic RPC (validates permission, shop scope, stock).
   createTransfer: async ({ fromShopId, toShopId, items, notes }: CreateTransferInput) => {
-    const { data, error } = await supabase.rpc("create_stock_transfer", {
+    const { data, error } = await callRpc("create_stock_transfer", {
       p_from_shop_id: fromShopId,
       p_to_shop_id: toShopId,
       p_notes: notes ?? null,
@@ -222,8 +232,9 @@ export const createTransferSlice: StateCreator<DataState, [], [], TransferState>
         product_unit_id: i.productUnitId ?? null,
         selected_unit_quantity: i.selectedUnitQuantity ?? null,
       })),
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Create transfer returned no data.");
     const result = data as CreateTransferResult;
 
@@ -236,8 +247,12 @@ export const createTransferSlice: StateCreator<DataState, [], [], TransferState>
   },
 
   approveTransfer: async ({ transferId }) => {
-    const { data, error } = await supabase.rpc("approve_stock_transfer", { p_transfer_id: transferId });
-    if (error) throw new Error(error.message);
+    const { data, error } = await callRpc(
+      "approve_stock_transfer",
+      { p_transfer_id: transferId, p_idempotency_key: newIdempotencyKey() },
+      { retries: ONLINE_ONLY_RETRIES },
+    );
+    if (error) throw error;
     if (!data) throw new Error("Approve transfer returned no data.");
     const result = data as ApproveTransferResult;
 
@@ -253,11 +268,12 @@ export const createTransferSlice: StateCreator<DataState, [], [], TransferState>
   },
 
   rejectTransfer: async ({ transferId, reason }) => {
-    const { data, error } = await supabase.rpc("reject_stock_transfer", {
+    const { data, error } = await callRpc("reject_stock_transfer", {
       p_transfer_id: transferId,
       p_reason: reason,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Reject transfer returned no data.");
     const result = data as TransferStatusResult;
 
@@ -270,25 +286,27 @@ export const createTransferSlice: StateCreator<DataState, [], [], TransferState>
   },
 
   dispatchTransfer: async ({ transferId, actorId }) => {
+    const op = beginOperation();
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      return dispatchTransferOffline(transferId, actorId);
+      return dispatchTransferOffline(transferId, actorId, op);
     }
     try {
-      return await dispatchTransferOnline(transferId);
+      return await dispatchTransferOnline(transferId, op);
     } catch (err) {
-      if (isNetworkError(err)) return dispatchTransferOffline(transferId, actorId);
+      if (isNetworkError(err)) return dispatchTransferOffline(transferId, actorId, op);
       throw err;
     }
   },
 
   receiveTransfer: async ({ transferId, actorId, receivedItems }) => {
+    const op = beginOperation();
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      return receiveTransferOffline(transferId, actorId, receivedItems);
+      return receiveTransferOffline(transferId, actorId, receivedItems, op);
     }
     try {
-      return await receiveTransferOnline(transferId, receivedItems);
+      return await receiveTransferOnline(transferId, receivedItems, op);
     } catch (err) {
-      if (isNetworkError(err)) return receiveTransferOffline(transferId, actorId, receivedItems);
+      if (isNetworkError(err)) return receiveTransferOffline(transferId, actorId, receivedItems, op);
       throw err;
     }
   },
@@ -326,11 +344,12 @@ export const createTransferSlice: StateCreator<DataState, [], [], TransferState>
   },
 
   cancelTransfer: async ({ transferId, reason }) => {
-    const { data, error } = await supabase.rpc("cancel_stock_transfer", {
+    const { data, error } = await callRpc("cancel_stock_transfer", {
       p_transfer_id: transferId,
       p_reason: reason,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Cancel transfer returned no data.");
     const result = data as TransferStatusResult;
 

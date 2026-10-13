@@ -1,7 +1,8 @@
-import { useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
-import { useAuthStore } from "../stores/authStore";
+import { useEffect, useState, type FormEvent } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { isAppSetupNeeded, useAuthStore } from "../stores/authStore";
 import { useAppStore } from "../stores/appStore";
+import { backendHost } from "../lib/supabase";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
@@ -16,9 +17,23 @@ export const LoginPage = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // True only when the server confirmed the install has no users yet
+  // (migration 067) — then, and only then, the first-time-setup link is
+  // offered. Signing in never creates an account (Phase G).
+  const [setupNeeded, setSetupNeeded] = useState(false);
 
   const login = useAuthStore((state) => state.login);
   const setAppShopId = useAppStore((state) => state.setShopId);
+
+  useEffect(() => {
+    let cancelled = false;
+    void isAppSetupNeeded().then((result) => {
+      if (!cancelled) setSetupNeeded(result.needed);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -35,6 +50,7 @@ export const LoginPage = () => {
 
     if (result.error) {
       setError(result.error);
+      if (result.setupNeeded) setSetupNeeded(true);
       return;
     }
 
@@ -62,8 +78,13 @@ export const LoginPage = () => {
                 {t("auth", "brandTagline")}
               </p>
             </div>
-            <div className="mt-10 text-xs text-emerald-100/70">
-              {t("auth", "contactAdmin")}
+            <div className="mt-10 space-y-1 text-xs text-emerald-100/70">
+              <div>{t("auth", "contactAdmin")}</div>
+              {/* Which backend this till talks to — visible on every login
+                  screen so a mis-targeted build is caught at a glance. */}
+              <div className="font-mono" data-testid="login-backend">
+                {t("auth", "backendLabel")}: {backendHost}
+              </div>
             </div>
           </div>
           <div className="p-8">
@@ -134,7 +155,14 @@ export const LoginPage = () => {
               </Button>
             </form>
             <div className="mt-6 rounded-2xl border border-dashed border-emerald-200 bg-emerald-50/70 p-4 text-xs text-emerald-700">
-              {t("auth", "firstTimeHint")}
+              {setupNeeded ? (
+                <>
+                  {t("auth", "setupNeededHint")}{" "}
+                  <Link to="/setup" className="font-medium underline">{t("auth", "setupLink")}</Link>
+                </>
+              ) : (
+                t("auth", "staffCreatedByAdmin")
+              )}
             </div>
           </div>
         </div>

@@ -34,6 +34,19 @@ export interface SyncOutboxEntry {
   status: "pending" | "syncing" | "failed" | "conflict";
   attempts: number;
   lastError?: string;
+  // Client-minted UUID v4, generated when the operation was created and
+  // sent as `p_idempotency_key` on every attempt (online or replay) so the
+  // server can return the original response instead of applying the
+  // operation twice. Also present inside `args` for "rpc" entries. See
+  // docs/selfhost-migration/phase-d/idempotency-contract.md.
+  idempotencyKey?: string;
+  // Earliest time the next automatic attempt may run (exponential backoff
+  // after a transient failure). Absent = eligible now.
+  nextAttemptAt?: string;
+  // How the last failure was classified — "transient" entries stay
+  // pending and auto-retry, "permanent" ones are conflicts needing a
+  // person. Shown on the Sync Conflicts page.
+  failureKind?: "transient" | "permanent";
   // Provisional local rows (by table + id) this entry created. RPCs mint
   // their own ids server-side, so on success these get removed and replaced
   // with the server's authoritative rows rather than updated in place.
@@ -72,9 +85,36 @@ export interface CachedAuthUser {
   userId: string;
   role: string;
   shopId: string | null;
+  orgId: string | null;
   isActive: boolean;
   hasTotp: boolean;
+  // Permission snapshot from the `users` row (additive grants / explicit
+  // denials on top of the role defaults). Only ever written from a server
+  // response — never from local state.
+  grantedPermissions?: string[];
+  revokedPermissions?: string[];
+  // Time of the last successful *authenticated* server round trip (full
+  // load, delta pull, RPC reply, login/restore). The offline authorisation
+  // window in authStore.ts is measured from here — see
+  // docs/selfhost-migration/phase-d/offline-authorization.md.
   cachedAt: string;
+}
+
+export const SYNC_STATE_KEYS = {
+  needsReauth: "needs-reauth",
+  drainLease: "drain-lease",
+} as const;
+
+/** Small key/value table for sync-layer state that must survive a reload
+ *  and must never be wiped by a snapshot replace: the cross-instance drain
+ *  lease and the "needs sign-in" flag. See stores/data/outbox.ts. */
+export interface SyncStateEntry {
+  key: string;
+  ownerId?: string;
+  expiresAt?: string;
+  flag?: boolean;
+  reason?: string;
+  updatedAt: string;
 }
 
 // Mirrors DataState's arrays one-for-one so hydrate/persist can stay a
@@ -112,6 +152,7 @@ export class LocalDb extends Dexie {
   syncMeta!: Table<SyncMetaEntry, string>;
   provisionalIdMap!: Table<ProvisionalIdMapping, string>;
   authCache!: Table<CachedAuthUser, string>;
+  syncState!: Table<SyncStateEntry, string>;
 
   constructor() {
     super("shwe-phala-local");
@@ -148,7 +189,37 @@ export class LocalDb extends Dexie {
       provisionalIdMap: "provisionalId",
       authCache: "authId",
     });
+    // Phase D: idempotency keys on outbox entries + the syncState table.
+    // Only changed/new tables need listing; the rest carry over. Entries
+    // queued before this version get a key here so their first replay is
+    // already idempotent (outbox.ts also assigns one lazily, in case the
+    // upgrade was interrupted).
+    this.version(2)
+      .stores({
+        syncOutbox: "localId, status, shopId, createdAt, idempotencyKey",
+        syncState: "key",
+      })
+      .upgrade((tx) =>
+        tx.table("syncOutbox").toCollection().modify((entry: SyncOutboxEntry) => {
+          if (entry.kind !== "rpc" || entry.idempotencyKey) return;
+          const existing = entry.args?.p_idempotency_key;
+          const key = typeof existing === "string" ? existing : crypto.randomUUID();
+          entry.idempotencyKey = key;
+          entry.args = { ...(entry.args ?? {}), p_idempotency_key: key };
+        }),
+      );
   }
 }
+
+/** Tables that hold the server snapshot and are fully replaced by a load.
+ *  Everything else (outbox, id map, cursors, auth cache, sync state) is
+ *  device-local state that a load must never clear. */
+export const SNAPSHOT_TABLE_NAMES = [
+  "shops", "users", "categories", "brands", "unitTypes", "products", "productUnits", "barcodes",
+  "priceTiers", "priceLevels", "productUnitPrices", "inventory", "movements", "suppliers",
+  "purchaseOrders", "purchaseOrderItems", "supplierPayments", "supplierProducts", "stockTransfers",
+  "stockTransferItems", "shifts", "sales", "saleItems", "reprintLogs", "refunds", "auditLogs",
+  "businessProfile",
+] as const;
 
 export const localDb = new LocalDb();

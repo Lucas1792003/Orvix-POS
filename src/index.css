@@ -537,6 +537,16 @@ body {
   letter-spacing: 0.04em;
 }
 
+/* Backend host indicator (Phase G) — small, monospace, truncated. */
+.sidebar-user .sidebar-backend {
+  font-size: 0.65rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--color-text-placeholder);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .logout-btn {
   display: inline-flex;
   align-items: center;

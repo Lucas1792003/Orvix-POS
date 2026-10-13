@@ -15,35 +15,46 @@ export const PRODUCT_IMAGE_BUCKET = "product-images";
 
 /**
  * Deterministic, human-readable storage path for a product image:
- * `products/<productId>/<timestamp>.<ext>`. The timestamp makes each upload a
- * fresh object so replacing an image is never blocked by browser/CDN caching.
- * Pure — safe to unit test.
+ * `org/<orgId>/products/<productId>/<timestamp>.<ext>`. The organization
+ * prefix is what the storage policies authorize (migration 078: a user may
+ * only write under its own organization, and never into another
+ * organization's product folder). The timestamp makes each upload a fresh
+ * object so replacing an image is never blocked by browser/CDN caching.
+ * The business logo uses productId `"brand"`. Pure — safe to unit test.
  */
-export function buildProductImagePath(productId: string, mimeType: string): string {
+export function buildProductImagePath(orgId: string, productId: string, mimeType: string): string {
   const ext = mimeType === "image/webp" ? "webp" : "jpg";
-  return `products/${productId}/${Date.now()}.${ext}`;
+  return `org/${orgId}/products/${productId}/${Date.now()}.${ext}`;
 }
+
+/** One non-empty storage path segment (no "/", not "." or ".."). */
+const isPathSegment = (value: string): boolean =>
+  value.length > 0 && !value.includes("/") && value !== "." && value !== "..";
 
 /**
  * Upload a compressed product image to Supabase Storage and return its public
  * URL (store this in `products.image_url`).
  *
  * Throws a friendly `Error` if the image is somehow over the 100 KB cap, if no
- * product id is given, or if the Storage upload fails.
+ * product id or organization is given, or if the Storage upload fails.
  */
 export async function uploadProductImage(
   productId: string,
   image: CompressedImage,
+  orgId: string | null | undefined,
 ): Promise<string> {
   // Defensive: never upload anything above the product-image size cap.
   if (image.bytes > MAX_PRODUCT_IMAGE_BYTES) {
     throw new Error("Compressed image is over the 100 KB limit and was not uploaded.");
   }
-  if (!productId) {
+  if (!productId || !isPathSegment(productId)) {
     throw new Error("A product id is required before an image can be uploaded.");
   }
+  if (!orgId || !isPathSegment(orgId)) {
+    throw new Error("Your organization could not be determined. Sign in again and retry the upload.");
+  }
 
-  const path = buildProductImagePath(productId, image.mimeType);
+  const path = buildProductImagePath(orgId, productId, image.mimeType);
 
   // Imported lazily so this module (and its pure helpers) can be unit tested
   // without constructing the Supabase client.

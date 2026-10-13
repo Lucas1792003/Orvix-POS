@@ -1,12 +1,23 @@
 import { create } from "zustand";
 import { supabase } from "../lib/supabase";
-import { isNetworkError } from "../lib/errors";
-import { localDb, type CachedAuthUser } from "../lib/localDb";
+import { isNetworkError, OFFLINE_AUTHORIZATION_ERROR } from "../lib/errors";
+import { localDb, SYNC_STATE_KEYS, type CachedAuthUser } from "../lib/localDb";
+import { setActiveAuthId } from "./authCache";
 
-interface LoginResult {
+export interface LoginResult {
   error: string | null;
   role?: string;
   shopId?: string;
+  /** Set when the sign-in itself worked but this install has no app users
+   *  yet — the login page points the operator at the explicit /setup page. */
+  setupNeeded?: boolean;
+}
+
+export interface SetupStatus {
+  /** True only when the server confirmed `users` is empty (migration 067). */
+  needed: boolean;
+  /** Why the check could not be made — the UI must NOT offer setup then. */
+  error: string | null;
 }
 
 interface RequestCodeResult {
@@ -38,6 +49,11 @@ interface AuthState {
   // Role of the signed-in user, captured at login/restore so route guards can
   // gate the admin verification step before the data store's users are loaded.
   currentRole: string | null;
+  // Migration 059, Phase 1 of multi-tenant: captured at login/restore like
+  // currentRole, but nothing reads it yet — no RLS/RPC enforces org
+  // scoping today (single org in production). Exists now so later phases
+  // don't have to add auth-store plumbing under pressure.
+  currentOrgId: string | null;
   // True once an ADMIN has passed verification this session — via TOTP (the
   // Supabase session is aal2) OR the emailed code. Always true for non-admins.
   adminVerified: boolean;
@@ -45,7 +61,17 @@ interface AuthState {
   // Drives whether the verify page asks for the app code or the email code.
   hasTotp: boolean;
   isAuthLoading: boolean;
+  /** Password sign-in ONLY. Never creates an auth account: a failed sign-in
+   *  returns GoTrue's message as-is. (Phase G — the previous implicit
+   *  signUp() fallback created an orphan user on the hosted project.) */
   login: (email: string, password: string) => Promise<LoginResult>;
+  /** The explicit first-admin bootstrap behind the /setup page: refuses
+   *  unless app_setup_needed() says the install has no users, then creates
+   *  (or signs in to) the auth account and calls bootstrap_first_admin()
+   *  (migration 076), which creates the first organization + ADMIN row
+   *  atomically server-side. The only place the app ever calls
+   *  auth.signUp() for itself. */
+  bootstrapFirstAdmin: (email: string, password: string) => Promise<LoginResult>;
   logout: () => Promise<void>;
   restoreSession: () => Promise<void>;
   // Admin 2FA — email path: send a code, then verify it.
@@ -132,8 +158,11 @@ interface AppUserRow {
   id: string;
   role: string;
   shop_id: string | null;
+  org_id: string;
   is_active: boolean;
   auth_id: string | null;
+  granted_permissions?: string[] | null;
+  revoked_permissions?: string[] | null;
 }
 
 interface ResolveResult {
@@ -141,7 +170,7 @@ interface ResolveResult {
   error?: string;
 }
 
-const USER_FIELDS = "id, role, shop_id, is_active, auth_id";
+const USER_FIELDS = "id, role, shop_id, org_id, is_active, auth_id, granted_permissions, revoked_permissions";
 
 // Escape LIKE wildcards so emails containing _ or % match literally.
 const escapeLike = (value: string) => value.replace(/[\\%_]/g, (c) => `\\${c}`);
@@ -201,17 +230,22 @@ async function resolveAppUser(authUser: { id: string; email?: string }): Promise
   return { user: row };
 }
 
-// How long a device trusts its last-known login while it can't reach the
-// network to re-verify (e.g. a deactivated/reassigned user's access should
-// still lapse within a shift-to-shift cycle, not stay open indefinitely).
-// See docs/10-offline-desktop-known-issues.md.
-const OFFLINE_SESSION_TRUST_MS = 24 * 60 * 60 * 1000;
+// How long a device trusts its last-known login for *read-only* use while
+// it can't reach the network to re-verify, measured from the last
+// successful authenticated server round trip (`authCache.cachedAt`, see
+// stores/authCache.ts). A deactivated/reassigned user's access still lapses
+// within a day, not indefinitely. See
+// docs/selfhost-migration/phase-d/offline-authorization.md.
+export const OFFLINE_SESSION_TRUST_MS = 24 * 60 * 60 * 1000;
 
 async function cacheAppUser(authId: string, user: AppUserRow, hasTotp: boolean): Promise<void> {
   try {
     await localDb.authCache.put({
-      authId, userId: user.id, role: user.role, shopId: user.shop_id,
-      isActive: user.is_active, hasTotp, cachedAt: new Date().toISOString(),
+      authId, userId: user.id, role: user.role, shopId: user.shop_id, orgId: user.org_id,
+      isActive: user.is_active, hasTotp,
+      grantedPermissions: user.granted_permissions ?? undefined,
+      revokedPermissions: user.revoked_permissions ?? undefined,
+      cachedAt: new Date().toISOString(),
     });
   } catch (err) {
     console.error("[auth] Failed to cache the resolved user for offline restore:", err);
@@ -233,46 +267,106 @@ async function getCachedAppUser(authId: string): Promise<CachedAuthUser | undefi
   }
 }
 
-// Much shorter than OFFLINE_SESSION_TRUST_MS above, and governs a
-// different thing: OFFLINE_SESSION_TRUST_MS decides whether a device stays
-// logged in to browse cached data offline (fine to be generous — a
-// connectivity blip shouldn't log anyone out mid-shift). This window
-// decides whether it may keep performing *new* writes offline (stock
-// adjustments, sales, shift open/close, transfers, refund/void requests,
-// supplier payments) — a deactivated/revoked account should stop being
-// able to do that well before the read-only session itself expires,
-// since each of those is a real-world action (cash taken, stock moved)
-// that only the eventual outbox sync would otherwise catch, up to 24h
-// later. See docs/09-roadmap-todo.md.
-const OFFLINE_WRITE_TRUST_MS = 2 * 60 * 60 * 1000;
+// Shorter than OFFLINE_SESSION_TRUST_MS above, and governs a different
+// thing: OFFLINE_SESSION_TRUST_MS decides whether a device stays logged in
+// to browse cached data offline (fine to be generous — a connectivity blip
+// shouldn't log anyone out mid-shift). This window decides whether it may
+// keep performing *new* writes offline (stock adjustments, sales, shift
+// open/close, transfers, refund/void requests, supplier payments) — a
+// deactivated/revoked account should stop being able to do that before
+// the read-only session itself expires, since each of those is a
+// real-world action (cash taken, stock moved) that only the eventual
+// outbox sync would otherwise catch.
+//
+// Measured from the last successful authenticated round trip (refreshed
+// on every full load, delta pull and RPC reply — not just at boot/login),
+// so it is effectively "time since the connection was lost". 12 h covers
+// a full trading day with the link lost at opening, while still forcing a
+// re-validation before the next day; the server re-validates every
+// replayed RPC regardless. Rationale and trade-offs:
+// docs/selfhost-migration/phase-d/offline-authorization.md §2.
+export const OFFLINE_WRITE_TRUST_MS = 12 * 60 * 60 * 1000;
 
 /**
  * Guard called as the first line of every offline-write function (the
  * *Offline variants in src/stores/data/slices/*.ts, before any local
  * optimistic write happens) — throws if this device hasn't confirmed its
- * identity against the live server within OFFLINE_WRITE_TRUST_MS. Reads the
- * same authCache row cacheAppUser() populates on every successful online
- * resolution (restoreSession, login), so a deactivated/revoked account
- * stops being able to queue new offline activity well before the longer
- * read-only session window lapses. Read-only browsing of already-cached
- * data is unaffected — this only gates new writes.
+ * identity against the live server within OFFLINE_WRITE_TRUST_MS, or if the
+ * server has explicitly rejected its session (needs-reauth, see
+ * stores/data/outbox.ts). Reads the same authCache row cacheAppUser()
+ * populates and the sync layer keeps fresh, so a deactivated/revoked
+ * account stops being able to queue new offline activity well before the
+ * longer read-only session window lapses. Read-only browsing of
+ * already-cached data is unaffected — this only gates new writes, and the
+ * queue of already-recorded activity is never touched.
+ *
+ * This is a UX/latency control, not the security boundary: every replayed
+ * RPC is re-validated server-side (current_app_user(), p_expected_actor_id).
  */
 export async function assertOfflineWriteEligible(): Promise<void> {
+  // Checked before the session: when the server has rejected the refresh
+  // token, supabase-js has already dropped the session, and "sign in again"
+  // is the actionable message, not "not authenticated".
+  const needsReauth = (await localDb.syncState.get(SYNC_STATE_KEYS.needsReauth))?.flag === true;
+  if (needsReauth) {
+    throw new OfflineAuthorizationError("Your sign-in has expired. Sign in again to continue — queued activity is kept.");
+  }
   const { data } = await supabase.auth.getSession();
   const authId = data.session?.user.id;
-  if (!authId) throw new Error("Not authenticated.");
+  if (!authId) throw new OfflineAuthorizationError("Not authenticated.");
   const cached = await localDb.authCache.get(authId);
   const age = cached ? Date.now() - Date.parse(cached.cachedAt) : Infinity;
   if (age > OFFLINE_WRITE_TRUST_MS) {
-    throw new Error(
-      "Reconnect to the internet to verify your session before recording new offline activity.",
+    const hours = Math.round(OFFLINE_WRITE_TRUST_MS / 3_600_000);
+    throw new OfflineAuthorizationError(
+      `This device has been offline for more than ${hours} hours. Reconnect to the internet to verify your sign-in before recording new offline activity — anything already queued is kept and will sync.`,
     );
   }
+}
+
+/** Thrown by assertOfflineWriteEligible(). Carries a message written for
+ *  the cashier; lib/errors.ts's getErrorMessage() shows it verbatim
+ *  instead of mapping it to the generic "Network error" text it would
+ *  otherwise pick while the device is offline (Phase E finding). */
+export class OfflineAuthorizationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = OFFLINE_AUTHORIZATION_ERROR;
+  }
+}
+
+/**
+ * Ask the server whether first-time setup is still needed — i.e. whether
+ * the `users` table is empty — through the read-only SECURITY DEFINER RPC
+ * from migration 067, which anon may execute. Fails CLOSED: any error
+ * (function not deployed yet, network, RLS) reports `needed: false` with the
+ * reason, so the UI never offers to create an administrator on a backend it
+ * could not actually confirm is empty.
+ */
+export async function isAppSetupNeeded(): Promise<SetupStatus> {
+  try {
+    const { data, error } = await supabase.rpc("app_setup_needed");
+    if (error) return { needed: false, error: error.message };
+    return { needed: data === true, error: null };
+  } catch (err) {
+    return { needed: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+const SETUP_ALREADY_DONE = "Setup has already been completed on this backend. Sign in with your existing account instead.";
+
+/** The jsonb returned by bootstrap_first_admin() (migration 076). */
+function parseBootstrapResult(data: unknown): { userId: string; orgId: string } | null {
+  if (!data || typeof data !== "object") return null;
+  const { userId, orgId, role } = data as Record<string, unknown>;
+  if (typeof userId !== "string" || typeof orgId !== "string" || role !== "ADMIN") return null;
+  return { userId, orgId };
 }
 
 export const useAuthStore = create<AuthState>()((set) => ({
   currentUserId: null,
   currentRole: null,
+  currentOrgId: null,
   adminVerified: false,
   hasTotp: false,
   isAuthLoading: true,
@@ -283,9 +377,11 @@ export const useAuthStore = create<AuthState>()((set) => ({
     const { data } = await supabase.auth.getSession();
     const authUser = data.session?.user;
     if (!authUser) {
-      set({ currentUserId: null, currentRole: null, adminVerified: false, hasTotp: false, isAuthLoading: false });
+      setActiveAuthId(null);
+      set({ currentUserId: null, currentRole: null, currentOrgId: null, adminVerified: false, hasTotp: false, isAuthLoading: false });
       return;
     }
+    setActiveAuthId(authUser.id);
 
     let result: ResolveResult;
     try {
@@ -308,7 +404,10 @@ export const useAuthStore = create<AuthState>()((set) => ({
       if (isNetworkError(result.error)) {
         const cached = await getCachedAppUser(authUser.id);
         if (cached) {
-          user = { id: cached.userId, role: cached.role, shop_id: cached.shopId, is_active: cached.isActive, auth_id: authUser.id };
+          user = {
+            id: cached.userId, role: cached.role, shop_id: cached.shopId,
+            org_id: cached.orgId ?? "", is_active: cached.isActive, auth_id: authUser.id,
+          };
           fromCache = true;
           cachedHasTotp = cached.hasTotp;
         }
@@ -331,6 +430,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
     set({
       currentUserId: active ? user!.id : null,
       currentRole: active ? user!.role : null,
+      currentOrgId: active ? user!.org_id : null,
       hasTotp,
       // Admin is verified if the session is aal2 (TOTP) or the email flag is set.
       adminVerified: isAdmin ? isAal2 || isVerifiedThisSession(authUser.id) : true,
@@ -341,30 +441,18 @@ export const useAuthStore = create<AuthState>()((set) => ({
   },
 
   login: async (email, password) => {
-    let authResult = await supabase.auth.signInWithPassword({ email, password });
-
-    if (authResult.error) {
-      // Allow signup only for the very first user. We can't pre-check the
-      // `users` table here — its SELECT policy is `TO authenticated` only
-      // (migration 010), and this call is still anonymous, so it would
-      // always read back empty and misreport every failed login as
-      // "first-time setup". Let Supabase's own signUp() be the source of
-      // truth instead: if the email already has an auth account, signUp
-      // rejects with "already registered", which means the original
-      // failure really was a bad password — surface that, not the signUp
-      // error. (The `users`-table-empty check after this block, once we
-      // have a session, runs `to authenticated` and is accurate.)
-      const signUp = await supabase.auth.signUp({ email, password });
-      if (signUp.error) {
-        const alreadyRegistered = /already registered/i.test(signUp.error.message);
-        return { error: alreadyRegistered ? "Invalid email or password." : signUp.error.message };
-      }
-      authResult = await supabase.auth.signInWithPassword({ email, password });
-      if (authResult.error) return { error: authResult.error.message };
-    }
+    // Sign in, and nothing else. A failed password sign-in is reported with
+    // GoTrue's own message and the call ends here — the previous "maybe this
+    // is the very first user" signUp() fallback is gone (Phase G: it created
+    // an orphan auth user on the hosted project; see
+    // docs/selfhost-migration/phase-g/login-signup-fix.md). First-time setup
+    // is the explicit bootstrapFirstAdmin() action behind /setup.
+    const authResult = await supabase.auth.signInWithPassword({ email, password });
+    if (authResult.error) return { error: authResult.error.message };
 
     const authUser = authResult.data.user;
     if (!authUser) return { error: "Authentication failed." };
+    setActiveAuthId(authUser.id);
 
     const result = await resolveAppUser({ id: authUser.id, email: authUser.email ?? undefined });
     if (result.error) {
@@ -372,36 +460,25 @@ export const useAuthStore = create<AuthState>()((set) => ({
       return { error: result.error };
     }
 
-    // No app `users` row linked to this auth account.
+    // No app `users` row linked to this auth account. Either the install has
+    // no users at all yet (point at /setup — the row is created there, never
+    // here) or this is an orphan auth account that an admin must link.
+    // Decided by the server (app_setup_needed(), migration 067 — an
+    // unfiltered count), NOT by reading `users` here: since 069 that read is
+    // org-scoped by RLS, so an orphan sees zero rows on a populated install
+    // and would be sent to /setup. A failed check counts as "not empty"
+    // (fail closed: never offer setup on doubt).
     if (!result.user) {
-      const { data: anyUser } = await supabase.from("users").select("id").limit(1);
-      const tableEmpty = !anyUser || anyUser.length === 0;
-      if (!tableEmpty) {
-        // Orphan auth account — a staff profile must be created/linked by an admin.
-        await supabase.auth.signOut();
-        return { error: "No staff profile is linked to this account. Contact an administrator." };
+      const setup = await isAppSetupNeeded();
+      await supabase.auth.signOut();
+      setActiveAuthId(null);
+      if (setup.needed) {
+        return {
+          error: "This installation has no staff profiles yet. Run first-time setup to create the first administrator.",
+          setupNeeded: true,
+        };
       }
-      // First-time setup: create the first ADMIN, linked by auth_id from the start.
-      const normalizedEmail = email.trim().toLowerCase();
-      const adminId = `user-${normalizedEmail.replace(/[^a-z0-9]/gi, "-")}`;
-      const adminName = normalizedEmail.split("@")[0]?.replace(/[^a-z0-9]/gi, " ").trim() || "Admin";
-      const insert = await supabase.from("users").insert({
-        id: adminId,
-        name: adminName,
-        email: normalizedEmail,
-        role: "ADMIN",
-        auth_id: authUser.id,
-        is_active: true,
-        created_at: new Date().toISOString(),
-      });
-      if (insert.error) {
-        await supabase.auth.signOut();
-        return { error: insert.error.message };
-      }
-      // First admin must still verify (no factor yet → email path).
-      set({ currentUserId: adminId, currentRole: "ADMIN", adminVerified: false, hasTotp: false });
-      void cacheAppUser(authUser.id, { id: adminId, role: "ADMIN", shop_id: null, is_active: true, auth_id: authUser.id }, false);
-      return { error: null, role: "ADMIN" };
+      return { error: "No staff profile is linked to this account. Contact an administrator." };
     }
 
     const user = result.user;
@@ -412,9 +489,19 @@ export const useAuthStore = create<AuthState>()((set) => ({
 
     const isAdmin = user.role === "ADMIN";
     const { hasTotp, isAal2 } = isAdmin ? await readMfaState() : { hasTotp: false, isAal2: false };
+    // A fresh sign-in always re-reads the server (same reset as logout()).
+    // The till's mirror may hold another account's RLS view - e.g. the reload
+    // done while a just-DEACTIVATED cashier was still signed in, which since
+    // 069 (users_sel / catalog scoped by app_org_id(), NULL for an inactive
+    // account) is EMPTY - and the till can reach /login without logout()
+    // (route guard). With isLoaded left true AppLayout never reloaded and the
+    // route guards bounced the new user back to /login.
+    const { useDataStore } = await import("./dataStore");
+    useDataStore.setState({ isLoaded: false, isLoading: false, loadError: null });
     set({
       currentUserId: user.id,
       currentRole: user.role,
+      currentOrgId: user.org_id,
       hasTotp,
       adminVerified: isAdmin ? isAal2 || isVerifiedThisSession(authUser.id) : true,
     });
@@ -422,13 +509,81 @@ export const useAuthStore = create<AuthState>()((set) => ({
     return { error: null, role: user.role, shopId: user.shop_id ?? undefined };
   },
 
+  bootstrapFirstAdmin: async (email, password) => {
+    // 1. The server must say setup is needed (migration 067). Any doubt —
+    //    RPC missing, network, RLS — refuses; nothing is created on a
+    //    backend this client could not confirm is empty.
+    const status = await isAppSetupNeeded();
+    if (status.error) {
+      return { error: `Could not confirm that first-time setup is needed: ${status.error}` };
+    }
+    if (!status.needed) return { error: SETUP_ALREADY_DONE };
+
+    // 2. The auth account. Sign in first (the account may already exist —
+    //    e.g. created through the auth admin API, or an earlier attempt that
+    //    stopped before the users row); only when that fails, create it.
+    //    This is the ONLY place the app calls auth.signUp() for itself, and
+    //    it is reached solely through the explicit /setup action.
+    let authResult = await supabase.auth.signInWithPassword({ email, password });
+    if (authResult.error) {
+      const signUp = await supabase.auth.signUp({ email, password });
+      if (signUp.error) return { error: signUp.error.message };
+      authResult = await supabase.auth.signInWithPassword({ email, password });
+      if (authResult.error) return { error: authResult.error.message };
+    }
+    const authUser = authResult.data.user;
+    if (!authUser) return { error: "Authentication failed." };
+    setActiveAuthId(authUser.id);
+
+    // 3. Re-check with the server's unfiltered answer (not an RLS-scoped
+    //    `users` read, which an orphan session sees as empty). Advisory only:
+    //    the authoritative check is repeated inside bootstrap_first_admin()
+    //    under an install-wide lock.
+    const recheck = await isAppSetupNeeded();
+    if (recheck.error || !recheck.needed) {
+      await supabase.auth.signOut();
+      setActiveAuthId(null);
+      return {
+        error: recheck.error
+          ? `Could not confirm that first-time setup is needed: ${recheck.error}`
+          : SETUP_ALREADY_DONE,
+      };
+    }
+
+    // 4. First-time setup, atomically on the server (migration 076): one
+    //    transaction under an install-wide advisory lock re-checks that no
+    //    app user exists, then creates the first organization (+ its
+    //    business_profile) and the ADMIN row linked by auth_id. Two operators
+    //    racing on a fresh install get exactly one organization and one
+    //    ADMIN; the loser is refused with SETUP_ALREADY_COMPLETED. The
+    //    organizations / users INSERT policies no longer allow a bootstrap
+    //    from the client, so this RPC is the only path.
+    const { data, error } = await supabase.rpc("bootstrap_first_admin");
+    const created = parseBootstrapResult(data);
+    if (error || !created) {
+      await supabase.auth.signOut();
+      setActiveAuthId(null);
+      if (error?.message.includes("SETUP_ALREADY_COMPLETED")) return { error: SETUP_ALREADY_DONE };
+      return { error: error?.message ?? "First-time setup returned no administrator." };
+    }
+    const { userId: adminId, orgId } = created;
+    // First admin must still verify (no factor yet → email path).
+    set({ currentUserId: adminId, currentRole: "ADMIN", currentOrgId: orgId, adminVerified: false, hasTotp: false });
+    void cacheAppUser(authUser.id, { id: adminId, role: "ADMIN", shop_id: null, org_id: orgId, is_active: true, auth_id: authUser.id }, false);
+    return { error: null, role: "ADMIN" };
+  },
+
   logout: async () => {
     const { data } = await supabase.auth.getSession();
     const authId = data.session?.user.id;
     await supabase.auth.signOut();
     clearVerified();
+    setActiveAuthId(null);
+    // The outbox (and its needs-reauth flag) is deliberately NOT cleared:
+    // queued activity is real till activity and drains after the next
+    // sign-in — see docs/selfhost-migration/phase-d/offline-authorization.md.
     if (authId) void localDb.authCache.delete(authId);
-    set({ currentUserId: null, currentRole: null, adminVerified: false, hasTotp: false });
+    set({ currentUserId: null, currentRole: null, currentOrgId: null, adminVerified: false, hasTotp: false });
     // Clear the shared data mirror immediately so a different user logging
     // in right after (no connectivity gap in between, so no offline→online
     // trigger fires) can't briefly render the previous user's cached

@@ -4,12 +4,14 @@ import type {
   AuditLog, Inventory, InventoryMovement, PurchaseOrder, PurchaseOrderItem,
   Supplier, SupplierPayment,
 } from "../../../types";
-import { supabase } from "../../../lib/supabase";
 import { isNetworkError } from "../../../lib/errors";
 import { newId } from "../../../lib/id";
 import { useAuthStore, assertOfflineWriteEligible } from "../../authStore";
 import { enqueueOutbox } from "../outbox";
 import { deleteLocalRows, putLocalRows } from "../localWrites";
+import {
+  beginOperation, callRpc, newIdempotencyKey, ONLINE_ONLY_RETRIES, type OperationContext,
+} from "../idempotentRpc";
 
 // Shape returned by the receive_purchase_order RPC (camelCase keys).
 interface ReceivePurchaseOrderResult {
@@ -61,16 +63,18 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   const receivePurchaseOrderOnline = async (
     purchaseOrderId: string,
     receivedItems: { productId: string; receivedQty?: number; productUnitId?: string; receivedUnitQty?: number }[],
+    op: OperationContext,
   ): Promise<void> => {
-    const { data, error } = await supabase.rpc("receive_purchase_order", {
+    const { data, error } = await callRpc("receive_purchase_order", {
       p_purchase_order_id: purchaseOrderId,
       p_received_items: receivedItems.map((r) => ({
         product_id: r.productId, received_qty: r.receivedQty ?? null,
         product_unit_id: r.productUnitId ?? null, received_unit_qty: r.receivedUnitQty ?? null,
       })),
-      p_created_at: new Date().toISOString(),
+      p_created_at: op.createdAt,
+      p_idempotency_key: op.idempotencyKey,
     });
-    if (error) throw new Error(error.message);
+    if (error) throw error;
     if (!data) throw new Error("Receiving returned no data.");
     const result = data as ReceivePurchaseOrderResult;
 
@@ -96,13 +100,14 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   const receivePurchaseOrderOffline = async (
     purchaseOrderId: string, receiverId: string,
     receivedItems: { productId: string; receivedQty?: number; productUnitId?: string; receivedUnitQty?: number }[],
+    op: OperationContext,
   ): Promise<void> => {
     await assertOfflineWriteEligible();
     const po = get().purchaseOrders.find((p) => p.id === purchaseOrderId);
     if (!po) throw new Error("Purchase order not found.");
     if (po.status !== "APPROVED") throw new Error("Purchase order is not in a receivable (APPROVED) status.");
 
-    const now = new Date().toISOString();
+    const now = op.createdAt;
     const lines = get().purchaseOrderItems.filter((i) => i.purchaseOrderId === purchaseOrderId);
     const inputByProduct = new Map(receivedItems.map((r) => [r.productId, r]));
 
@@ -155,13 +160,13 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
         reason: `Purchase order ${po.orderNo} received (offline — pending sync)`,
         referenceType: "purchase", referenceId: po.id, createdBy: receiverId, createdAt: now,
         productUnitId: unit?.id, unitNameSnapshot: unit?.name, unitBaseQuantitySnapshot: unit?.baseQuantity,
-        selectedUnitQuantity: unitQty, pendingSync: true,
+        selectedUnitQuantity: unitQty, pendingSync: true, idempotencyKey: op.idempotencyKey,
       });
     }
 
     const updatedPo: PurchaseOrder = {
       ...po, status: "RECEIVED", receivedBy: receiverId, receivedAt: now,
-      subtotalMmk, totalMmk: subtotalMmk + (po.taxMmk ?? 0), pendingSync: true,
+      subtotalMmk, totalMmk: subtotalMmk + (po.taxMmk ?? 0), pendingSync: true, idempotencyKey: op.idempotencyKey,
     };
 
     set((s) => ({
@@ -185,7 +190,9 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
           product_unit_id: r.productUnitId ?? null, received_unit_qty: r.receivedUnitQty ?? null,
         })),
         p_created_at: now,
+        p_idempotency_key: op.idempotencyKey,
       },
+      idempotencyKey: op.idempotencyKey,
       shopId: po.shopId,
       provisional: [{ table: "movements", ids: movements.map((m) => m.id) }],
     });
@@ -193,16 +200,17 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
 
   const recordSupplierPaymentOnline = async (input: {
     purchaseOrderId: string; amountMmk: number; paymentMethod: string; referenceNo?: string; notes?: string;
-  }): Promise<void> => {
-    const { data, error } = await supabase.rpc("record_supplier_payment", {
+  }, op: OperationContext): Promise<void> => {
+    const { data, error } = await callRpc("record_supplier_payment", {
       p_purchase_order_id: input.purchaseOrderId,
       p_amount_mmk: input.amountMmk,
       p_payment_method: input.paymentMethod,
       p_reference_no: input.referenceNo ?? null,
       p_notes: input.notes ?? null,
-      p_created_at: new Date().toISOString(),
+      p_created_at: op.createdAt,
+      p_idempotency_key: op.idempotencyKey,
     });
-    if (error) throw new Error(error.message);
+    if (error) throw error;
     if (!data) throw new Error("Record supplier payment returned no data.");
     const result = data as RecordSupplierPaymentResult;
 
@@ -222,7 +230,7 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   const recordSupplierPaymentOffline = async (input: {
     purchaseOrderId: string; amountMmk: number; paymentMethod: "CASH" | "BANK" | "MOBILE" | "OTHER";
     referenceNo?: string; notes?: string;
-  }): Promise<void> => {
+  }, op: OperationContext): Promise<void> => {
     await assertOfflineWriteEligible();
     const po = get().purchaseOrders.find((p) => p.id === input.purchaseOrderId);
     if (!po) throw new Error("Purchase order not found.");
@@ -233,18 +241,18 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
     if (outstanding <= 0) throw new Error("Purchase order is already paid.");
     if (input.amountMmk > outstanding) throw new Error("Payment amount exceeds outstanding balance.");
 
-    const now = new Date().toISOString();
+    const now = op.createdAt;
     const newPaid = (po.paidMmk ?? 0) + input.amountMmk;
     const updatedPo: PurchaseOrder = {
       ...po, paidMmk: newPaid,
       paymentStatus: newPaid >= po.totalMmk ? "PAID" : newPaid > 0 ? "PARTIAL" : "UNPAID",
-      pendingSync: true,
+      pendingSync: true, idempotencyKey: op.idempotencyKey,
     };
     const payment: SupplierPayment = {
       id: newId("suppay"), supplierId: po.supplierId, purchaseOrderId: po.id, shopId: po.shopId,
       amountMmk: input.amountMmk, paymentMethod: input.paymentMethod, referenceNo: input.referenceNo,
       notes: input.notes, paidAt: now, createdBy: useAuthStore.getState().currentUserId ?? "system",
-      createdAt: now, pendingSync: true,
+      createdAt: now, pendingSync: true, idempotencyKey: op.idempotencyKey,
     };
 
     set((s) => ({
@@ -259,8 +267,9 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
       args: {
         p_purchase_order_id: input.purchaseOrderId, p_amount_mmk: input.amountMmk,
         p_payment_method: input.paymentMethod, p_reference_no: input.referenceNo ?? null,
-        p_notes: input.notes ?? null, p_created_at: now,
+        p_notes: input.notes ?? null, p_created_at: now, p_idempotency_key: op.idempotencyKey,
       },
+      idempotencyKey: op.idempotencyKey,
       shopId: po.shopId,
       provisional: [{ table: "supplierPayments", ids: [payment.id] }],
     });
@@ -273,7 +282,7 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   supplierPayments: [],
 
   addSupplier: async (input: CreateSupplierInput) => {
-    const { data, error } = await supabase.rpc("create_supplier", {
+    const { data, error } = await callRpc("create_supplier", {
       p_code: input.code,
       p_name: input.name,
       p_contact_person: input.contactPerson ?? null,
@@ -281,8 +290,9 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
       p_email: input.email ?? null,
       p_address: input.address ?? null,
       p_notes: input.notes ?? null,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Create supplier returned no data.");
     const result = data as SupplierResult;
 
@@ -294,7 +304,7 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   },
 
   updateSupplier: async (supplier: Supplier) => {
-    const { data, error } = await supabase.rpc("update_supplier", {
+    const { data, error } = await callRpc("update_supplier", {
       p_id: supplier.id,
       p_code: supplier.code,
       p_name: supplier.name,
@@ -304,8 +314,9 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
       p_address: supplier.address ?? null,
       p_notes: supplier.notes ?? null,
       p_is_active: supplier.isActive,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Update supplier returned no data.");
     const result = data as SupplierResult;
 
@@ -316,7 +327,7 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   },
 
   createPurchaseOrder: async ({ shopId, supplierId, items, notes }: CreatePurchaseOrderInput) => {
-    const { data, error } = await supabase.rpc("create_purchase_order", {
+    const { data, error } = await callRpc("create_purchase_order", {
       p_shop_id: shopId,
       p_supplier_id: supplierId,
       p_notes: notes ?? null,
@@ -325,8 +336,9 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
         ordered_qty: item.orderedQty,
         unit_cost_mmk: item.unitCostMmk,
       })),
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Create purchase order returned no data.");
     const result = data as CreatePurchaseOrderResult;
 
@@ -339,10 +351,11 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   },
 
   approvePurchaseOrder: async ({ purchaseOrderId }) => {
-    const { data, error } = await supabase.rpc("approve_purchase_order", {
+    const { data, error } = await callRpc("approve_purchase_order", {
       p_purchase_order_id: purchaseOrderId,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Approve purchase order returned no data.");
     const result = data as PurchaseOrderStatusResult;
 
@@ -355,13 +368,14 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   },
 
   receivePurchaseOrder: async ({ purchaseOrderId, receiverId, receivedItems }) => {
+    const op = beginOperation();
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      return receivePurchaseOrderOffline(purchaseOrderId, receiverId, receivedItems);
+      return receivePurchaseOrderOffline(purchaseOrderId, receiverId, receivedItems, op);
     }
     try {
-      return await receivePurchaseOrderOnline(purchaseOrderId, receivedItems);
+      return await receivePurchaseOrderOnline(purchaseOrderId, receivedItems, op);
     } catch (err) {
-      if (isNetworkError(err)) return receivePurchaseOrderOffline(purchaseOrderId, receiverId, receivedItems);
+      if (isNetworkError(err)) return receivePurchaseOrderOffline(purchaseOrderId, receiverId, receivedItems, op);
       throw err;
     }
   },
@@ -376,8 +390,8 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
       purchaseOrders: s.purchaseOrders.map((p) => (p.id === result.purchaseOrder.id ? result.purchaseOrder : p)),
       purchaseOrderItems: s.purchaseOrderItems.map((i) => result.purchaseOrderItems.find((u) => u.id === i.id) ?? i),
       inventory: mergeInventory(s.inventory, result.inventory),
-      movements: [...result.movements, ...s.movements.filter((m) => !provisionalMovementIds.has(m.id))],
-      auditLogs: [...result.auditLogs, ...s.auditLogs],
+      movements: [...result.movements, ...s.movements.filter((m) => !provisionalMovementIds.has(m.id) && !result.movements.some((r) => r.id === m.id))],
+      auditLogs: [...result.auditLogs, ...s.auditLogs.filter((a) => !result.auditLogs.some((r) => r.id === a.id))],
     }));
     void deleteLocalRows(provisional);
     void putLocalRows({
@@ -387,11 +401,12 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   },
 
   cancelPurchaseOrder: async ({ purchaseOrderId }) => {
-    const { data, error } = await supabase.rpc("cancel_purchase_order", {
+    const { data, error } = await callRpc("cancel_purchase_order", {
       p_purchase_order_id: purchaseOrderId,
       p_reason: null,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Cancel purchase order returned no data.");
     const result = data as PurchaseOrderStatusResult;
 
@@ -404,13 +419,14 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   },
 
   recordSupplierPayment: async (input) => {
+    const op = beginOperation();
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      return recordSupplierPaymentOffline(input);
+      return recordSupplierPaymentOffline(input, op);
     }
     try {
-      return await recordSupplierPaymentOnline(input);
+      return await recordSupplierPaymentOnline(input, op);
     } catch (err) {
-      if (isNetworkError(err)) return recordSupplierPaymentOffline(input);
+      if (isNetworkError(err)) return recordSupplierPaymentOffline(input, op);
       throw err;
     }
   },
@@ -424,9 +440,9 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
     set((s) => ({
       purchaseOrders: s.purchaseOrders.map((p) => (p.id === result.purchaseOrder.id ? result.purchaseOrder : p)),
       supplierPayments: [
-        result.supplierPayment, ...s.supplierPayments.filter((p) => !provisionalIds.has(p.id)),
+        result.supplierPayment, ...s.supplierPayments.filter((p) => !provisionalIds.has(p.id) && p.id !== result.supplierPayment.id),
       ],
-      auditLogs: [...result.auditLogs, ...s.auditLogs],
+      auditLogs: [...result.auditLogs, ...s.auditLogs.filter((a) => !result.auditLogs.some((r) => r.id === a.id))],
     }));
     void deleteLocalRows(provisional);
     void putLocalRows({
@@ -435,15 +451,16 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   },
 
   paySupplierLumpSum: async ({ supplierId, shopId, amountMmk, paymentMethod, referenceNo, notes }) => {
-    const { data, error } = await supabase.rpc("pay_supplier_lump_sum", {
+    const { data, error } = await callRpc("pay_supplier_lump_sum", {
       p_supplier_id: supplierId,
       p_shop_id: shopId,
       p_amount_mmk: amountMmk,
       p_payment_method: paymentMethod,
       p_reference_no: referenceNo ?? null,
       p_notes: notes ?? null,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Lump-sum supplier payment returned no data.");
     const result = data as {
       supplierPayments: SupplierPayment[];
@@ -460,11 +477,12 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   },
 
   voidSupplierPayment: async ({ paymentId, reason }) => {
-    const { data, error } = await supabase.rpc("void_supplier_payment", {
+    const { data, error } = await callRpc("void_supplier_payment", {
       p_payment_id: paymentId,
       p_reason: reason,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Void supplier payment returned no data.");
     const result = data as RecordSupplierPaymentResult;
 

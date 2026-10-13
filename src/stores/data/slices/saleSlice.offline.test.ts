@@ -180,6 +180,39 @@ describe("createSale offline", () => {
     expect((await localDb.sales.get("sale-server-1"))?.receiptNo).toBe("R-100");
   });
 
+  it("does not list the server's sale twice when a full reload already brought it in before the replay", async () => {
+    // Commit-then-lost-response: the sale is already on the server when the
+    // reconnect reload runs, so the store holds the server row AND the
+    // still-queued provisional row when the replay finally reconciles.
+    const { get, set } = makeStore();
+    const provisionalId = await get().createSale({ ...baseInput, cartItems: [cartItem()] });
+    const serverRows = {
+      sale: { id: "sale-server-2", receiptNo: "R-200", shopId: "shop-1", shiftId: "shift-1", totalMmk: 2000 },
+      items: [{ id: "si-server-2", saleId: "sale-server-2" }],
+      movements: [{ id: "mv-server-2", shopId: "shop-1", productId: "p1" }],
+      inventory: [{ shopId: "shop-1", productId: "p1", qtyBaseUnits: 8 }],
+      auditLogs: [{ id: "au-server-2" }],
+    };
+    // what loadData() would have applied: server rows + the merged-back provisional ones
+    set({
+      sales: [serverRows.sale, ...get().sales],
+      saleItems: [...serverRows.items, ...get().saleItems],
+      movements: [...serverRows.movements, ...get().movements],
+      auditLogs: [...serverRows.auditLogs, ...get().auditLogs],
+    });
+    expect(get().sales.map((s: { id: string }) => s.id)).toEqual(["sale-server-2", provisionalId]);
+
+    vi.stubGlobal("navigator", { onLine: true });
+    rpc.mockResolvedValue({ data: serverRows, error: null });
+    await drainOutbox();
+
+    expect(get().sales.map((s: { id: string }) => s.id)).toEqual(["sale-server-2"]);
+    expect(get().saleItems.map((i: { id?: string }) => i.id)).toEqual(["si-server-2"]);
+    expect(get().movements.map((m: { id: string }) => m.id)).toEqual(["mv-server-2"]);
+    expect(get().auditLogs.map((a: { id: string }) => a.id)).toEqual(["au-server-2"]);
+    expect(await localDb.syncOutbox.count()).toBe(0);
+  });
+
   it("keeps the provisional sale (flagged, not deleted) and marks the outbox entry a conflict on server rejection", async () => {
     const { get } = makeStore();
     const provisionalId = await get().createSale({ ...baseInput, cartItems: [cartItem()] });

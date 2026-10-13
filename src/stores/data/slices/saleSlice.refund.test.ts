@@ -57,7 +57,7 @@ describe("approveRefund flow", () => {
     await get().approveRefund({ refundId: "req-1" });
 
     expect(rpc.mock.calls[0][0]).toBe("approve_void_request");
-    expect(rpc.mock.calls[0][1]).toEqual({ p_request_id: "req-1" });
+    expect(rpc.mock.calls[0][1]).toEqual({ p_request_id: "req-1", p_idempotency_key: expect.any(String) });
     const state = get();
     expect(state.sales[0].status).toBe("VOIDED");
     expect(state.inventory[0].qtyBaseUnits).toBe(100); // restocked, merged in place

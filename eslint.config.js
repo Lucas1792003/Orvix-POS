@@ -21,8 +21,9 @@ export default defineConfig([
     },
   },
   {
-    // Node-run dev tooling, outside the Vite/browser bundle.
-    files: ['scripts/**/*.ts'],
+    // Node-run dev tooling and the Playwright e2e suite, outside the
+    // Vite/browser bundle.
+    files: ['scripts/**/*.ts', 'e2e/**/*.ts', 'playwright.config.ts'],
     languageOptions: {
       globals: globals.node,
     },

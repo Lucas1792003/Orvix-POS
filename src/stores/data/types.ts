@@ -224,9 +224,26 @@ export interface InventoryState {
    *  server-side, to replace the provisional local movement with the
    *  authoritative one. Not for direct UI use. */
   reconcileAdjustStock: (data: unknown, provisional: ProvisionalRef) => void;
-  /** Internal — called by AppLayout's Realtime subscription when another
-   *  device changes a stock level. Not for direct UI use. */
-  applyInventoryRealtimeUpdate: (row: Inventory) => void;
+  /** Internal — called by the Realtime subscription (stores/data/
+   *  inventoryRealtime.ts) when another device changes a stock level.
+   *  `commitTimestamp` is the event's server commit time: an event older
+   *  than the last server-authoritative state held for that row (a
+   *  refresh, or a later event) is ignored. Not for direct UI use. */
+  applyInventoryRealtimeUpdate: (row: Inventory, commitTimestamp?: string) => void;
+  /** Internal — Realtime DELETE for an inventory row (product removed). */
+  applyInventoryRealtimeDelete: (shopId: string, productId: string, commitTimestamp?: string) => void;
+  /**
+   * Server-authoritative stock refresh (Phase G): re-reads the `inventory`
+   * rows for `shopId` (the current shop when omitted; `null` = every row
+   * RLS lets this user read, i.e. all shops for an ADMIN with no shop
+   * selected) and REPLACES the local rows in that scope — no merge — then
+   * re-applies the provisional deltas of operations still queued in the
+   * outbox so an offline sale stays visible. Resolves true on success,
+   * false when the server could not be reached (nothing is changed then).
+   * Run after every Realtime gap and periodically while the channel is
+   * down; also safe to call any time.
+   */
+  refreshInventoryFromServer: (options?: { shopId?: string | null }) => Promise<boolean>;
 }
 
 export interface ShiftState {

@@ -3,7 +3,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const fromMock = vi.fn();
 vi.mock("../../lib/supabase", () => ({
-  supabase: { from: (...args: unknown[]) => fromMock(...args) },
+  supabase: {
+    from: (...args: unknown[]) => fromMock(...args),
+    // The drain verifies the session before replaying (see outbox.ts).
+    auth: { getSession: () => Promise.resolve({ data: { session: { user: { id: "auth-1" } } }, error: null }) },
+  },
 }));
 
 import { writeTableRow } from "./tableWrite";

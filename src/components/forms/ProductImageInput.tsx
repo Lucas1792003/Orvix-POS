@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState, type ChangeEvent } from "react";
 import { compressProductImage, formatImageSize } from "../../lib/compressProductImage";
 import { uploadProductImage } from "../../lib/productImageStorage";
+import { useAuthStore } from "../../stores/authStore";
 import { ProductImagePhoneUploadModal } from "./ProductImagePhoneUploadModal";
 
 interface ProductImageInputProps {
@@ -29,6 +30,8 @@ export const ProductImageInput = ({ productId, shopId, value, onChange, disabled
   const [error, setError] = useState<string | null>(null);
   const [compressedBytes, setCompressedBytes] = useState<number | null>(null);
   const [phoneUploadOpen, setPhoneUploadOpen] = useState(false);
+  // Storage paths are organization-scoped (migration 078).
+  const orgId = useAuthStore((state) => state.currentOrgId);
 
   const busy = phase !== null;
 
@@ -39,7 +42,7 @@ export const ProductImageInput = ({ productId, shopId, value, onChange, disabled
       const image = await compressProductImage(file);
       setCompressedBytes(image.bytes);
       setPhase("uploading");
-      const url = await uploadProductImage(productId, image);
+      const url = await uploadProductImage(productId, image, orgId);
       // Only the uploaded Storage URL reaches the product row.
       onChange(url);
     } catch (e) {

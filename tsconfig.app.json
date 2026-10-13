@@ -10,6 +10,11 @@
 
     /* Bundler mode */
     "moduleResolution": "bundler",
+    /* dexie 4.4.x publishes an `exports` map whose ESM entry (`import-wrapper.d.mts`)
+       re-exports from "dexie" itself; under bundler resolution TypeScript follows that
+       self-reference and sees no members. Point the compiler at the real declaration
+       file (Vite/esbuild ignore `paths`, so the runtime bundle is unaffected). */
+    "paths": { "dexie": ["./node_modules/dexie/dist/dexie.d.ts"] },
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",

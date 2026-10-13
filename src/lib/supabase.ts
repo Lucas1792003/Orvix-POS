@@ -1,11 +1,24 @@
 import { createClient } from "@supabase/supabase-js";
 import { useToastStore } from "../stores/toastStore";
 import { getErrorMessage } from "./errors";
+import { resolveBackendConfig } from "./backendConfig";
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+// Fail closed: a missing/empty URL or key, or a host other than the one
+// this build was pinned to (VITE_SUPABASE_EXPECTED_HOST), throws here —
+// at module load, i.e. at app startup — instead of creating a client
+// against a default or unexpected backend. main.tsx catches this and shows
+// the message on screen. See lib/backendConfig.ts.
+const backend = resolveBackendConfig({
+  VITE_SUPABASE_URL: import.meta.env.VITE_SUPABASE_URL,
+  VITE_SUPABASE_ANON_KEY: import.meta.env.VITE_SUPABASE_ANON_KEY,
+  VITE_SUPABASE_EXPECTED_HOST: import.meta.env.VITE_SUPABASE_EXPECTED_HOST,
+});
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+/** Host (and port) of the backend this build talks to — shown on the login
+ *  page and in the sidebar footer so a till shows what it is connected to. */
+export const backendHost = backend.host;
+
+export const supabase = createClient(backend.url, backend.anonKey);
 
 // Fire-and-forget write — shows a friendly error toast + console log on failure.
 // Prefer dbExec for new code; this remains for legacy callers.

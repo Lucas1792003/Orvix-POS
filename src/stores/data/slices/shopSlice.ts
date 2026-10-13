@@ -11,6 +11,7 @@ import {
 } from "../../../lib/shopDelete";
 import { useAppStore } from "../../appStore";
 import { writeTableRow } from "../tableWrite";
+import { callRpc, newIdempotencyKey, ONLINE_ONLY_RETRIES } from "../idempotentRpc";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const execShopWrite = async (query: PromiseLike<{ error: any }>, label: string): Promise<void> => {
@@ -123,7 +124,7 @@ export const createShopSlice: StateCreator<DataState, [], [], ShopState> = (set,
   addUser: async (input: CreateUserInput) => {
     // auth_id is stored at creation so the new user is RLS-identifiable
     // from their first login (no reliance on the email self-heal).
-    const { data, error } = await supabase.rpc("create_app_user", {
+    const { data, error } = await callRpc("create_app_user", {
       p_id: input.id,
       p_name: input.name,
       p_email: input.email ?? null,
@@ -132,8 +133,9 @@ export const createShopSlice: StateCreator<DataState, [], [], ShopState> = (set,
       p_auth_id: input.authId ?? null,
       p_granted_permissions: input.grantedPermissions ?? null,
       p_revoked_permissions: input.revokedPermissions ?? null,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Create user returned no data.");
     const user = data as User;
     set((state) => ({ users: [...state.users, user] }));
@@ -141,15 +143,16 @@ export const createShopSlice: StateCreator<DataState, [], [], ShopState> = (set,
   },
 
   updateUser: async (user: User) => {
-    const { data, error } = await supabase.rpc("update_app_user", {
+    const { data, error } = await callRpc("update_app_user", {
       p_id: user.id,
       p_name: user.name,
       p_role: user.role,
       p_shop_id: user.shopId ?? null,
       p_granted_permissions: user.grantedPermissions ?? null,
       p_revoked_permissions: user.revokedPermissions ?? null,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Update user returned no data.");
     const updated = data as User;
     set((state) => ({
@@ -158,11 +161,12 @@ export const createShopSlice: StateCreator<DataState, [], [], ShopState> = (set,
   },
 
   deactivateUser: async (userId: string, isActive: boolean) => {
-    const { data, error } = await supabase.rpc("deactivate_app_user", {
+    const { data, error } = await callRpc("deactivate_app_user", {
       p_id: userId,
       p_is_active: isActive,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     if (!data) throw new Error("Update user status returned no data.");
     const result = data as { id: string; isActive: boolean };
     set((state) => ({
@@ -171,11 +175,12 @@ export const createShopSlice: StateCreator<DataState, [], [], ShopState> = (set,
   },
 
   replaceManager: async (shopId: string, newManagerId: string) => {
-    const { error } = await supabase.rpc("replace_manager", {
+    const { error } = await callRpc("replace_manager", {
       p_shop_id: shopId,
       p_new_manager_id: newManagerId,
-    });
-    if (error) throw new Error(error.message);
+      p_idempotency_key: newIdempotencyKey(),
+    }, { retries: ONLINE_ONLY_RETRIES });
+    if (error) throw error;
     // The RPC flips two rows server-side (old manager deactivated, new one
     // activated) — simplest correct way to reflect that locally is to pull
     // the affected rows back rather than reconstruct the swap by hand.
@@ -184,14 +189,17 @@ export const createShopSlice: StateCreator<DataState, [], [], ShopState> = (set,
       .select("*")
       .eq("shop_id", shopId);
     if (refreshError || !refreshed) return;
-    const byId = new Map(refreshed.map((row) => [row.id as string, row]));
+    // The untyped client returns `{}` rows; the columns read below are the ones
+    // replace_manager touches (see migration 049).
+    type ManagerSwapRow = { id: string; role: string; shop_id: string | null; is_active: boolean };
+    const byId = new Map((refreshed as ManagerSwapRow[]).map((row) => [row.id, row]));
     set((state) => ({
       users: state.users.map((item) => {
         const row = byId.get(item.id);
         if (!row) return item;
         return {
           ...item,
-          role: row.role, shopId: row.shop_id ?? undefined, isActive: row.is_active,
+          role: row.role as User["role"], shopId: row.shop_id ?? undefined, isActive: row.is_active,
         };
       }),
     }));

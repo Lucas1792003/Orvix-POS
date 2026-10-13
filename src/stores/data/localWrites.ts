@@ -24,12 +24,87 @@ export interface LocalRowBatch {
   stockTransferItems?: StockTransferItem[];
 }
 
+// ----------------------------------------------------------------------
+// Writes that land while a full loadData() is in flight. The load's 27
+// reads start before the write and their snapshot is applied after it, so
+// without this the write (a shift just opened, a sale just rung up) is
+// replaced by the stale server rows in both the store and the local
+// mirror — the DB is right, the till's screen is not (Phase E finding).
+// loadData() records every put/delete that happens between the start of
+// its reads and the moment it applies the snapshot, then re-applies them.
+// ----------------------------------------------------------------------
+export interface RecordedWrites {
+  puts: LocalRowBatch[];
+  deletes: { table: string; ids: string[] }[];
+}
+
+// One recorder per in-flight load (two loads can overlap — e.g. a mount
+// effect and a reconnect — and each must see every write made during ITS
+// window); a write is recorded into all of them.
+const activeRecorders = new Set<RecordedWrites>();
+
+export function beginWriteRecording(): RecordedWrites {
+  const recorder: RecordedWrites = { puts: [], deletes: [] };
+  activeRecorders.add(recorder);
+  return recorder;
+}
+
+export function endWriteRecording(recorder: RecordedWrites): RecordedWrites {
+  activeRecorders.delete(recorder);
+  return recorder;
+}
+
+function recordPut(rows: LocalRowBatch): void {
+  for (const r of activeRecorders) r.puts.push(rows);
+}
+
+function recordDelete(entries: { table: string; ids: string[] }[]): void {
+  for (const r of activeRecorders) r.deletes.push(...entries);
+}
+
+type RowTable = keyof LocalRowBatch;
+const ROW_TABLES: RowTable[] = [
+  "sales", "saleItems", "inventory", "movements", "auditLogs", "shifts", "refunds",
+  "purchaseOrders", "purchaseOrderItems", "supplierPayments", "stockTransfers", "stockTransferItems",
+];
+
+const rowKey = (table: RowTable, row: unknown): string => {
+  const r = row as { id?: string; shopId?: string; productId?: string };
+  return table === "inventory" ? `${r.shopId}|${r.productId}` : String(r.id);
+};
+
+/** Re-apply recorded writes on top of a freshly loaded snapshot: puts
+ *  replace rows with the same key (or are prepended when the snapshot does
+ *  not have them), deletes remove rows. Pure; returns a new object. */
+export function applyRecordedWrites<T extends Partial<Record<RowTable, unknown[]>>>(snapshot: T, writes: RecordedWrites): T {
+  if (writes.puts.length === 0 && writes.deletes.length === 0) return snapshot;
+  const out: Record<string, unknown[]> = { ...(snapshot as Record<string, unknown[]>) };
+  for (const batch of writes.puts) {
+    for (const table of ROW_TABLES) {
+      const rows = batch[table] as unknown[] | undefined;
+      if (!rows?.length || !Array.isArray(out[table])) continue;
+      const byKey = new Map(rows.map((row) => [rowKey(table, row), row]));
+      const replaced = (out[table] as unknown[]).map((row) => byKey.get(rowKey(table, row)) ?? row);
+      const existing = new Set((out[table] as unknown[]).map((row) => rowKey(table, row)));
+      const added = rows.filter((row) => !existing.has(rowKey(table, row)));
+      out[table] = [...added, ...replaced];
+    }
+  }
+  for (const { table, ids } of writes.deletes) {
+    if (!Array.isArray(out[table])) continue;
+    const gone = new Set(ids);
+    out[table] = (out[table] as { id?: string }[]).filter((row) => !gone.has(String(row.id)));
+  }
+  return out as T;
+}
+
 // Callers fire these without awaiting (the Zustand `set()` already applied
 // the change; this is just mirroring it to the cache). A failure here — no
 // IndexedDB in this context, quota exceeded, private-browsing restrictions —
 // must never surface as an unhandled rejection or block the write that
 // already succeeded; log and move on, same as lib/supabase.ts's dbAudit.
 export async function putLocalRows(rows: LocalRowBatch): Promise<void> {
+  recordPut(rows);
   try {
     await Promise.all([
       rows.sales?.length ? localDb.sales.bulkPut(rows.sales) : undefined,
@@ -70,6 +145,7 @@ const TABLES = {
  *  just upserted in place, so there's nothing to delete. */
 export async function deleteLocalRows(provisional: { table: string; ids: string[] }[] | undefined): Promise<void> {
   if (!provisional?.length) return;
+  recordDelete(provisional);
   try {
     await Promise.all(
       provisional.map(({ table, ids }) => {

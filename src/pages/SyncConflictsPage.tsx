@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { useDataStore } from "../stores/dataStore";
+import { useSyncStore } from "../stores/syncStore";
 import { PageHeader } from "../components/layout/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Table, THead, TBody, TR, TH, TD } from "../components/ui/Table";
 import { useToast } from "../components/ui/Toast";
-import { dismissOutboxEntry, drainOutbox, listOutboxConflicts, retryOutboxEntry } from "../stores/data/outbox";
+import { dismissOutboxEntry, drainOutbox, listOutboxEntries, retryOutboxEntry } from "../stores/data/outbox";
 import type { SyncOutboxEntry } from "../lib/localDb";
 
 const RPC_LABELS: Record<string, string> = {
@@ -48,17 +49,44 @@ const describeEntry = (entry: SyncOutboxEntry): string => {
   return RPC_LABELS[entry.name] ?? entry.name;
 };
 
+// Transient (auto-retrying) vs permanent (needs a person) — the two look
+// the same in the queue but mean very different things for the operator.
+type EntryKind = "conflict" | "retrying" | "waiting" | "queued";
+
+const classify = (entry: SyncOutboxEntry): EntryKind => {
+  if (entry.status === "conflict") return "conflict";
+  if (entry.failureKind === "transient" && entry.lastError) return "retrying";
+  if (entry.refs?.length) return "waiting";
+  return "queued";
+};
+
+// `now` is captured when the list was loaded (render must stay pure).
+const StatusBadge = ({ entry, now }: { entry: SyncOutboxEntry; now: number }) => {
+  const kind = classify(entry);
+  if (kind === "conflict") return <Badge tone="red">Needs action</Badge>;
+  if (kind === "retrying") {
+    const next = entry.nextAttemptAt ? new Date(entry.nextAttemptAt) : null;
+    const due = next && next.getTime() > now ? `next try ${next.toLocaleTimeString()}` : "retrying now";
+    return <Badge tone="amber">Retrying automatically — {due}</Badge>;
+  }
+  if (kind === "waiting") return <Badge tone="slate">Waiting on an earlier entry</Badge>;
+  return <Badge tone="slate">Queued</Badge>;
+};
+
 export const SyncConflictsPage = () => {
   const shops = useDataStore((state) => state.shops);
+  const needsReauth = useSyncStore((state) => state.needsReauth);
   const addToast = useToast();
-  const [conflicts, setConflicts] = useState<SyncOutboxEntry[]>([]);
+  const [entries, setEntries] = useState<SyncOutboxEntry[]>([]);
+  const [loadedAt, setLoadedAt] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setIsLoading(true);
     try {
-      setConflicts(await listOutboxConflicts());
+      setEntries(await listOutboxEntries());
+      setLoadedAt(Date.now());
     } finally {
       setIsLoading(false);
     }
@@ -69,14 +97,22 @@ export const SyncConflictsPage = () => {
   }, [refresh]);
 
   const shopName = (shopId: string | null) => shops.find((s) => s.id === shopId)?.name ?? shopId ?? "—";
+  const conflictCount = entries.filter((e) => e.status === "conflict").length;
+  const pendingCount = entries.length - conflictCount;
 
   const handleRetry = async (entry: SyncOutboxEntry) => {
     setBusyId(entry.localId);
     try {
       await retryOutboxEntry(entry.localId);
-      await drainOutbox();
+      const result = await drainOutbox();
       await refresh();
-      addToast({ variant: "success", title: "Retried", description: "The queued entry was resubmitted." });
+      if (result === "needs-reauth") {
+        addToast({ variant: "error", title: "Sign in required", description: "The server rejected this device's sign-in. Sign in again to resume syncing." });
+      } else if (result === "network") {
+        addToast({ variant: "error", title: "Still unreachable", description: "The server could not be reached. The entry stays queued and will be retried automatically." });
+      } else {
+        addToast({ variant: "success", title: "Retried", description: "The queued entry was resubmitted." });
+      }
     } catch (err) {
       addToast({ variant: "error", title: "Retry failed", description: err instanceof Error ? err.message : "Please try again." });
     } finally {
@@ -89,30 +125,38 @@ export const SyncConflictsPage = () => {
     try {
       await dismissOutboxEntry(entry.localId);
       await refresh();
-      addToast({ variant: "success", title: "Dismissed", description: "The queued entry will no longer be retried." });
+      addToast({ variant: "success", title: "Dismissed", description: "The queued entry will no longer be retried. Its local record is kept." });
     } finally {
       setBusyId(null);
     }
   };
 
+  const summary = isLoading
+    ? "Loading…"
+    : `${conflictCount} ${conflictCount === 1 ? "conflict" : "conflicts"} · ${pendingCount} ${pendingCount === 1 ? "entry" : "entries"} still syncing`;
+
   return (
     <Card>
       <PageHeader
         title="Sync Conflicts"
-        subtitle="Offline actions the server rejected once reconnected — the till stayed usable, but these need a manual look."
+        subtitle="Everything recorded on this device that has not reached the server yet. Entries the server rejected need a manual look; the rest are retried automatically."
       />
+      {needsReauth && (
+        <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          The server rejected this device's sign-in, so nothing is being sent. Sign in again (sidebar → Logout, then
+          log in) — every entry below is kept and will sync afterwards.
+        </div>
+      )}
       <div className="mt-4 flex items-center justify-between">
-        <span className="text-sm text-slate-500">
-          {isLoading ? "Loading…" : `${conflicts.length} ${conflicts.length === 1 ? "conflict" : "conflicts"}`}
-        </span>
+        <span className="text-sm text-slate-500">{summary}</span>
         <Button variant="secondary" size="sm" onClick={() => void refresh()} disabled={isLoading}>
           Refresh
         </Button>
       </div>
       <div className="mt-4">
-        {!isLoading && conflicts.length === 0 ? (
+        {!isLoading && entries.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-300/70 bg-slate-50/60 p-6 text-center text-sm text-slate-500">
-            No sync conflicts. Everything queued offline has synced cleanly.
+            Nothing waiting. Everything recorded on this device has synced cleanly.
           </div>
         ) : (
           <Table>
@@ -121,19 +165,23 @@ export const SyncConflictsPage = () => {
                 <TH>Action</TH>
                 <TH>Shop</TH>
                 <TH>Queued at</TH>
-                <TH>Error</TH>
+                <TH>Status</TH>
+                <TH>Last error</TH>
                 <TH>Attempts</TH>
                 <TH>&nbsp;</TH>
               </TR>
             </THead>
             <TBody>
-              {conflicts.map((entry) => (
+              {entries.map((entry) => (
                 <TR key={entry.localId}>
                   <TD>{describeEntry(entry)}</TD>
                   <TD>{shopName(entry.shopId)}</TD>
                   <TD>{new Date(entry.createdAt).toLocaleString()}</TD>
+                  <TD><StatusBadge entry={entry} now={loadedAt} /></TD>
                   <TD>
-                    <Badge tone="red">{entry.lastError ?? "Unknown error"}</Badge>
+                    <span className="text-xs text-slate-600 break-words" title={entry.lastError}>
+                      {entry.lastError ?? "—"}
+                    </span>
                   </TD>
                   <TD>{entry.attempts}</TD>
                   <TD>
@@ -161,8 +209,10 @@ export const SyncConflictsPage = () => {
         )}
       </div>
       <p className="mt-4 text-xs text-slate-400">
-        Dismissing stops retrying the queued server call, but leaves the original record (e.g. the sale) in place,
-        flagged as not synced — reconcile stock or the customer's receipt manually before dismissing.
+        Retry sends the entry again right away with the same idempotency key, so an action the server already
+        applied is never duplicated. Dismissing stops retrying the queued server call but leaves the original
+        record (e.g. the sale) in place, flagged as not synced — reconcile stock or the customer's receipt
+        manually before dismissing.
       </p>
     </Card>
   );
