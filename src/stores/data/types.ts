@@ -6,7 +6,6 @@ import type {
   Category,
   Inventory,
   InventoryMovement,
-  Permission,
   Product,
   ProductBarcode,
   ProductUnit,
@@ -14,7 +13,6 @@ import type {
   PurchaseOrder,
   PurchaseOrderItem,
   Refund,
-  Role,
   Sale,
   SaleItem,
   Shift,
@@ -107,16 +105,10 @@ export interface AdjustStockInput {
 // State Slices
 // ============================================
 
-export interface CreateUserInput {
-  id: string;
-  name: string;
-  email?: string;
-  role: Role;
-  shopId?: string;
-  authId?: string;
-  grantedPermissions?: Permission[];
-  revokedPermissions?: Permission[];
-}
+// Staff creation goes through the staff-admin Edge Function (auth account +
+// users row server-side); see src/lib/staffAdmin.ts.
+import type { CreateStaffInput } from "../../lib/staffAdmin";
+export type { CreateStaffInput };
 
 export interface ShopState {
   shops: Shop[];
@@ -127,7 +119,7 @@ export interface ShopState {
   addShop: (shop: Shop) => Promise<void>;
   updateShop: (shop: Shop) => Promise<void>;
   deleteShop: (shopId: string) => Promise<void>;
-  addUser: (input: CreateUserInput) => Promise<User>;
+  createStaffUser: (input: CreateStaffInput) => Promise<User>;
   updateUser: (user: User) => Promise<void>;
   deactivateUser: (userId: string, isActive: boolean) => Promise<void>;
   replaceManager: (shopId: string, newManagerId: string) => Promise<void>;

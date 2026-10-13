@@ -1,14 +1,17 @@
 import "fake-indexeddb/auto";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// The explicit first-admin bootstrap (Phase G): bootstrapFirstAdmin() is
-// the only path that may call auth.signUp(), and it refuses unless the
-// server's app_setup_needed() (migration 067) says the install is empty.
+// The explicit first-admin bootstrap (Phase G): bootstrapFirstAdmin() refuses
+// unless the server's app_setup_needed() (migration 067) says the install is
+// empty. Since Phase F the auth account is created by the staff-admin Edge
+// Function (bootstrap_account, GoTrue admin API) - never by GoTrue's public
+// sign-up, which the backend disables.
 // Since migration 076 the organization + ADMIN row are created atomically
 // by the bootstrap_first_admin() RPC; the client never inserts them.
 
 const signInWithPassword = vi.fn();
 const signUp = vi.fn();
+const invoke = vi.fn();
 const signOut = vi.fn();
 const rpc = vi.fn();
 const from = vi.fn();
@@ -21,6 +24,7 @@ vi.mock("../lib/supabase", () => ({
       signOut: (...args: unknown[]) => signOut(...args),
       mfa: { listFactors: vi.fn(), getAuthenticatorAssuranceLevel: vi.fn() },
     },
+    functions: { invoke: (...args: unknown[]) => invoke(...args) },
     rpc: (...args: unknown[]) => rpc(...args),
     // 076: setup never touches tables directly (no RLS-scoped users read,
     // no organizations / users inserts).
@@ -51,7 +55,7 @@ import { localDb } from "../lib/localDb";
 const authUser = { id: "auth-first", email: "owner@shop.test" };
 
 beforeEach(async () => {
-  for (const fn of [signInWithPassword, signUp, signOut, rpc, from]) fn.mockReset();
+  for (const fn of [signInWithPassword, signUp, invoke, signOut, rpc, from]) fn.mockReset();
   from.mockImplementation((table: string) => {
     throw new Error(`setup must not access table ${table} directly`);
   });
@@ -82,7 +86,7 @@ describe("isAppSetupNeeded()", () => {
 });
 
 describe("bootstrapFirstAdmin()", () => {
-  it("refuses to act when the server says setup is not needed — no signUp, no sign-in, no RPC", async () => {
+  it("refuses to act when the server says setup is not needed — no account creation, no sign-in, no RPC", async () => {
     setupAnswers = [{ data: false, error: null }];
     routeRpc();
 
@@ -90,6 +94,7 @@ describe("bootstrapFirstAdmin()", () => {
 
     expect(result.error).toMatch(/already been completed/i);
     expect(signUp).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
     expect(signInWithPassword).not.toHaveBeenCalled();
     expect(bootstrapCalls()).toBe(0);
   });
@@ -102,24 +107,28 @@ describe("bootstrapFirstAdmin()", () => {
 
     expect(result.error).toMatch(/Could not confirm that first-time setup is needed/);
     expect(signUp).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
     expect(bootstrapCalls()).toBe(0);
   });
 
-  it("happy path on a brand-new backend: creates the auth account, then ONE bootstrap_first_admin RPC creates org + ADMIN", async () => {
+  it("happy path on a brand-new backend: the SERVER creates the auth account (no sign-up), then ONE bootstrap_first_admin RPC creates org + ADMIN", async () => {
     setupAnswers = [{ data: true, error: null }, { data: true, error: null }];
     bootstrapAnswer = { data: created, error: null };
     routeRpc();
-    // No auth account yet: first sign-in fails, signUp creates it, second sign-in works.
+    // No auth account yet: first sign-in fails, staff-admin creates it, second sign-in works.
     signInWithPassword
       .mockResolvedValueOnce({ data: { user: null }, error: { message: "Invalid login credentials" } })
       .mockResolvedValueOnce({ data: { user: authUser }, error: null });
-    signUp.mockResolvedValueOnce({ data: { user: authUser }, error: null });
+    invoke.mockResolvedValueOnce({ data: { created: true }, error: null });
 
     const result = await useAuthStore.getState().bootstrapFirstAdmin("Owner@Shop.test", "pw123456");
 
     expect(result).toEqual({ error: null, role: "ADMIN" });
-    expect(signUp).toHaveBeenCalledTimes(1);
-    expect(signUp).toHaveBeenCalledWith({ email: "Owner@Shop.test", password: "pw123456" });
+    expect(signUp).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("staff-admin", {
+      body: { action: "bootstrap_account", email: "Owner@Shop.test", password: "pw123456" },
+    });
     // the RPC takes no arguments: identity, ids and names are derived server-side
     expect(rpc).toHaveBeenCalledWith("bootstrap_first_admin");
     expect(bootstrapCalls()).toBe(1);
@@ -133,7 +142,7 @@ describe("bootstrapFirstAdmin()", () => {
     expect(await localDb.authCache.get(authUser.id)).toMatchObject({ userId: "user-owner-shop-test", orgId: "org-0123abcd", role: "ADMIN" });
   });
 
-  it("reuses an existing auth account (sign-in succeeds) without calling signUp", async () => {
+  it("reuses an existing auth account (sign-in succeeds) without creating one", async () => {
     setupAnswers = [{ data: true, error: null }, { data: true, error: null }];
     bootstrapAnswer = { data: created, error: null };
     routeRpc();
@@ -143,18 +152,26 @@ describe("bootstrapFirstAdmin()", () => {
 
     expect(result.error).toBeNull();
     expect(signUp).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
     expect(bootstrapCalls()).toBe(1);
   });
 
-  it("surfaces a signUp failure (wrong password for an existing account) and writes nothing", async () => {
+  it("surfaces the server's refusal (wrong password for an existing account) and writes nothing", async () => {
     setupAnswers = [{ data: true, error: null }];
     routeRpc();
     signInWithPassword.mockResolvedValueOnce({ data: { user: null }, error: { message: "Invalid login credentials" } });
-    signUp.mockResolvedValueOnce({ data: { user: null }, error: { message: "User already registered" } });
+    invoke.mockResolvedValueOnce({
+      data: null,
+      error: {
+        message: "Edge Function returned a non-2xx status code",
+        context: new Response(JSON.stringify({ error: "An account with this email already exists. Use its password.", code: "email_taken" }), { status: 409 }),
+      },
+    });
 
-    const result = await useAuthStore.getState().bootstrapFirstAdmin("owner@shop.test", "wrong");
+    const result = await useAuthStore.getState().bootstrapFirstAdmin("owner@shop.test", "wrong-password");
 
-    expect(result.error).toBe("User already registered");
+    expect(result.error).toBe("An account with this email already exists. Use its password.");
+    expect(signUp).not.toHaveBeenCalled();
     expect(signInWithPassword).toHaveBeenCalledTimes(1);
     expect(bootstrapCalls()).toBe(0);
     expect(useAuthStore.getState().currentUserId).toBeNull();

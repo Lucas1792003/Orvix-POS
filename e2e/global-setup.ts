@@ -1,10 +1,10 @@
 // Creates the QA tenant on the self-hosted stack (same approach as the
-// Phase D live suite: GoTrue sign-ups through the API, then seed.sql with
+// Phase D live suite: auth accounts via the GoTrue admin API, then seed.sql with
 // triggers disabled, then the Phase E extension) and enrols a TOTP factor
 // for the QA admin through the auth API. Secrets go to process.env only.
 import { existsSync, rmSync } from "node:fs";
 import path from "node:path";
-import { randomPassword, signUpUser } from "../src/live/liveHelpers";
+import { randomPassword, createAuthUser } from "../src/live/liveHelpers";
 import { runSql, runSqlFile, svc, userClient } from "./helpers/db";
 import { buildQaState, DEV_SERVER_URL, ensureResultsDir, liveCfg, PROJECT_ROOT, type QaState } from "./helpers/env";
 import { record } from "./helpers/evidence";
@@ -43,10 +43,10 @@ export default async function globalSetup(): Promise<void> {
     const verify = runSqlFile(path.join(PHASE_D_SQL, "verify_clean.sql")).trim();
     if (!verify.endsWith("CLEAN")) throw new Error(`stack is not clean before seeding: ${verify}`);
     authIds = {
-      admin: await signUpUser(cfg, st0.emails.admin, password),
-      mgr: await signUpUser(cfg, st0.emails.mgr, password),
-      cashA: await signUpUser(cfg, st0.emails.cashA, password),
-      cashB: await signUpUser(cfg, st0.emails.cashB, password),
+      admin: await createAuthUser(cfg, st0.emails.admin, password),
+      mgr: await createAuthUser(cfg, st0.emails.mgr, password),
+      cashA: await createAuthUser(cfg, st0.emails.cashA, password),
+      cashB: await createAuthUser(cfg, st0.emails.cashB, password),
     };
     const seed = runSqlFile(path.join(PHASE_D_SQL, "seed.sql"), {
       ts, auth_admin: authIds.admin, auth_mgr: authIds.mgr, auth_casha: authIds.cashA, auth_cashb: authIds.cashB,

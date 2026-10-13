@@ -30,7 +30,8 @@ so `docker compose …` in `/srv/supabase/stack` always applies the override.
 `/srv/supabase/stack/volumes/functions/` contains upstream `main/` and
 `deno.jsonc` plus the four app functions copied from `supabase/functions/` in
 this repo (`admin-2fa`, `email-sales-report`, `phone-upload-token`,
-`platform-console`). `rotate-audit-log` and `weekly-sales-report` were removed
+`platform-console`; `staff-admin` is prepared in the repo but NOT deployed yet —
+see `docs/selfhost-migration/phase-f/staff-creation.md` §5). `rotate-audit-log` and `weekly-sales-report` were removed
 2026-10-13 (moved to `~/removed-edge-functions-20261013/` on the server). Upstream `hello/` removed. Re-sync
 with:
 

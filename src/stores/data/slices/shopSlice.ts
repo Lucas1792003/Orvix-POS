@@ -1,5 +1,5 @@
 import type { StateCreator } from "zustand";
-import type { CreateUserInput, DataState, ShopState } from "../types";
+import type { CreateStaffInput, DataState, ShopState } from "../types";
 import type { BusinessProfile, Shop, User } from "../../../types";
 import { supabase } from "../../../lib/supabase";
 import { mapShopFormError, normalizeShopInput } from "../../../lib/shopValidation";
@@ -12,6 +12,7 @@ import {
 import { useAppStore } from "../../appStore";
 import { writeTableRow } from "../tableWrite";
 import { callRpc, newIdempotencyKey, ONLINE_ONLY_RETRIES } from "../idempotentRpc";
+import { createStaffAccount } from "../../../lib/staffAdmin";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const execShopWrite = async (query: PromiseLike<{ error: any }>, label: string): Promise<void> => {
@@ -121,24 +122,12 @@ export const createShopSlice: StateCreator<DataState, [], [], ShopState> = (set,
     if (currentShopId === shopId) setShopId(null);
   },
 
-  addUser: async (input: CreateUserInput) => {
-    // auth_id is stored at creation so the new user is RLS-identifiable
-    // from their first login (no reliance on the email self-heal).
-    const { data, error } = await callRpc("create_app_user", {
-      p_id: input.id,
-      p_name: input.name,
-      p_email: input.email ?? null,
-      p_role: input.role,
-      p_shop_id: input.shopId ?? null,
-      p_auth_id: input.authId ?? null,
-      p_granted_permissions: input.grantedPermissions ?? null,
-      p_revoked_permissions: input.revokedPermissions ?? null,
-      p_idempotency_key: newIdempotencyKey(),
-    }, { retries: ONLINE_ONLY_RETRIES });
-    if (error) throw error;
-    if (!data) throw new Error("Create user returned no data.");
-    const user = data as User;
-    set((state) => ({ users: [...state.users, user] }));
+  createStaffUser: async (input: CreateStaffInput) => {
+    // The auth account and the users row are created server-side by the
+    // staff-admin Edge Function (GoTrue admin API + create_app_user() as the
+    // caller); the browser never calls auth sign-up.
+    const user = await createStaffAccount(input);
+    set((state) => ({ users: state.users.some((u) => u.id === user.id) ? state.users : [...state.users, user] }));
     return user;
   },
 

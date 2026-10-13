@@ -33,7 +33,7 @@ import { homedir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
-  Evidence, liveConfig, makeClient, randomPassword, runSql, runSqlFile, signUpUser, signedInClient,
+  Evidence, liveConfig, makeClient, randomPassword, runSql, runSqlFile, createAuthUser, signedInClient,
   sleep, uuid, waitFor, type LiveConfig,
 } from "./liveHelpers";
 
@@ -284,10 +284,10 @@ SELECT format('products=%s inventory=%s inv_qty_sum=%s users=%s shops=%s busines
       objectPath: `products/qa-prod-1-${ts}/qa-g-${ts}.webp`,
     });
     const authA = {
-      admin: await signUpUser(cfg, A.emails.admin, password),
-      mgr: await signUpUser(cfg, A.emails.mgr, password),
-      casha: await signUpUser(cfg, A.emails.cash, password),
-      cashb: await signUpUser(cfg, `qa-cashier-b-${ts}@qa.invalid`, password),
+      admin: await createAuthUser(cfg, A.emails.admin, password),
+      mgr: await createAuthUser(cfg, A.emails.mgr, password),
+      casha: await createAuthUser(cfg, A.emails.cash, password),
+      cashb: await createAuthUser(cfg, `qa-cashier-b-${ts}@qa.invalid`, password),
     };
     A.adminAuth = authA.admin;
     const seed = runSqlFile(cfg, SEED_SQL, { ts, auth_admin: authA.admin, auth_mgr: authA.mgr, auth_casha: authA.casha, auth_cashb: authA.cashb }).trim();
@@ -299,7 +299,7 @@ SELECT format('products=%s inventory=%s inv_qty_sum=%s users=%s shops=%s busines
 
     // ---------------- Org B: trusted platform-console onboarding -----------
     platformEmail = `qa-platform-${ts}@qa.invalid`;
-    const platformAuth = await signUpUser(cfg, platformEmail, password);
+    const platformAuth = await createAuthUser(cfg, platformEmail, password);
     runSql(cfg, `INSERT INTO platform_admins (auth_id, name, email, is_active) VALUES ('${platformAuth}', 'QA Platform Admin', '${platformEmail}', true);`);
     const platform = await signedInClient(cfg, platformEmail, password);
     const bAdminEmail = `qa-b-admin-${ts}@qa.invalid`;
@@ -340,8 +340,8 @@ SELECT format('products=%s inventory=%s inv_qty_sum=%s users=%s shops=%s busines
       if (error) throw new Error(`B shop insert failed: ${error.message}`);
     }
     // B's staff through create_app_user (MANAGER first, then CASHIER).
-    const authBm = await signUpUser(cfg, B.emails.mgr, password);
-    const authBc = await signUpUser(cfg, B.emails.cash, password);
+    const authBm = await createAuthUser(cfg, B.emails.mgr, password);
+    const authBc = await createAuthUser(cfg, B.emails.cash, password);
     ok(await rpc(B.admin, "create_app_user", { p_id: B.mgrId, p_name: "QA B Manager", p_email: B.emails.mgr, p_role: "MANAGER", p_shop_id: B.shop, p_auth_id: authBm, p_granted_permissions: null, p_revoked_permissions: null, p_idempotency_key: uuid() }), "B create manager");
     ok(await rpc(B.admin, "create_app_user", { p_id: B.cashId, p_name: "QA B Cashier", p_email: B.emails.cash, p_role: "CASHIER", p_shop_id: B.shop, p_auth_id: authBc, p_granted_permissions: null, p_revoked_permissions: null, p_idempotency_key: uuid() }), "B create cashier");
     B.mgr = await signedInClient(cfg, B.emails.mgr, password);
@@ -455,7 +455,7 @@ SELECT format('products=%s inventory=%s inv_qty_sum=%s users=%s shops=%s busines
 
     // (a) orphan: fresh GoTrue signup, no users row
     const orphanEmail = `qa-orphan-${ts}@qa.invalid`;
-    await signUpUser(cfg, orphanEmail, password);
+    await createAuthUser(cfg, orphanEmail, password);
     const orphan = await signedInClient(cfg, orphanEmail, password);
     expect((await rpc(orphan, "app_setup_needed", {})).data).toBe(false);
     await probe(orphan, "orphan");
@@ -538,7 +538,7 @@ SELECT format('products=%s inventory=%s inv_qty_sum=%s users=%s shops=%s busines
       expect(await inv(o.shop, pid)).toBe(q0 + 7);
       // create staff
       const staffEmail = `qa-${which.toLowerCase()}-staff-${ts}@qa.invalid`;
-      const staffAuth = await signUpUser(cfg, staffEmail, password);
+      const staffAuth = await createAuthUser(cfg, staffEmail, password);
       const staffId = `qa-${which.toLowerCase()}-user-staff-${ts}`;
       const cu = await rpc(o.admin, "create_app_user", { p_id: staffId, p_name: `QA ${which} Staff`, p_email: staffEmail, p_role: "CASHIER", p_shop_id: o.shop, p_auth_id: staffAuth, p_granted_permissions: null, p_revoked_permissions: null, p_idempotency_key: uuid() });
       expect(cu.error).toBeNull();
@@ -792,7 +792,7 @@ SELECT format('products=%s inventory=%s inv_qty_sum=%s users=%s shops=%s busines
     expect(fp()).toBe(fp0);
     // buyer: created by the ADMIN (positive), may create a PO for its own shop, nothing else
     const buyerEmail = `qa-buyer-${ts}@qa.invalid`;
-    const buyerAuth = await signUpUser(cfg, buyerEmail, password);
+    const buyerAuth = await createAuthUser(cfg, buyerEmail, password);
     const buyerId = `qa-user-buyer-${ts}`;
     ok(await rpc(A.admin, "create_app_user", { p_id: buyerId, p_name: "QA Buyer", p_email: buyerEmail, p_role: "BUYER", p_shop_id: A.shop, p_auth_id: buyerAuth, p_granted_permissions: null, p_revoked_permissions: null, p_idempotency_key: uuid() }), "create buyer");
     const buyer = await signedInClient(cfg, buyerEmail, password);
@@ -1004,7 +1004,7 @@ ROLLBACK;`).trim().split("\n").filter((l) => /^\d+\/\d+$/.test(l))[0];
     const notes: string[] = [];
     const fp0 = fp();
     const xEmail = `qa-xstaff-${ts}@qa.invalid`;
-    const xAuth = await signUpUser(cfg, xEmail, password);
+    const xAuth = await createAuthUser(cfg, xEmail, password);
     const into = await rpc(A.admin, "create_app_user", { p_id: `qa-user-xstaff-${ts}`, p_name: "QA X Staff", p_email: xEmail, p_role: "CASHIER", p_shop_id: B.shop, p_auth_id: xAuth, p_granted_permissions: null, p_revoked_permissions: null, p_idempotency_key: uuid() });
     expect(into.error?.message).toMatch(NOT_IN_ORG);
     expect(await svcCount("users", (q) => q.eq("id", `qa-user-xstaff-${ts}`))).toBe(0);
