@@ -6,14 +6,23 @@
 //             product edit page -> "Use phone camera" -> QR modal;
 //   phone   = a Chromium page with an iPhone 13 profile that opens the QR URL.
 //
-// The phone-upload-token Edge Function is NOT deployed to the self-hosted stack: it runs
-// in a disposable local supabase/edge-runtime:v1.76.2 container
-// (helpers/edgeRuntime.ts, 127.0.0.1 only) and the phone's request for
-// <stack>/functions/v1/phone-upload-token is routed to it. Everything else
-// (session RPCs, storage upload, completion, the desktop's status poll) is
-// the real self-hosted stack. Real timing. QA data only; every QA storage
-// object is removed through the Storage API in afterAll, and the non-QA
-// objects (574, incl. the 17 orphans) are proven byte-identical.
+// Where the phone-upload-token Edge Function runs (E2E_PHONE_FN):
+//   deployed (default) - the function deployed on the stack. No container is
+//             started and the function request is NOT routed anywhere: the
+//             phone page calls <stack>/functions/v1/phone-upload-token itself
+//             (observed passively for the evidence ledger).
+//   local   - a disposable local supabase/edge-runtime:v1.76.2 container
+//             (helpers/edgeRuntime.ts, 127.0.0.1 only) runs this repo's copy
+//             and the phone's request for the function is routed to it (the
+//             pre-deployment mode; needs Docker).
+// Everything else (session RPCs, storage upload, completion, the desktop's
+// status poll) is the real stack. The D-ratelimit-* cases (migration 081)
+// run only when the stack's schema is >= 081 and are skipped otherwise. Real timing. Since 080 every successful
+// case also saves the product and checks that products.image_url is the
+// SERVER-DERIVED URL (public.app_config origin + /storage/v1/object/public/
+// product-images/<session path>). QA data only; every QA storage object is
+// removed through the Storage API in afterAll, and the non-QA objects (574,
+// incl. the 17 orphans) are proven byte-identical.
 import { expect, test, type Route } from "@playwright/test";
 import { rmSync } from "node:fs";
 import path from "node:path";
@@ -33,6 +42,8 @@ const { ids, emails } = st;
 const cfg = liveCfg();
 const BUCKET = "product-images";
 const FN_PATH = "/functions/v1/phone-upload-token";
+const FN_MODE = (process.env.E2E_PHONE_FN ?? "deployed").trim();
+if (FN_MODE !== "deployed" && FN_MODE !== "local") throw new Error(`E2E_PHONE_FN must be "deployed" or "local", got "${FN_MODE}"`);
 const QA_OBJECT = new RegExp(`^org/${ids.org}/temp/pimg-[0-9a-f]+$`);
 // Tiny lossless WebP (34 bytes) for the programmatic race (same constant as phase-g3).
 const TINY_WEBP_B64 = "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
@@ -43,7 +54,11 @@ const PHONE_EXPIRED = "This upload link has expired. Create a new QR code on the
 const PHONE_CANCELLED = "This upload link was cancelled on the computer. Create a new QR code to upload.";
 
 let A: Terminal;
-let fn: LocalFunction;
+let fn: LocalFunction | undefined;
+/** public.app_config.supabase_public_url (080): the only origin a stored image URL may carry. */
+let trustedBase = "";
+/** max(supabase_migrations.schema_migrations.version); the 081 rate-limit cases need >= "081". */
+let schemaVersion = "";
 let photo: Buffer;
 let storageBefore = "";
 let orphansBefore = "";
@@ -67,7 +82,9 @@ const sessionRow = (id: string) =>
   sql1(`SELECT status || '|' || storage_path || '|' || COALESCE(public_url, '<null>') || '|' || COALESCE(bytes::text, '<null>') || '|' || (completed_at IS NOT NULL) || '|' || (signed_upload_token IS NOT NULL) FROM product_image_upload_sessions WHERE id = '${id}';`);
 const objectsUnder = (s: Sess) => Number(sql1(`SELECT count(*) FROM storage.objects WHERE bucket_id = '${BUCKET}' AND name LIKE '${s.storagePath}%';`));
 const objectSize = (s: Sess) => sql1(`SELECT COALESCE(string_agg(metadata->>'size', ','), '') FROM storage.objects WHERE bucket_id = '${BUCKET}' AND name = '${s.storagePath}';`);
-const publicUrl = (p: string) => `${cfg.url}/storage/v1/object/public/${BUCKET}/${p}`;
+/** The server-derived URL (080): trusted base from app_config + bucket + session path. */
+const publicUrl = (p: string) => `${trustedBase}/storage/v1/object/public/${BUCKET}/${p}`;
+const productImageUrl = () => sql1(`SELECT COALESCE(image_url, '<null>') FROM products WHERE id = '${ids.prod1}';`);
 
 /** Desktop: open the QR modal; the session comes from the create RPC's response (kept in memory, never logged). */
 async function openQr(): Promise<Sess> {
@@ -86,29 +103,47 @@ async function openQr(): Promise<Sess> {
   return { sessionId: j.sessionId, token: j.token, storagePath: j.storagePath, qrUrl: `${DEV_SERVER_URL}/phone-upload/product-image/${encodeURIComponent(j.token)}`, shownAt };
 }
 
-/** Phone terminal with the function routed to the local container + request ledgers. */
-async function launchPhone(opts: { holdFirstTokenMs?: number; dropFirstUploadResponse?: boolean } = {}) {
+const fnCall = (status: number, text: string): FnCall => {
+  let b: any = null;
+  try { b = JSON.parse(text); } catch { /* keep null */ }
+  return {
+    at: Date.now(), status,
+    kind: b?.token ? "token" : b?.alreadyUploaded ? "already" : "refused",
+    code: b?.code, sessionStatus: b?.status, keys: Object.keys(b ?? {}).sort().join(","), path: b?.path, text,
+  };
+};
+
+/** Phone terminal + request ledgers. The function is reached as configured
+ *  by E2E_PHONE_FN (deployed: untouched, observed; local: routed). */
+async function launchPhone(opts: { holdFirstPutMs?: number; dropFirstUploadResponse?: boolean } = {}) {
   const P = await Terminal.launchPhone();
   const fnCalls: FnCall[] = [];
   const puts: Put[] = [];
   const completes: { at: number; status: number }[] = [];
   let dropped = false;
-  await P.context.route(`${cfg.url}${FN_PATH}`, async (route: Route) => {
-    const r = await route.fetch({ url: fn.url });
-    if (route.request().method() === "OPTIONS") return route.fulfill({ response: r });
-    const text = await r.text();
-    let b: any = null;
-    try { b = JSON.parse(text); } catch { /* keep null */ }
-    fnCalls.push({
-      at: Date.now(), status: r.status(),
-      kind: b?.token ? "token" : b?.alreadyUploaded ? "already" : "refused",
-      code: b?.code, sessionStatus: b?.status, keys: Object.keys(b ?? {}).sort().join(","), path: b?.path, text,
+  let held = false;
+  if (FN_MODE === "local") {
+    await P.context.route(`${cfg.url}${FN_PATH}`, async (route: Route) => {
+      const r = await route.fetch({ url: fn!.url });
+      if (route.request().method() === "OPTIONS") return route.fulfill({ response: r });
+      const text = await r.text();
+      fnCalls.push(fnCall(r.status(), text));
+      await route.fulfill({ response: r, body: text });
     });
-    if (opts.holdFirstTokenMs && fnCalls.length === 1 && b?.token) await sleep(opts.holdFirstTokenMs);
-    await route.fulfill({ response: r, body: text });
-  });
+  } else {
+    // deployed: no route at all - the page's own request reaches the stack's
+    // /functions/v1/phone-upload-token; the answer is only observed.
+    P.context.on("response", (res) => {
+      if (res.url() !== `${cfg.url}${FN_PATH}` || res.request().method() !== "POST") return;
+      const status = res.status();
+      void res.text().then((text) => fnCalls.push(fnCall(status, text)), () => fnCalls.push(fnCall(status, "")));
+    });
+  }
   await P.context.route(`${cfg.url}/storage/v1/object/upload/sign/**`, async (route: Route) => {
     if (route.request().method() !== "PUT") return route.continue();
+    // stale token: the first PUT leaves the phone only after the hold, so the
+    // token it carries (issued just before) is older than storage's 60 s.
+    if (opts.holdFirstPutMs && !held) { held = true; await sleep(opts.holdFirstPutMs); }
     const r = await route.fetch();
     const body = (await r.text()).slice(0, 200);
     if (opts.dropFirstUploadResponse && !dropped) {
@@ -151,6 +186,20 @@ async function desktopShowsImage(s: Sess): Promise<string> {
   return w;
 }
 
+/** Desktop saves the product ("Update Product"); products.image_url must be
+ *  exactly the server-derived URL. Returns to the edit page for the next case. */
+async function saveProductAndCheckImageUrl(s: Sess): Promise<string> {
+  const expected = publicUrl(s.storagePath);
+  await A.page.getByRole("button", { name: "Update Product", exact: true }).click();
+  await expect.poll(() => A.currentRoute(), { timeout: 30_000 }).toBe("/app/admin/products");
+  await expect.poll(productImageUrl, { timeout: 20_000 }).toBe(expected);
+  const ok = productImageUrl() === expected && expected.startsWith(`${trustedBase}/storage/v1/object/public/${BUCKET}/org/`);
+  await A.navigate(`/app/admin/products/${ids.prod1}/edit`);
+  await A.page.getByRole("button", { name: "Use phone camera" }).waitFor({ state: "visible", timeout: 30_000 });
+  await expect(A.page.getByAltText("Product preview")).toHaveAttribute("src", expected);
+  return `products.image_url == app_config origin + /storage/v1/object/public/${BUCKET}/<session path>: ${ok}`;
+}
+
 /** DB + storage after a successful flow: one object, COMPLETED once, size = completion bytes, public GET serves it. */
 async function assertCompletedOnce(s: Sess): Promise<string> {
   const row = sessionRow(s.sessionId);
@@ -165,7 +214,10 @@ async function assertCompletedOnce(s: Sess): Promise<string> {
   const get = await fetch(url);
   expect(get.status).toBe(200);
   expect(String((await get.arrayBuffer()).byteLength)).toBe(bytes);
-  return `session COMPLETED, bytes=${bytes}, objects under session path=1 (size ${bytes}), public GET 200 ${bytes} B`;
+  // what the desktop poll hands back (080: derived, never the stored column)
+  const polled = sql1(`SELECT public.app_upload_session_public_url(storage_path) FROM product_image_upload_sessions WHERE id = '${s.sessionId}';`);
+  expect(polled).toBe(url);
+  return `session COMPLETED once (completed_at set, signed_upload_token NULL), public_url = derived trusted URL, bytes=${bytes}, objects under session path=1 (size ${bytes}), public GET 200 ${bytes} B`;
 }
 
 function assertTokenResponse(c: FnCall, s: Sess): void {
@@ -186,8 +238,22 @@ test.beforeAll(async () => {
   expect(orphansBefore.startsWith("17 orphans")).toBe(true);
   record("phone-upload", "storage baseline", "INFO", `${storageBefore}; ${orphansBefore}`);
 
-  fn = await startLocalPhoneUploadFunction();
-  record("phone-upload", "local edge-runtime", "INFO", `container ${fn.container} (supabase/edge-runtime:v1.76.2) on ${fn.url.replace(/\/phone-upload-token$/, "")}, router = stack main/index.ts copy, VERIFY_JWT=false locally`);
+  schemaVersion = sql1(`SELECT max(version) FROM supabase_migrations.schema_migrations;`);
+  record("phone-upload", "schema", "INFO", `schema ${schemaVersion}; 081 rate-limit cases ${schemaVersion >= "081" ? "RUN" : "SKIPPED (not deployed)"}`);
+  trustedBase = sql1(`SELECT value FROM public.app_config WHERE key = 'supabase_public_url';`);
+  expect(trustedBase, "080 app_config.supabase_public_url must be set").toMatch(/^https:\/\/[a-z0-9.-]+(:\d+)?$/);
+  expect(trustedBase, "the stack's trusted origin is the origin the apps are built for").toBe(cfg.url);
+  if (FN_MODE === "local") {
+    fn = await startLocalPhoneUploadFunction();
+    record("phone-upload", "local edge-runtime", "INFO", `container ${fn.container} (supabase/edge-runtime:v1.76.2) on ${fn.url.replace(/\/phone-upload-token$/, "")}, router = stack main/index.ts copy, VERIFY_JWT=false locally`);
+  } else {
+    // smoke: the deployed route answers the function's own generic 404 (no data written)
+    const r = await fetch(`${cfg.url}${FN_PATH}`, { method: "POST", headers: { Authorization: `Bearer ${cfg.anonKey}`, apikey: cfg.anonKey, "content-type": "application/json" }, body: JSON.stringify({ token: "short" }) });
+    const body = await r.json().catch(() => null);
+    expect(r.status).toBe(404);
+    expect(body).toEqual({ error: "Invalid upload link.", code: "invalid" });
+    record("phone-upload", "deployed function", "INFO", `E2E_PHONE_FN=deployed: no local container, no routing; smoke POST {token:"short"} with the anon bearer -> ${r.status} ${JSON.stringify(body)}`);
+  }
 
   rmSync(path.join(RESULTS_DIR, "userdata-d"), { recursive: true, force: true });
   A = await Terminal.launchElectron(path.join(RESULTS_DIR, "userdata-d"));
@@ -247,6 +313,7 @@ for (const delayS of [30, 65, 120, 300]) {
       await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 60_000 });
       const size = await desktopShowsImage(s);
       const db = await assertCompletedOnce(s);
+      const img = await saveProductAndCheckImageUrl(s);
       expect(fnCalls.map((c) => c.kind)).toEqual(["token"]);
       assertTokenResponse(fnCalls[0], s);
       expect(puts.map((p) => p.status)).toEqual([200]);
@@ -255,7 +322,7 @@ for (const delayS of [30, 65, 120, 300]) {
       const tokenAgeAtPut = puts[0].at - fnCalls[0].at;
       const line = `| ${delayS} s | phone opened +${secs(openedAfter)} s | file picked +${secs(pickedAt - s.shownAt)} s | token issued +${secs(tokenAt)} s | PUT 200 +${secs(puts[0].at - s.shownAt)} s (token age ${tokenAgeAtPut} ms) | complete 200 | COMPLETED | desktop image ${size} |`;
       timings.push(line);
-      record("phone-upload", `D${delayS} upload at +${delayS} s`, "PASS", `${line} ${db}; function answer keys {${fnCalls[0].keys}} path=session path, no ids`);
+      record("phone-upload", `D${delayS} upload at +${delayS} s`, "PASS", `[fn ${FN_MODE}] ${line} ${db}; ${img}; function answer keys {${fnCalls[0].keys}} path=session path, no ids`);
     } finally {
       await P.close();
     }
@@ -265,13 +332,14 @@ for (const delayS of [30, 65, 120, 300]) {
 test("D-stale: a token used 66 s after issue is refused by storage; the phone transparently gets a fresh one and completes", async () => {
   test.setTimeout(240_000);
   const s = await openQr();
-  const { P, fnCalls, puts, completes } = await launchPhone({ holdFirstTokenMs: 66_000 });
+  const { P, fnCalls, puts, completes } = await launchPhone({ holdFirstPutMs: 66_000 });
   try {
     await phoneOpens(P, s);
     await phonePicks(P);
     await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 150_000 });
     const size = await desktopShowsImage(s);
     const db = await assertCompletedOnce(s);
+    const img = await saveProductAndCheckImageUrl(s);
     expect(fnCalls.map((c) => c.kind)).toEqual(["token", "token"]);
     assertTokenResponse(fnCalls[1], s);
     expect(puts.map((p) => p.status)).toEqual([400, 200]);
@@ -281,7 +349,7 @@ test("D-stale: a token used 66 s after issue is refused by storage; the phone tr
     expect(age).toBeGreaterThanOrEqual(65_000);
     const line = `| stale token | token #1 used ${secs(age)} s after issue -> PUT ${puts[0].status} ${puts[0].body.replace(/\s+/g, " ").slice(0, 90)} | token #2 +${secs(fnCalls[1].at - s.shownAt)} s -> PUT 200 | complete 200 | COMPLETED | desktop image ${size} |`;
     timings.push(line);
-    record("phone-upload", "D-stale token refused then refreshed", "PASS", `${line} ${db}`);
+    record("phone-upload", "D-stale token refused then refreshed", "PASS", `[fn ${FN_MODE}] ${line} ${db}; ${img}`);
   } finally {
     await P.close();
   }
@@ -303,10 +371,11 @@ test("D-double-tap: two picks in a row -> one token, one PUT, one completion, on
     await sleep(3_000); // let any (wrong) second attempt surface
     await desktopShowsImage(s);
     const db = await assertCompletedOnce(s);
+    const img = await saveProductAndCheckImageUrl(s);
     expect(fnCalls.map((c) => c.kind)).toEqual(["token"]);
     expect(puts.map((p) => p.status)).toEqual([200]);
     expect(completes.map((c) => c.status)).toEqual([200]);
-    record("phone-upload", "D-double-tap", "PASS", `function calls=${fnCalls.length}, PUTs=${puts.map((p) => p.status).join(",")}, completes=${completes.map((c) => c.status).join(",")}; ${db}`);
+    record("phone-upload", "D-double-tap", "PASS", `[fn ${FN_MODE}] function calls=${fnCalls.length}, PUTs=${puts.map((p) => p.status).join(",")}, completes=${completes.map((c) => c.status).join(",")}; ${db}; ${img}`);
   } finally {
     await P.close();
   }
@@ -328,12 +397,23 @@ test("D-race: two concurrent uploads of the same session (real client code) -> o
     }, [s.token, TINY_WEBP_B64, "/src/lib/productImagePhoneUpload.ts"] as const);
     expect(results).toEqual(["COMPLETED", "COMPLETED"]);
     await expect(A.page.getByText("Upload received")).toBeVisible({ timeout: 20_000 });
+    await expect(A.page.getByAltText("Uploaded product preview")).toHaveAttribute("src", publicUrl(s.storagePath));
     await A.page.getByRole("button", { name: "Use this image", exact: true }).click();
     const db = await assertCompletedOnce(s);
-    expect(puts.filter((p) => p.status === 200)).toHaveLength(1);
+    const img = await saveProductAndCheckImageUrl(s);
+    // Exactly one object and one completion are the invariants. How storage
+    // answers two simultaneous PUTs of the same JWT (same second -> identical
+    // token) varies: seen as 200 + 400 "409 Duplicate" (local function run)
+    // and as 200 + 200 within 4 ms (deployed run, 2026-10-13) - the second
+    // write landing on the same single object row. Recorded, not hidden.
+    const put200 = puts.filter((p) => p.status === 200).length;
+    expect(put200).toBeGreaterThanOrEqual(1);
+    expect(put200 + puts.filter((p) => /Duplicate|409/.test(p.body)).length).toBe(2);
+    expect(objectsUnder(s)).toBe(1);
+    const objRow = sql1(`SELECT COALESCE(metadata->>'size','-') || ' B, version ' || COALESCE(version,'-') || ', created ' || created_at || ', updated ' || updated_at FROM storage.objects WHERE bucket_id = '${BUCKET}' AND name = '${s.storagePath}';`);
     expect(completes.filter((c) => c.status === 200)).toHaveLength(1);
     record("phone-upload", "D-race (2 concurrent uploads)", "PASS",
-      `both calls -> ${results.join(" / ")}; function answers=${fnCalls.map((c) => c.kind).join(",")}; PUTs=${puts.map((p) => `${p.status}${p.status !== 200 ? ` "${p.body.replace(/\s+/g, " ").slice(0, 70)}"` : ""}`).join(", ")}; completes=${completes.map((c) => c.status).join(",")}; ${db}`);
+      `[fn ${FN_MODE}] both calls -> ${results.join(" / ")}; function answers=${fnCalls.map((c) => c.kind).join(",")}; PUTs=${puts.map((p) => `${p.status}${p.status !== 200 ? ` "${p.body.replace(/\s+/g, " ").slice(0, 70)}"` : ""}`).join(", ")}; completes=${completes.map((c) => c.status).join(",")}; object row: ${objRow}; ${db}; ${img}`);
   } finally {
     await P.close();
   }
@@ -349,11 +429,12 @@ test("D-retry: the upload response is lost after storage stored it -> phone retr
     await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 60_000 });
     await desktopShowsImage(s);
     const db = await assertCompletedOnce(s);
+    const img = await saveProductAndCheckImageUrl(s);
     expect(fnCalls.map((c) => c.kind)).toEqual(["token", "already"]);
     expect(fnCalls[1].keys).toBe("alreadyUploaded,path");
     expect(puts.map((p) => `${p.status}${p.dropped ? "(dropped)" : ""}`)).toEqual(["200(dropped)"]);
     expect(completes.map((c) => c.status)).toEqual([200]);
-    record("phone-upload", "D-retry after lost response", "PASS", `function answers=${fnCalls.map((c) => c.kind).join(",")}; PUTs=200 stored but response dropped, no second PUT; completes=200 x1; ${db}`);
+    record("phone-upload", "D-retry after lost response", "PASS", `[fn ${FN_MODE}] function answers=${fnCalls.map((c) => c.kind).join(",")}; PUTs=200 stored but response dropped, no second PUT; completes=200 x1; ${db}; ${img}`);
   } finally {
     await P.close();
   }
@@ -368,6 +449,7 @@ test("D-expired: parent session expired (expires_at set to the past) -> phone sa
   const gate = new Promise<void>((r) => { release = r; });
   const pollGlob = `${cfg.url}/rest/v1/rpc/get_product_image_upload_session_status`;
   await A.page.route(pollGlob, async (route) => { await gate; await route.continue().catch(() => undefined); });
+  const imageBefore = productImageUrl();
   try {
     await phoneOpens(P, s);
     await sleep(2_500); // any poll already in flight finishes or is held
@@ -377,6 +459,7 @@ test("D-expired: parent session expired (expires_at set to the past) -> phone sa
     expect(sessionRow(s.sessionId).startsWith("PENDING|")).toBe(true);
     await phonePicks(P);
     await expect(P.page.getByText(PHONE_EXPIRED)).toBeVisible({ timeout: 30_000 });
+    await expect.poll(() => fnCalls.length).toBe(1);
     expect(fnCalls.map((c) => `${c.status}:${c.code}:${c.sessionStatus}`)).toEqual(["410:inactive:EXPIRED"]);
     expect(fnCalls[0].text.includes("token\"")).toBe(false);
     expect(puts).toHaveLength(0);
@@ -388,7 +471,8 @@ test("D-expired: parent session expired (expires_at set to the past) -> phone sa
     await A.page.unroute(pollGlob);
     await expect(A.page.getByText("Upload failed / expired")).toBeVisible({ timeout: 20_000 });
     await A.page.getByRole("button", { name: "Close", exact: true }).click();
-    record("phone-upload", "D-expired session refused", "PASS", `phone: "${PHONE_EXPIRED}"; function 410 inactive/EXPIRED, no token; PUTs=0, completes=0; row (desktop poll held) = ${stamped.split("|").slice(0, 1)} (stamped by the function via _by_token); objects=0; desktop after poll: "Upload failed / expired"`);
+    expect(productImageUrl()).toBe(imageBefore);
+    record("phone-upload", "D-expired session refused", "PASS", `[fn ${FN_MODE}] products.image_url unchanged; phone: "${PHONE_EXPIRED}"; function 410 inactive/EXPIRED, no token; PUTs=0, completes=0; row (desktop poll held) = ${stamped.split("|").slice(0, 1)} (stamped by the function via _by_token); objects=0; desktop after poll: "Upload failed / expired"`);
   } finally {
     release();
     await A.page.unroute(pollGlob).catch(() => undefined);
@@ -400,6 +484,7 @@ test("D-cancelled: desktop closes the QR (cancel) -> phone refused with a clear 
   test.setTimeout(120_000);
   const s = await openQr();
   const { P, fnCalls, puts, completes } = await launchPhone();
+  const imageBefore = productImageUrl();
   try {
     await phoneOpens(P, s);
     const cancelled = A.page.waitForResponse((r) => r.url().endsWith("/rest/v1/rpc/cancel_product_image_upload_session"));
@@ -409,12 +494,88 @@ test("D-cancelled: desktop closes the QR (cancel) -> phone refused with a clear 
     expect(sessionRow(s.sessionId).split("|")[0]).toBe("CANCELED");
     await phonePicks(P);
     await expect(P.page.getByText(PHONE_CANCELLED)).toBeVisible({ timeout: 30_000 });
+    await expect.poll(() => fnCalls.length).toBe(1);
     expect(fnCalls.map((c) => `${c.status}:${c.code}:${c.sessionStatus}`)).toEqual(["410:inactive:CANCELED"]);
     expect(puts).toHaveLength(0);
     expect(completes).toHaveLength(0);
     expect(sessionRow(s.sessionId).split("|")[0]).toBe("CANCELED");
     expect(objectsUnder(s)).toBe(0);
-    record("phone-upload", "D-cancelled session refused", "PASS", `desktop Close -> cancel RPC, modal gone; phone: "${PHONE_CANCELLED}"; function 410 inactive/CANCELED, no token; PUTs=0, completes=0; row CANCELED; objects=0`);
+    expect(productImageUrl()).toBe(imageBefore);
+    record("phone-upload", "D-cancelled session refused", "PASS", `[fn ${FN_MODE}] products.image_url unchanged; desktop Close -> cancel RPC, modal gone; phone: "${PHONE_CANCELLED}"; function 410 inactive/CANCELED, no token; PUTs=0, completes=0; row CANCELED; objects=0`);
+  } finally {
+    await P.close();
+  }
+});
+
+// --------------------------------------------------------------------------
+// 081 rate limits (docs/selfhost-migration/phase-f/rate-limiting.md). These
+// run ONLY when the stack's schema is >= 081, i.e. after the owner approved
+// and applied 081 and deployed the rate-limited function; on an 080 stack
+// they are skipped. Limits: 5 tokens per session per 10 s, 20 per session.
+const PHONE_WAITING = /Too many attempts right now\. Trying again automatically in \d+ s\.\.\./;
+const PHONE_LINK_USED_UP = "This upload link has been used too many times. Create a new QR code on the computer.";
+
+/** Ask the function for tokens directly (the anon key only), as a second phone would. */
+async function burnTokens(s: Sess, n: number): Promise<number[]> {
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const r = await fetch(`${cfg.url}${FN_PATH}`, { method: "POST", headers: { Authorization: `Bearer ${cfg.anonKey}`, apikey: cfg.anonKey, "content-type": "application/json" }, body: JSON.stringify({ token: s.token }) });
+    await r.text();
+    out.push(r.status);
+  }
+  return out;
+}
+
+test("D-ratelimit-wait [081]: the phone hits the session burst limit (429) -> shows the wait message, retries by itself after Retry-After, completes once", async () => {
+  test.skip(schemaVersion < "081", `schema ${schemaVersion} < 081: rate limits not deployed`);
+  test.setTimeout(180_000);
+  const s = await openQr();
+  const { P, fnCalls, puts, completes } = await launchPhone();
+  try {
+    await phoneOpens(P, s);
+    // 5 tokens taken right before the pick: the phone's own request is the 6th in the 10 s window
+    expect(await burnTokens(s, 5)).toEqual([200, 200, 200, 200, 200]);
+    await phonePicks(P);
+    await expect(P.page.getByText(PHONE_WAITING)).toBeVisible({ timeout: 20_000 });
+    await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 60_000 });
+    await desktopShowsImage(s);
+    const db = await assertCompletedOnce(s);
+    const img = await saveProductAndCheckImageUrl(s);
+    expect(fnCalls.map((c) => `${c.status}:${c.kind}:${c.code ?? ""}`)).toEqual(["429:refused:rate_limited", "200:token:"]);
+    const wait = JSON.parse(fnCalls[0].text).retry_after_seconds as number;
+    expect(wait).toBeGreaterThanOrEqual(1);
+    expect(wait).toBeLessThanOrEqual(10);
+    expect(fnCalls[1].at - fnCalls[0].at).toBeGreaterThanOrEqual(wait * 1000 - 500);
+    expect(puts.map((p) => p.status)).toEqual([200]);
+    expect(completes.map((c) => c.status)).toEqual([200]);
+    record("phone-upload", "D-ratelimit-wait [081]", "PASS", `[fn ${FN_MODE}] 5 tokens taken directly, phone's request -> 429 retry_after=${wait} s, page showed the wait message and retried after ${secs(fnCalls[1].at - fnCalls[0].at)} s -> token -> PUT 200 -> complete 200; ${db}; ${img}`);
+  } finally {
+    await P.close();
+  }
+});
+
+test("D-ratelimit-used-up [081]: the session reached its lifetime cap -> 429 until expiry; phone says to create a new QR, no PUT, no completion", async () => {
+  test.skip(schemaVersion < "081", `schema ${schemaVersion} < 081: rate limits not deployed`);
+  test.setTimeout(120_000);
+  const s = await openQr();
+  const { P, fnCalls, puts, completes } = await launchPhone();
+  const imageBefore = productImageUrl();
+  try {
+    await phoneOpens(P, s);
+    // QA session only: its 20 tokens are used up
+    sql1(`UPDATE product_image_upload_sessions SET token_issue_count = 20 WHERE id = '${s.sessionId}' AND storage_path LIKE 'org/${ids.org}/temp/%';`);
+    await phonePicks(P);
+    await expect(P.page.getByText(PHONE_LINK_USED_UP)).toBeVisible({ timeout: 30_000 });
+    await sleep(2_000);
+    expect(fnCalls.map((c) => `${c.status}:${c.code}`)).toEqual(["429:rate_limited"]);
+    expect(JSON.parse(fnCalls[0].text).retry_after_seconds).toBeGreaterThan(400);
+    expect(puts).toHaveLength(0);
+    expect(completes).toHaveLength(0);
+    expect(objectsUnder(s)).toBe(0);
+    expect(sessionRow(s.sessionId).split("|")[0]).toBe("PENDING");
+    await A.page.getByRole("button", { name: "Close", exact: true }).click();
+    expect(productImageUrl()).toBe(imageBefore);
+    record("phone-upload", "D-ratelimit-used-up [081]", "PASS", `[fn ${FN_MODE}] counter at 20 -> function 429 retry_after=${JSON.parse(fnCalls[0].text).retry_after_seconds} s (until expiry), no automatic retry; phone: "${PHONE_LINK_USED_UP}"; PUTs=0, completes=0, objects=0; desktop closed (cancelled)`);
   } finally {
     await P.close();
   }

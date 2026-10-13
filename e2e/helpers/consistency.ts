@@ -7,12 +7,13 @@ import { rows } from "./db";
 import { qaState } from "./env";
 import { record } from "./evidence";
 import { hostedRequests } from "./hostedGuard";
+import { saleLedgerViolations, type Violation } from "./saleLedger";
 import type { Terminal } from "./terminal";
-
-interface Violation { check: string; detail: string }
 
 const qaLike = (q: any, col: string) => q.like(col, "qa-%");
 
+/** Throws (and records FAIL) on any violation; `terminals` contribute their
+ *  outboxes and the complete_sale requests they actually sent. */
 export async function assertConsistency(label: string, terminals: Terminal[] = []): Promise<void> {
   const st = qaState();
   const violations: Violation[] = [];
@@ -31,21 +32,21 @@ export async function assertConsistency(label: string, terminals: Terminal[] = [
     rows("sale_items", {}, (q) => qaLike(q, "product_id")),
   ]);
 
-  // 1. No duplicate sales: same shift + total + the same item lines, with
-  //    created_at within 2 s (two different baskets rung up back to back on
-  //    one till legitimately share a total; a replayed duplicate would not
-  //    differ in its lines).
-  const itemsSig = (saleId: string) => saleItems.filter((i) => i.sale_id === saleId)
-    .map((i) => `${i.product_id}x${i.qty_units}`).sort().join(",");
-  const bySeq = [...sales].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
-  for (let i = 1; i < bySeq.length; i++) {
-    const a = bySeq[i - 1], b = bySeq[i];
-    if (a.shift_id === b.shift_id && a.total_mmk === b.total_mmk && itemsSig(a.id) === itemsSig(b.id)
-      && Math.abs(Date.parse(b.created_at) - Date.parse(a.created_at)) < 2000) {
-      violations.push({ check: "duplicate sale", detail: `${a.id} / ${b.id} (shift ${a.shift_id}, total ${a.total_mmk})` });
-    }
-  }
-  notes.push(`sales=${sales.length}`);
+  // 1. No duplicate and no lost sales (helpers/saleLedger.ts): every sale
+  //    maps to exactly one committed complete_sale idempotency key and every
+  //    committed key to its sale; one client operation (cashier + shift +
+  //    the client-minted event time) produced at most one sale; receipt
+  //    numbers unique per shop; and on the terminals, one operation was sent
+  //    under one key only. (Replaces "same shift + total + lines within
+  //    2 s", which flagged two distinct queued sales of the same basket and
+  //    missed a replay that landed later than 2 s.)
+  const qaKeys = await rows("idempotency_keys", {}, (q) => q.eq("rpc", "complete_sale").like("response->sale->>shopId", "qa-%"));
+  const clientCalls = terminals.flatMap((t, i) => t.rpcBodies
+    .filter((b) => b.name === "complete_sale")
+    .map((b) => ({ terminal: `${t.kind}#${i}`, key: (b.body?.p_idempotency_key as string) ?? null, createdAt: (b.body?.p_created_at as string) ?? null })));
+  const ledger = saleLedgerViolations({ sales, keys: qaKeys, clientCalls });
+  violations.push(...ledger.violations);
+  notes.push(...ledger.notes);
 
   // 2. No duplicate payments (same PO + amount within 2 s) or movements
   //    (same reference + product + type).

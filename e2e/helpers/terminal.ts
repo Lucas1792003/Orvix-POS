@@ -69,6 +69,8 @@ export interface RequestLogEntry { url: string; method: string; at: number; stat
 
 export class Terminal {
   readonly requests: RequestLogEntry[] = [];
+  /** POST /rest/v1/rpc/<name> request bodies sent by the page (never written to disk). */
+  readonly rpcBodies: { name: string; at: number; body: Record<string, unknown> | null }[] = [];
   /** URLs of requests that tried to reach *.supabase.co (always aborted). */
   readonly hostedRequests: string[] = [];
   /** console.error / console.warn lines from the renderer (diagnostics). */
@@ -86,7 +88,17 @@ export class Terminal {
     readonly browser?: Browser,
     readonly userDataDir?: string,
   ) {
-    page.on("request", (r: Request) => this.requests.push({ url: r.url(), method: r.method(), at: Date.now() }));
+    page.on("request", (r: Request) => {
+      this.requests.push({ url: r.url(), method: r.method(), at: Date.now() });
+      // RPC bodies, in memory only (the consistency gate's terminal ledger:
+      // which operation was sent under which idempotency key).
+      const m = r.method() === "POST" ? /\/rest\/v1\/rpc\/([A-Za-z0-9_]+)/.exec(r.url()) : null;
+      if (m) {
+        let body: Record<string, unknown> | null = null;
+        try { body = r.postDataJSON() as Record<string, unknown> | null; } catch { body = null; }
+        this.rpcBodies.push({ name: m[1], at: Date.now(), body });
+      }
+    });
     page.on("websocket", (ws) => {
       if (!/realtime\/v1/.test(ws.url())) return;
       this.wsEvents.push(`${Date.now()} open`);

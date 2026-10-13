@@ -575,6 +575,97 @@ test("B11b Realtime gap reconciled on rejoin: stock changed while the socket was
     `B's realtime socket cut (${refused} reconnect attempt(s) refused); service-role UPDATE ${q0}->${q0 + 7} during the cut showed "${duringCut}" on B (DB ${q0 + 7}); badge "${badgeState}" shown; socket released -> postgres_changes re-confirmed after ${readyMs} ms; the card reached "${q0 + 7} in stock" ${catchUpMs} ms later from the rejoin refresh (${refreshes} inventory read(s)) with no reload and no further event; badge cleared; service-role revert to ${q0} arrived live; DB ${q0}`);
 });
 
+test("B13 server outage for minutes while TWO tills keep selling (online, API refused) -> restored -> every queued sale exactly once, stock consistent", async () => {
+  // Emergency recovery runbook drill (private ops notes,
+  // §3): the API origin refuses every connection on both tills (as when the
+  // host / gateway is down but the shop's internet is up: navigator.onLine
+  // stays true, so the tills keep trying and back off), for OUTAGE_MS. Each
+  // till rings up sales throughout, including the same basket twice in a
+  // row. Then the API comes back and nothing else is done: the tills must
+  // drain on their own, each operation must land exactly once (its own
+  // idempotency key -> exactly one sale), and stock = before - sold.
+  test.setTimeout(15 * 60_000);
+  const OUTAGE_MS = 4 * 60_000;
+  await A.page.keyboard.press("Escape").catch(() => undefined);
+  if (!B) {
+    B = await Terminal.launchBrowser();
+    await B.login(emails.cashB, pw);
+    await B.waitForRoute("/app/pos");
+    await B.waitForApp();
+  }
+  const Bt = B;
+  for (const [t, cashier] of [[A, ids.cashA], [Bt, ids.cashB]] as const) {
+    if (!(await row("shifts", { cashier_id: cashier, ended_at: null }))) await t.openShift(0);
+    await t.gotoPos();
+    await t.posClearCart().catch(() => undefined);
+  }
+  const q1 = await inv(ids.shop, ids.prod1);
+  const q2 = await inv(ids.shop, ids.prod2);
+  const salesBefore = await count("sales", { shop_id: ids.shop });
+  const glob = `${liveCfg().url}/**`;
+  const refused = { A: 0, B: 0 };
+  const cut = async (t: Terminal, k: "A" | "B") => t.page.route(glob, (route) => { refused[k]++; void route.abort("connectionrefused"); });
+  const tCut = Date.now();
+  await cut(A, "A");
+  await cut(Bt, "B");
+  // what each till sells during the outage: [terminal, kind]; "p1" = 1x prod1 by barcode (1000), "p2" = 1x prod2 by card (2000)
+  const plan: [Terminal, "A" | "B", "p1" | "p2"][] = [
+    [A, "A", "p1"], [A, "A", "p1"], [Bt, "B", "p1"], [Bt, "B", "p2"],
+    [A, "A", "p2"], [Bt, "B", "p1"],
+  ];
+  const slots = plan.map((_, i) => tCut + 5_000 + Math.round((i * (OUTAGE_MS - 60_000)) / (plan.length - 1)));
+  const receipts: string[] = [];
+  for (let i = 0; i < plan.length; i++) {
+    const [t, , kind] = plan[i];
+    // the two A "p1" sales are rung up back to back (same basket, seconds apart)
+    if (i !== 1) await sleep(Math.max(0, slots[i] - Date.now()));
+    if (kind === "p1") await t.posScan(st.barcodeValue);
+    else await t.posAddByCard("QA Product Two");
+    const r = await t.posCheckout(kind === "p1" ? 1000 : 2000);
+    receipts.push(r.receiptNo);
+  }
+  expect(receipts).toEqual(plan.map(() => "PENDING"));
+  await sleep(Math.max(0, tCut + OUTAGE_MS - Date.now()));
+  const queuedA = await A.outbox();
+  const queuedB = await Bt.outbox();
+  expect(queuedA.map((e) => e.name)).toEqual(["complete_sale", "complete_sale", "complete_sale"]);
+  expect(queuedB.map((e) => e.name)).toEqual(["complete_sale", "complete_sale", "complete_sale"]);
+  const attempts = [...queuedA, ...queuedB].map((e) => e.attempts);
+  expect(Math.max(...attempts)).toBeGreaterThanOrEqual(2); // the tills kept retrying (and backing off) during the outage
+  expect([...queuedA, ...queuedB].every((e) => e.status === "pending")).toBe(true);
+  expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore); // nothing landed while the API was down
+  const keys = [...queuedA, ...queuedB].map((e) => e.idempotencyKey!);
+  expect(new Set(keys).size).toBe(6);
+  const outageS = Math.round((Date.now() - tCut) / 1000);
+
+  // restore: the API answers again; no operator action on the tills
+  const tRestore = Date.now();
+  await A.page.unroute(glob);
+  await Bt.page.unroute(glob);
+  await expect.poll(async () => (await A.outbox()).length + (await Bt.outbox()).length, { timeout: 8 * 60_000, intervals: [2_000] }).toBe(0);
+  const recoveryS = Math.round((Date.now() - tRestore) / 1000);
+  // each operation exactly once: its key committed and owning exactly one sale
+  const krows = await rows("idempotency_keys", {}, (q) => q.in("key", keys));
+  expect(krows).toHaveLength(6);
+  const saleIds = krows.map((k: any) => k.response?.sale?.id);
+  expect(new Set(saleIds).size).toBe(6);
+  const landed = await rows("sales", {}, (q) => q.in("id", saleIds));
+  expect(landed).toHaveLength(6);
+  expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore + 6);
+  expect(landed.filter((s: any) => s.cashier_id === ids.cashA)).toHaveLength(3);
+  expect(landed.filter((s: any) => s.cashier_id === ids.cashB)).toHaveLength(3);
+  expect(await inv(ids.shop, ids.prod1)).toBe(q1 - 4);
+  expect(await inv(ids.shop, ids.prod2)).toBe(q2 - 2);
+  // the sales carry the time they were rung up, not the time they synced
+  const lag = landed.map((s: any) => Math.round((tRestore - Date.parse(s.created_at)) / 1000));
+  expect(Math.min(...lag)).toBeGreaterThan(0);
+  expect((await A.localSales()).some((s: any) => s.receiptNo === "PENDING")).toBe(false);
+  expect((await Bt.localSales()).some((s: any) => s.receiptNo === "PENDING")).toBe(false);
+  await assertConsistency("B13 long outage, two tills", [A, Bt]);
+  record("B", "server outage for minutes, two tills selling -> restored", "PASS",
+    `API refused for ${outageS} s on both tills (navigator online; ${refused.A}+${refused.B} refused requests); A queued 3 (incl. the same basket twice in a row), B queued 3; max attempts during outage ${Math.max(...attempts)} (backoff), 0 sales landed; restored -> both drained on their own in ${recoveryS} s: 6 keys -> 6 distinct sales (A 3, B 3), sales ${salesBefore}->${salesBefore + 6}, prod1 ${q1}->${q1 - 4}, prod2 ${q2}->${q2 - 2}; sales keep their ring-up time (synced ${Math.min(...lag)}-${Math.max(...lag)} s later); consistency gate PASS`);
+});
+
 test("B12 no request ever left for the hosted project", async () => {
   expect(A.hostedRequests).toEqual([]);
   expect(B?.hostedRequests ?? []).toEqual([]);
