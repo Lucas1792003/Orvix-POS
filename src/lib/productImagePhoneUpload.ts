@@ -1,7 +1,13 @@
 import { MAX_PRODUCT_IMAGE_BYTES } from "./compressProductImage";
 import { PRODUCT_IMAGE_BUCKET } from "./productImageStorage";
+import {
+  buildPhoneUploadQrUrl,
+  PRODUCT_IMAGE_PHONE_UPLOAD_ROUTE,
+  resolvePhoneUploadPage,
+  type PhoneUploadPage,
+} from "./phoneUploadOrigin";
 
-export const PRODUCT_IMAGE_PHONE_UPLOAD_ROUTE = "/phone-upload/product-image";
+export { PRODUCT_IMAGE_PHONE_UPLOAD_ROUTE };
 
 export type ProductImageUploadSessionStatus = "PENDING" | "COMPLETED" | "EXPIRED" | "CANCELED";
 
@@ -101,14 +107,44 @@ export async function createProductImageUploadSession(input: {
 export async function createPhoneProductImageUploadSession(input: {
   productId: string;
   shopId?: string | null;
+  /** Web origin override (tests): same rules as window.location.origin on the web build. */
   origin?: string;
 }): Promise<ProductImageUploadQrSession> {
+  // Resolve the phone page FIRST: a build without a secure phone origin
+  // (e.g. an http backend in a packaged app) shows a clear error instead of
+  // a QR, and no upload session is created for nothing.
+  const page =
+    input.origin === undefined
+      ? currentPhoneUploadPage()
+      : resolvePhoneUploadPage({
+          supabaseUrl: null,
+          locationOrigin: input.origin,
+          isElectron: false,
+          allowLocalHttp: allowLocalHttp(),
+        });
   const session = await createProductImageUploadSession(input);
-  const origin = input.origin ?? window.location.origin;
   return {
     ...session,
-    qrUrl: buildProductImagePhoneUploadQrUrl(origin, session.token),
+    qrUrl: buildPhoneUploadQrUrl(page, session.token),
   };
+}
+
+const allowLocalHttp = (): boolean => import.meta.env.DEV === true || import.meta.env.MODE === "test";
+
+/**
+ * The phone page for THIS renderer (docs/selfhost-migration/phase-f/phone-qr-origin.md):
+ * Electron / file:// / app:// -> the backend's phone-upload-page function on
+ * the VITE_SUPABASE_URL origin (https only, token in the #fragment); the web
+ * build on https -> its own SPA route. Throws PhoneUploadOriginError otherwise.
+ */
+export function currentPhoneUploadPage(): PhoneUploadPage {
+  const w = typeof window === "undefined" ? undefined : window;
+  return resolvePhoneUploadPage({
+    supabaseUrl: import.meta.env.VITE_SUPABASE_URL,
+    locationOrigin: w?.location?.origin ?? null,
+    isElectron: Boolean(w?.electronAPI?.isElectron),
+    allowLocalHttp: allowLocalHttp(),
+  });
 }
 
 export const PHONE_UPLOAD_TOKEN_FUNCTION = "phone-upload-token";

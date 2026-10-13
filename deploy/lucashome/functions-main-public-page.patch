@@ -1,0 +1,32 @@
+--- a/main/index.ts
++++ b/main/index.ts
+@@ -7,6 +7,20 @@
+ const LOCAL_JWKS = SUPABASE_JWKS ? jose.createLocalJWKSet(SUPABASE_JWKS) : null
+ const VERIFY_JWT = Deno.env.get('VERIFY_JWT') === 'true'
+ 
++// ShwePhaLa (deploy/lucashome/functions-main-public-page.patch): functions
++// that serve a PUBLIC page to a browser navigation, which cannot carry an
++// Authorization header. Only GET/HEAD to exactly these names skip the JWT
++// gate; every other function and method keeps it. The anon key the gate
++// would check is public anyway (it ships in every app build).
++// docs/selfhost-migration/phase-f/phone-qr-origin.md
++const PUBLIC_PAGE_FUNCTIONS = new Set(['phone-upload-page'])
++
++function isPublicPageRequest(req: Request): boolean {
++  if (req.method !== 'GET' && req.method !== 'HEAD') return false
++  const path = new URL(req.url).pathname.replace(/\/$/, '')
++  return /^\/[^/]+$/.test(path) && PUBLIC_PAGE_FUNCTIONS.has(path.slice(1))
++}
++
+ type AuthFailure = {
+   code: RequestErrors
+   message?: string
+@@ -165,7 +179,7 @@
+ }
+ 
+ Deno.serve(async (req: Request) => {
+-  if (req.method !== 'OPTIONS' && VERIFY_JWT) {
++  if (req.method !== 'OPTIONS' && VERIFY_JWT && !isPublicPageRequest(req)) {
+     try {
+       const token = getAuthToken(req)
+       if (typeof token !== 'string') {

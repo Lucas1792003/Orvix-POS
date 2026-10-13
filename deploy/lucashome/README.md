@@ -39,6 +39,14 @@ with:
 rsync -a --delete --exclude .DS_Store supabase/functions/<name>/ lucashome:/srv/supabase/stack/volumes/functions/<name>/
 ```
 
+**Prepared, not deployed (2026-10-13):** `phone-upload-page` (the phone
+page for the packaged app's QR) plus `functions-main-public-page.patch`. The
+patch is a small allow-list in the upstream `main/index.ts`, because a
+browser navigation cannot pass the global `VERIFY_JWT` gate. Steps, smoke
+checks and rollback are in
+`docs/selfhost-migration/phase-f/phone-qr-origin.md` §6. Re-apply the patch
+after any upstream upgrade that replaces `main/index.ts`.
+
 ## Rebuild from scratch (Phase A, no containers started)
 
 ```

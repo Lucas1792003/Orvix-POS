@@ -18,6 +18,7 @@ npm run e2e                         # all specs, in order: a-workflows, b-failur
 npx playwright test e2e/f-queue-export.e2e.ts  # only the queue export + recovery replay spec (docs/selfhost-migration/phase-f/queue-export.md)
 npx playwright test e2e/d-phone-upload.e2e.ts   # only the phone-upload spec (docs/selfhost-migration/phase-g/phone-upload-jit.md)
 E2E_PHONE_FN=local npx playwright test e2e/d-phone-upload.e2e.ts   # same, function from this repo in a local container (needs Docker)
+E2E_PHONE_PAGE=deployed npx playwright test e2e/d-phone-upload.e2e.ts   # phone page served by the stack (after phone-qr-origin.md §6)
 npm run e2e:cleanup                 # cleanup.sql -> audit_purge.sql -> verify_clean.sql (+ storage file count)
 ```
 
@@ -29,6 +30,7 @@ npm run e2e:cleanup                 # cleanup.sql -> audit_purge.sql -> verify_c
 | `E2E_QA_PASSWORD` | password for the QA accounts (random per run when unset; required with `E2E_QA_TS`) |
 | `E2E_DEV_PORT` | dev-server port (default 5179) |
 | `E2E_PHONE_FN` | spec D only: `deployed` (default) = the phone page calls the stack's own `/functions/v1/phone-upload-token` (no container, no request routing; the answers are only observed); `local` = run `supabase/functions/phone-upload-token` from this repo in a disposable local edge-runtime container and route the phone's function request to it (for testing an undeployed change) |
+| `E2E_PHONE_PAGE` | spec D only: where the phone page (`phone-upload-page`, docs/selfhost-migration/phase-f/phone-qr-origin.md) comes from. The phone always opens the URL the desktop QR encodes, `<E2E_SUPABASE_URL>/functions/v1/phone-upload-page#<token>`; the spec asserts that the QR encodes exactly that (the configured https origin, not the dev server). `local` (**default until the function and the router patch are deployed**) = the phone's navigation to that URL is answered by `supabase/functions/phone-upload-page` from this repo in the local edge-runtime container (the page stays on the stack origin, so its API calls go to the real stack; needs Docker); `deployed` = no routing, served by the stack. Switch the default in the spec after deployment |
 
 `global-setup` creates the QA tenant (Phase D `seed.sql` + `supabase/tests/phase-e/live/seed_extra.sql`)
 and enrols a TOTP factor for the QA admin through the auth API. The tenant is
@@ -51,7 +53,7 @@ on purpose: both would write the anon key / QA bearer tokens to disk
 | `seed/cleanup.ts` | the cleanup step |
 | `a-workflows.e2e.ts`, `b-failures.e2e.ts`, `c-offline-auth.e2e.ts` | the specs (`*.e2e.ts` so vitest ignores them) |
 | `d-phone-upload.e2e.ts` | phone QR upload with the just-in-time token (`phone-upload-token`), Electron desktop + iPhone-profile Chromium phone, real timing (30/65/120/300 s, stale token, double tap, race, lost response, expired, cancelled; plus `D-ratelimit-wait` / `D-ratelimit-used-up`, which run only when the stack schema is >= 081, docs/selfhost-migration/phase-f/rate-limiting.md); each success also saves the product and checks `products.image_url` = the server-derived URL (080: `public.app_config` origin + `/storage/v1/object/public/product-images/<session path>`); ~14 min |
-| `helpers/edgeRuntime.ts` | `E2E_PHONE_FN=local` only: runs `supabase/functions/phone-upload-token` in a disposable local `supabase/edge-runtime:v1.76.2` container (127.0.0.1 only, keys passed as env names only) and the phone's function request is routed to it |
+| `helpers/edgeRuntime.ts` | `E2E_PHONE_FN=local` / `E2E_PHONE_PAGE=local`: runs `supabase/functions/phone-upload-token` and/or `phone-upload-page` in one disposable local `supabase/edge-runtime:v1.76.2` container (127.0.0.1 only, keys passed as env names only); the phone's function request / page navigation is routed to it |
 | `helpers/saleLedger.ts` (+ `.test.ts`) | duplicate/lost-sale detection used by the consistency gate: sale ↔ committed `complete_sale` idempotency key (exactly one each way), one client operation (cashier + shift + client event time) → one sale, receipt numbers unique per shop, and the terminals' own request ledger (one operation → one key) |
 | `f-queue-export.e2e.ts` | Phase F: offline queue (shift opened offline + 3 sales) survives an offline restart, is exported through the UI (save dialog stubbed in the main process) and checked (encrypted, every entry, no secrets, queue byte-identical); the real recovery CLI replays it into the QA org (target rules, dry run, replay x3 → no duplicates) while the till drains the same keys after a B13-style outage; consistency gate. `E2E_QX_PASSPHRASE` fixes the export passphrase (else random) |
 | `e-consistency-gate.e2e.ts` | proves the gate: two distinct identical-basket queued sales PASS; a forged second sale row and one UI operation re-sent under a new key FAIL; both forgeries reverted |
