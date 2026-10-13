@@ -21,7 +21,7 @@ Last verified **2026-10-13 ~02:00 UTC** unless stated otherwise.
 | Origin of data | restored from the hosted export of 2026-10-11 23:47 UTC (manifest 148/149 equal, 574/574 objects SHA-256 verified) | `../selfhost-migration/evidence/G4/2026-10-12-restoration.md` |
 | Security shape | org isolation enforced (RLS + RPC guards + storage); anon may execute only `app_setup_needed`, `get_product_image_upload_session_by_token`, `complete_product_image_upload_session`; 30 mutating RPCs require an idempotency key, replays bound to the caller's org (074); first-time setup only via `bootstrap_first_admin()` under an install-wide lock (076); new orgs auto-seeded with Retail/Wholesale/Special (077); storage authorized by org path, legacy objects by path→product/session→org (078); uploads on `org/<org>/temp/<session>`, completion URL must end with the session path (079) | live two-org suite 12/12, 2026-10-12 |
 | Realtime | publication `supabase_realtime` = `public.inventory` | `pg_publication_tables` |
-| Cron / email | **none** — no cron jobs, no Resend key, SMTP password empty | `cron.job` = 0; `.env` key presence check |
+| Cron / email | **none** — no cron jobs, no Resend key, SMTP password empty. `rotate-audit-log` and `weekly-sales-report` **removed** from `volumes/functions/` 2026-10-13 ~11:40 UTC (moved to `~/removed-edge-functions-20261013/` with SHA256SUMS; routes now fail to boot; no DB/cron/trigger/client dependency; 0 invocations in the prior 72 h); remaining functions: admin-2fa, email-sales-report, phone-upload-token, platform-console | `cron.job` = 0; `.env` key presence check |
 
 ## Backups
 
