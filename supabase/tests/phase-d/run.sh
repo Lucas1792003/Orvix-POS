@@ -233,6 +233,60 @@ if [ "$((10#$MAX_MIG))" -ge 80 ]; then
 else
   log "skipping t16_completion_url (migrations capped at $MAX_MIG < 080)"
 fi
+# 081: phone-upload rate limits. Part 1 (sequential semantics + grants), then
+# three races fired as parallel psql sessions (each call writes its answer to
+# test.t17_conc), then part 2 checks the races and the per-user limit.
+if [ "$((10#$MAX_MIG))" -ge 81 ]; then
+  run_sql_test "$SQL/t17_rate_limits.sql"
+  log "test t17 concurrency (parallel psql sessions: burst race behind a held row lock, org race, per-user create race)"
+  BTOK="$(su_psql -Atc "select test.var('t17_burst_tok')")"
+  BSID="$(su_psql -Atc "select test.var('t17_burst_sid')")"
+  # holder: locks the session row for 2 s; the 40 claimers queue behind it
+  su_psql -At -c "BEGIN; SELECT 1 FROM product_image_upload_sessions WHERE id = '$BSID' FOR UPDATE; SELECT pg_sleep(2); COMMIT;" > "$WORK/t17h.out" 2>&1 &
+  HPID=$!
+  sleep 0.5
+  T0=$(date +%s)
+  CPIDS=""
+  for i in $(seq 1 40); do
+    su_psql -At -c "SET ROLE service_role; INSERT INTO test.t17_conc (k, result) SELECT 'burst', test.t17_claim('$BTOK');" > "$WORK/t17b_$i.out" 2>&1 &
+    CPIDS="$CPIDS $!"
+  done
+  for p in $CPIDS; do wait "$p" || fail "t17 burst claimer"; done
+  T1=$(date +%s)
+  wait $HPID || fail "t17 lock holder"
+  echo "burst race: 40 claimers, wall $((T1 - T0)) s"
+  # fresh org window for the org race (the burst race used 5 of org-test's 60)
+  su_psql -Atc "DELETE FROM phone_upload_org_rate WHERE org_id = 'org-test'" >/dev/null || fail "t17 org window reset"
+  # org race: 14 fresh sessions x 5 parallel claims = 70 against the org window of 60
+  CPIDS=""
+  for i in $(seq 1 14); do
+    OTOK="$(su_psql -Atc "select test.var('t17_org_tok_$i')")"
+    for j in 1 2 3 4 5; do
+      su_psql -At -c "SET ROLE service_role; INSERT INTO test.t17_conc (k, result) SELECT 'org', test.t17_claim('$OTOK');" > "$WORK/t17o_${i}_$j.out" 2>&1 &
+      CPIDS="$CPIDS $!"
+    done
+  done
+  for p in $CPIDS; do wait "$p" || fail "t17 org claimer"; done
+  echo "org race: 70 claimers done"
+  # per-user create race: bring u-admin-x (org-two ADMIN) to 118 sessions in the hour, then 6 parallel creates
+  su_psql -At -c "INSERT INTO product_image_upload_sessions (id, token_hash, created_by, shop_id, storage_path, expires_at)
+    SELECT 'pimg-t17fill' || g, md5('t17fill' || g || clock_timestamp()), 'u-admin-x', 'shop-x', 'org/org-two/temp/pimg-t17fill' || g, now() + interval '10 minutes'
+      FROM generate_series(1, 118 - (SELECT count(*) FROM product_image_upload_sessions WHERE created_by = 'u-admin-x' AND created_at > now() - interval '1 hour')) g;" > "$WORK/t17fill.out" 2>&1 || { cat "$WORK/t17fill.out"; fail "t17 fill"; }
+  CPIDS=""
+  for i in $(seq 1 6); do
+    su_psql -At -c "SELECT test.login('a0000000-0000-4000-8000-000000000011'); SET ROLE authenticated; INSERT INTO test.t17_conc (k, result) SELECT 'create', to_jsonb(test.t17_try_create('shop-x'));" > "$WORK/t17c_$i.out" 2>&1 &
+    CPIDS="$CPIDS $!"
+  done
+  for p in $CPIDS; do wait "$p" || fail "t17 create racer"; done
+  echo "create race: 6 racers done"
+  if su_psql -At -v bsecs="$((T1 - T0))" < "$SQL/t17_rate_limits_b.sql" > "$WORK/t17b.log" 2>&1; then
+    grep -E '^(PASS|FAIL)' "$WORK/t17b.log"
+  else
+    cat "$WORK/t17b.log"; fail "t17 part 2"
+  fi
+else
+  log "skipping t17_rate_limits (migrations capped at $MAX_MIG < 081)"
+fi
 # Concurrent first-time setup (076). MUST RUN LAST: t12_bootstrap_prep
 # empties public.users (TRUNCATE ... CASCADE) to recreate a fresh install in
 # this throwaway database. Two sessions call bootstrap_first_admin(); A holds

@@ -33,6 +33,14 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 // (it would carry the INTERNAL storage host on lucashome), never a key.
 // Refusals are generic: 404 invalid link, 410 inactive (+ the session status
 // the phone is already allowed to read through _by_token), 403 refused.
+//
+// Rate limits (migration 081, docs/selfhost-migration/phase-f/rate-limiting.md):
+// before storage is touched, the issue is claimed atomically in the database
+// through claim_phone_upload_token_issue (service_role only; per-session
+// lifetime cap + burst window, per-organization window). A refusal is
+// 429 { error, code: "rate_limited", retry_after_seconds } + Retry-After.
+// FAIL CLOSED: if the limiter cannot be asked (RPC missing, DB error,
+// unexpected answer), no token is issued (503).
 
 const BUCKET = "product-images";
 const MIN_TOKEN_LENGTH = 32; // same floor as the _by_token / complete RPCs
@@ -42,12 +50,13 @@ const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Expose-Headers": "Retry-After",
 };
 
-const jsonResponse = (body: Record<string, unknown>, status = 200) =>
+const jsonResponse = (body: Record<string, unknown>, status = 200, extraHeaders: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json", "Cache-Control": "no-store" },
+    headers: { ...corsHeaders, "Content-Type": "application/json", "Cache-Control": "no-store", ...extraHeaders },
   });
 
 const invalidLink = () => jsonResponse({ error: "Invalid upload link.", code: "invalid" }, 404);
@@ -61,6 +70,14 @@ const inactive = (status: string) =>
     },
     410,
   );
+const rateLimited = (retryAfterSeconds: number) => {
+  const seconds = Math.min(3600, Math.max(1, Math.ceil(retryAfterSeconds)));
+  return jsonResponse(
+    { error: "Too many upload attempts. Please wait a moment and try again.", code: "rate_limited", retry_after_seconds: seconds },
+    429,
+    { "Retry-After": String(seconds) },
+  );
+};
 const unavailable = () => jsonResponse({ error: "Phone upload is temporarily unavailable. Try again.", code: "unavailable" }, 503);
 
 /** Same digest as product_image_upload_token_hash() (migration 019). */
@@ -176,6 +193,26 @@ Deno.serve(async (request) => {
       return unavailable();
     }
     if (!owned || owned.org_id !== orgId) return refused();
+  }
+
+  // ---- rate limit: claim this issue atomically in the database (081) ----
+  // Fail closed: any failure to get a clear "allowed" means no token.
+  const { data: claim, error: claimError } = await supabase.rpc("claim_phone_upload_token_issue", { p_token: token });
+  if (claimError) {
+    console.error("[phone-upload-token] rate-limit claim failed", claimError.code ?? "", claimError.message);
+    return unavailable();
+  }
+  const c = (claim ?? {}) as { allowed?: unknown; reason?: unknown; status?: unknown; scope?: unknown; retry_after_seconds?: unknown };
+  if (c.allowed !== true) {
+    if (c.reason === "rate_limited" && typeof c.retry_after_seconds === "number" && Number.isFinite(c.retry_after_seconds)) {
+      console.log("[phone-upload-token] rate limited", String(c.scope ?? ""), c.retry_after_seconds);
+      return rateLimited(c.retry_after_seconds);
+    }
+    if (c.reason === "inactive" && typeof c.status === "string") return inactive(c.status);
+    if (c.reason === "invalid") return invalidLink();
+    if (c.reason === "refused") return refused();
+    console.error("[phone-upload-token] unexpected rate-limit answer");
+    return unavailable();
   }
 
   const storageHeaders = { apikey: serviceRoleKey, Authorization: `Bearer ${serviceRoleKey}` };

@@ -32,7 +32,10 @@ SELECT test.check('authenticated can execute every public function except comple
                THEN ARRAY['app_storage_object_org'] ELSE '{}'::text[] END
        -- 080: URL helper reading service_role-only configuration
        || CASE WHEN to_regprocedure('public.app_upload_session_public_url(text)') IS NOT NULL
-               THEN ARRAY['app_upload_session_public_url'] ELSE '{}'::text[] END) x),
+               THEN ARRAY['app_upload_session_public_url'] ELSE '{}'::text[] END
+       -- 081: phone-upload token limiter (the Edge Function, service_role only)
+       || CASE WHEN to_regprocedure('public.claim_phone_upload_token_issue(text)') IS NOT NULL
+               THEN ARRAY['claim_phone_upload_token_issue'] ELSE '{}'::text[] END) x),
   (SELECT string_agg(p.proname, ',') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public' AND NOT has_function_privilege('authenticated', p.oid, 'EXECUTE')));
 
@@ -52,7 +55,9 @@ SELECT test.check('public function count = 58 + 3 idem helpers (+1 after 067, +9
        -- 078: app_storage_object_org / _object_in_my_org / _can_write_path
        + CASE WHEN to_regprocedure('public.app_storage_object_org(text)') IS NOT NULL THEN 3 ELSE 0 END
        -- 080: app_upload_session_public_url
-       + CASE WHEN to_regprocedure('public.app_upload_session_public_url(text)') IS NOT NULL THEN 1 ELSE 0 END,
+       + CASE WHEN to_regprocedure('public.app_upload_session_public_url(text)') IS NOT NULL THEN 1 ELSE 0 END
+       -- 081: claim_phone_upload_token_issue
+       + CASE WHEN to_regprocedure('public.claim_phone_upload_token_issue(text)') IS NOT NULL THEN 1 ELSE 0 END,
   (SELECT count(*)::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'));
 
 SELECT test.check('no overloaded public functions after 063 (old signatures dropped)',

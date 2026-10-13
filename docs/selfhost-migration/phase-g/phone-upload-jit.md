@@ -122,6 +122,14 @@ nor read. A refresh is just another call.
 
 ### Rate limiting (measured live 2026-10-13; not implemented)
 
+> **Update 2026-10-13:** R1, R3 and R4 are implemented and tested locally but
+> **not deployed**: migration `081_phone_upload_rate_limits.sql` (DB-backed,
+> atomic limiter + per-user session limit), the rate-limited function, the
+> phone page's 429 handling and an optional Envoy snippet. Design, numbers,
+> evidence and the deploy procedure (owner approval needed):
+> [`../phase-f/rate-limiting.md`](../phase-f/rate-limiting.md). The measurements
+> below are the pre-081 baseline.
+
 Measured against the deployed function on lucashome
 (`src/live/phase-g4.live.test.ts` test 8, one live QA session, from the Mac
 over the tailnet):

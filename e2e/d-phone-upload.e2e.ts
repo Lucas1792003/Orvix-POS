@@ -16,7 +16,8 @@
 //             and the phone's request for the function is routed to it (the
 //             pre-deployment mode; needs Docker).
 // Everything else (session RPCs, storage upload, completion, the desktop's
-// status poll) is the real stack. Real timing. Since 080 every successful
+// status poll) is the real stack. The D-ratelimit-* cases (migration 081)
+// run only when the stack's schema is >= 081 and are skipped otherwise. Real timing. Since 080 every successful
 // case also saves the product and checks that products.image_url is the
 // SERVER-DERIVED URL (public.app_config origin + /storage/v1/object/public/
 // product-images/<session path>). QA data only; every QA storage object is
@@ -56,6 +57,8 @@ let A: Terminal;
 let fn: LocalFunction | undefined;
 /** public.app_config.supabase_public_url (080): the only origin a stored image URL may carry. */
 let trustedBase = "";
+/** max(supabase_migrations.schema_migrations.version); the 081 rate-limit cases need >= "081". */
+let schemaVersion = "";
 let photo: Buffer;
 let storageBefore = "";
 let orphansBefore = "";
@@ -235,6 +238,8 @@ test.beforeAll(async () => {
   expect(orphansBefore.startsWith("17 orphans")).toBe(true);
   record("phone-upload", "storage baseline", "INFO", `${storageBefore}; ${orphansBefore}`);
 
+  schemaVersion = sql1(`SELECT max(version) FROM supabase_migrations.schema_migrations;`);
+  record("phone-upload", "schema", "INFO", `schema ${schemaVersion}; 081 rate-limit cases ${schemaVersion >= "081" ? "RUN" : "SKIPPED (not deployed)"}`);
   trustedBase = sql1(`SELECT value FROM public.app_config WHERE key = 'supabase_public_url';`);
   expect(trustedBase, "080 app_config.supabase_public_url must be set").toMatch(/^https:\/\/[a-z0-9.-]+(:\d+)?$/);
   expect(trustedBase, "the stack's trusted origin is the origin the apps are built for").toBe(cfg.url);
@@ -497,6 +502,80 @@ test("D-cancelled: desktop closes the QR (cancel) -> phone refused with a clear 
     expect(objectsUnder(s)).toBe(0);
     expect(productImageUrl()).toBe(imageBefore);
     record("phone-upload", "D-cancelled session refused", "PASS", `[fn ${FN_MODE}] products.image_url unchanged; desktop Close -> cancel RPC, modal gone; phone: "${PHONE_CANCELLED}"; function 410 inactive/CANCELED, no token; PUTs=0, completes=0; row CANCELED; objects=0`);
+  } finally {
+    await P.close();
+  }
+});
+
+// --------------------------------------------------------------------------
+// 081 rate limits (docs/selfhost-migration/phase-f/rate-limiting.md). These
+// run ONLY when the stack's schema is >= 081, i.e. after the owner approved
+// and applied 081 and deployed the rate-limited function; on an 080 stack
+// they are skipped. Limits: 5 tokens per session per 10 s, 20 per session.
+const PHONE_WAITING = /Too many attempts right now\. Trying again automatically in \d+ s\.\.\./;
+const PHONE_LINK_USED_UP = "This upload link has been used too many times. Create a new QR code on the computer.";
+
+/** Ask the function for tokens directly (the anon key only), as a second phone would. */
+async function burnTokens(s: Sess, n: number): Promise<number[]> {
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const r = await fetch(`${cfg.url}${FN_PATH}`, { method: "POST", headers: { Authorization: `Bearer ${cfg.anonKey}`, apikey: cfg.anonKey, "content-type": "application/json" }, body: JSON.stringify({ token: s.token }) });
+    await r.text();
+    out.push(r.status);
+  }
+  return out;
+}
+
+test("D-ratelimit-wait [081]: the phone hits the session burst limit (429) -> shows the wait message, retries by itself after Retry-After, completes once", async () => {
+  test.skip(schemaVersion < "081", `schema ${schemaVersion} < 081: rate limits not deployed`);
+  test.setTimeout(180_000);
+  const s = await openQr();
+  const { P, fnCalls, puts, completes } = await launchPhone();
+  try {
+    await phoneOpens(P, s);
+    // 5 tokens taken right before the pick: the phone's own request is the 6th in the 10 s window
+    expect(await burnTokens(s, 5)).toEqual([200, 200, 200, 200, 200]);
+    await phonePicks(P);
+    await expect(P.page.getByText(PHONE_WAITING)).toBeVisible({ timeout: 20_000 });
+    await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 60_000 });
+    await desktopShowsImage(s);
+    const db = await assertCompletedOnce(s);
+    const img = await saveProductAndCheckImageUrl(s);
+    expect(fnCalls.map((c) => `${c.status}:${c.kind}:${c.code ?? ""}`)).toEqual(["429:refused:rate_limited", "200:token:"]);
+    const wait = JSON.parse(fnCalls[0].text).retry_after_seconds as number;
+    expect(wait).toBeGreaterThanOrEqual(1);
+    expect(wait).toBeLessThanOrEqual(10);
+    expect(fnCalls[1].at - fnCalls[0].at).toBeGreaterThanOrEqual(wait * 1000 - 500);
+    expect(puts.map((p) => p.status)).toEqual([200]);
+    expect(completes.map((c) => c.status)).toEqual([200]);
+    record("phone-upload", "D-ratelimit-wait [081]", "PASS", `[fn ${FN_MODE}] 5 tokens taken directly, phone's request -> 429 retry_after=${wait} s, page showed the wait message and retried after ${secs(fnCalls[1].at - fnCalls[0].at)} s -> token -> PUT 200 -> complete 200; ${db}; ${img}`);
+  } finally {
+    await P.close();
+  }
+});
+
+test("D-ratelimit-used-up [081]: the session reached its lifetime cap -> 429 until expiry; phone says to create a new QR, no PUT, no completion", async () => {
+  test.skip(schemaVersion < "081", `schema ${schemaVersion} < 081: rate limits not deployed`);
+  test.setTimeout(120_000);
+  const s = await openQr();
+  const { P, fnCalls, puts, completes } = await launchPhone();
+  const imageBefore = productImageUrl();
+  try {
+    await phoneOpens(P, s);
+    // QA session only: its 20 tokens are used up
+    sql1(`UPDATE product_image_upload_sessions SET token_issue_count = 20 WHERE id = '${s.sessionId}' AND storage_path LIKE 'org/${ids.org}/temp/%';`);
+    await phonePicks(P);
+    await expect(P.page.getByText(PHONE_LINK_USED_UP)).toBeVisible({ timeout: 30_000 });
+    await sleep(2_000);
+    expect(fnCalls.map((c) => `${c.status}:${c.code}`)).toEqual(["429:rate_limited"]);
+    expect(JSON.parse(fnCalls[0].text).retry_after_seconds).toBeGreaterThan(400);
+    expect(puts).toHaveLength(0);
+    expect(completes).toHaveLength(0);
+    expect(objectsUnder(s)).toBe(0);
+    expect(sessionRow(s.sessionId).split("|")[0]).toBe("PENDING");
+    await A.page.getByRole("button", { name: "Close", exact: true }).click();
+    expect(productImageUrl()).toBe(imageBefore);
+    record("phone-upload", "D-ratelimit-used-up [081]", "PASS", `[fn ${FN_MODE}] counter at 20 -> function 429 retry_after=${JSON.parse(fnCalls[0].text).retry_after_seconds} s (until expiry), no automatic retry; phone: "${PHONE_LINK_USED_UP}"; PUTs=0, completes=0, objects=0; desktop closed (cancelled)`);
   } finally {
     await P.close();
   }

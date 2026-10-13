@@ -1,0 +1,84 @@
+# OPTIONAL global layer for /functions/v1/phone-upload-token (R4 in
+# docs/selfhost-migration/phase-g/phone-upload-jit.md). PREPARED, NOT APPLIED.
+# Design, numbers and the apply/rollback procedure:
+#   docs/selfhost-migration/phase-f/rate-limiting.md §7
+#
+# What it does: one Envoy local token bucket (20 requests burst, refilled at
+# 10 per second) for the phone-upload-token route only, shared by every
+# caller. Beyond it Envoy answers 429 itself (body "local_rate_limited",
+# Retry-After: 1) before the request reaches the functions container, so the
+# tills' PostgREST/auth/storage traffic keeps its capacity. It is NOT a
+# per-client limit: Envoy sees every request from tailscale serve's loopback
+# connection, and the Tailscale identity header is not used as a key (doc §5).
+# The real per-session / per-org limits are in the database (migration 081).
+#
+# Two edits to volumes/api/envoy/lds.template.yaml (upstream self-hosted
+# Envoy config, listener "supabase"):
+#
+# --- EDIT 1: in http_filters, add this entry immediately BEFORE
+#     "- name: envoy.filters.http.router" (no token_bucket here, so the filter
+#     does nothing on routes without the per-route config below):
+- name: envoy.filters.http.local_ratelimit
+  typed_config:
+    '@type': type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+    stat_prefix: http_local_rate_limiter
+
+# --- EDIT 2: in the route list, add this route immediately BEFORE the
+#     existing "- name: functions-v1-all" route (first match wins). It is the
+#     same route (cluster, rewrite, timeout, header, basic_auth disabled,
+#     RBAC allow-all) restricted to the one function, plus the token bucket.
+- name: functions-v1-phone-upload-token
+  match:
+    path: /functions/v1/phone-upload-token
+  route:
+    cluster: functions
+    prefix_rewrite: /phone-upload-token
+    timeout: 150s
+  request_headers_to_add:
+    - header:
+        key: X-Forwarded-Prefix
+        value: /functions/v1/
+      append_action: ADD_IF_ABSENT
+  typed_per_filter_config:
+    envoy.filters.http.basic_auth:
+      '@type': >-
+        type.googleapis.com/envoy.config.route.v3.FilterConfig
+      disabled: true
+    envoy.filters.http.rbac:
+      '@type': >-
+        type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+      rbac:
+        rules:
+          action: ALLOW
+          policies:
+            allow_all:
+              permissions:
+                - any: true
+              principals:
+                - any: true
+    envoy.filters.http.local_ratelimit:
+      '@type': type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+      stat_prefix: phone_upload_token_rl
+      token_bucket:
+        max_tokens: 20
+        tokens_per_fill: 10
+        fill_interval: 1s
+      filter_enabled:
+        runtime_key: phone_upload_token_rl_enabled
+        default_value:
+          numerator: 100
+          denominator: HUNDRED
+      filter_enforced:
+        runtime_key: phone_upload_token_rl_enforced
+        default_value:
+          numerator: 100
+          denominator: HUNDRED
+      response_headers_to_add:
+        - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+          header:
+            key: Retry-After
+            value: "1"
+        - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+          header:
+            key: Cache-Control
+            value: no-store
