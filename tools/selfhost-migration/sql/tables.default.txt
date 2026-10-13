@@ -1,0 +1,46 @@
+# Default table list for gen_manifest.py (schema.table per line, '#' comments).
+# Optional flags after the name, whitespace separated:
+#   id            -> add md5(string_agg(id::text ...)) content checksum
+#   id=<expr>     -> same, using <expr> instead of the id column (composite keys)
+#   created_at    -> add max(created_at)
+# public (31 tables, docs/02 §0 + audit)
+public.product_unit_prices            id created_at
+public.product_units                  id created_at
+public.product_image_upload_sessions  id created_at
+public.products                       id created_at
+public.brands                         id created_at
+public.audit_logs                     id created_at
+public.categories                     id created_at
+public.inventory                      id=product_id||':'||shop_id
+public.admin_login_codes              id created_at
+public.inventory_movements            id created_at
+public.suppliers                      id created_at
+public.users                          id created_at
+public.price_levels                   id created_at
+public.business_profile               id
+public.organizations                  id created_at
+public.shops                          id created_at
+public.platform_admins                id created_at
+public.price_tiers                    id created_at
+public.product_barcodes               id
+public.purchase_order_items           id
+public.purchase_orders                id created_at
+public.refund_void_requests           id created_at
+public.reprint_logs                   id
+public.sale_items                     id
+public.sales                          id created_at
+public.shifts                         id
+public.stock_transfer_items           id
+public.stock_transfers                id created_at
+public.supplier_payments              id created_at
+public.supplier_products              id=supplier_id||':'||product_id created_at
+public.unit_types                     id created_at
+# auth
+auth.users                            id created_at
+auth.identities                       id created_at
+auth.mfa_factors                      id created_at
+auth.sessions                         id created_at
+auth.refresh_tokens                   id created_at
+# storage
+storage.buckets                       id created_at
+storage.objects                       id created_at
