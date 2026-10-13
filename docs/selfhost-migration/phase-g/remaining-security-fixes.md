@@ -102,6 +102,7 @@ completing an expired session raises `Upload link has expired`, and the row
 **Residual risk.**
 - `attach_product_image_upload_session_token` has the same UPDATE-then-RAISE pattern, so its EXPIRED stamp is also lost. It is behaviourally safe because it still raises, but it is out of scope and left unchanged.
 - A storage signed-upload token can outlive the 10-minute session. Completion is refused, but the file can still land in `temp/` as an orphan.
+- Follow-up (prepared, not applied): both points are addressed in `upload-security-and-077.md`. 079 removes the dead UPDATE in `attach_…`. 078 gates token issuing by a live session, and §2c documents the residual for tokens that were already issued.
 
 ## 3. Concurrent first-time setup (076)
 

@@ -6,13 +6,16 @@ critical operational writes go through `SECURITY DEFINER` RPCs;
 business data lives in Supabase, not localStorage. Admin sign-in adds a
 second factor (authenticator app or emailed code), the UI is fully
 English/Myanmar, the business brand (name + logo) is admin-editable, and
-the complete app supports System / Light / Dark themes. The current desktop
-release is **v1.0.11**; it carries v1.0.10's fix for the real root cause of
-the recurring Windows updater "cannot be closed" failure (v1.0.7/v1.0.9
-targeted the wrong NSIS check — see document 10 for the full diagnosis),
-plus a corrected side-by-side sidebar footer layout. See document 10 for
-the direct Windows download, stuck-installer recovery steps, and remaining
-real-hardware verification item.
+the complete app supports System / Light / Dark themes. The latest published
+desktop release is **v1.0.15** (2026-08-26, points at hosted Supabase); the
+backend is being moved to a self-hosted Supabase stack on `lucashome` — see
+[Environments](#environments-ops-record) below and
+[`selfhost-migration/`](./selfhost-migration/MIGRATION-PLAN.md). Document 10
+covers the Windows updater history and stuck-installer recovery.
+
+This folder holds two kinds of docs: **engineering reference** (the numbered
+guides, `archive/`, `selfhost-migration/`) and the **ops record** (one folder
+per environment, structured like `~/Projects/work/docs`).
 
 ## Quick Start
 
@@ -45,6 +48,41 @@ Full setup, env, Supabase, and deployment notes:
 | 08 | [Testing & QA](./08-testing-qa.md) | Verifying a change end-to-end before shipping. |
 | 09 | [Roadmap & TODO](./09-roadmap-todo.md) | Picking up open work; tracking what's still outstanding. |
 | 10 | [Offline-First & Desktop — Known Issues & TODO](./10-offline-desktop-known-issues.md) | Touching the sync outbox, local cache, or the Electron wrapper; before trusting offline mode in production. |
+
+| — | [Self-host migration](./selfhost-migration/MIGRATION-PLAN.md) | The hosted → `lucashome` migration: audit, risk register, runbook, gates, per-phase evidence. |
+
+## Environments (ops record)
+
+What is live where, how to reach it, what broke, what is open. Each folder has `README.md`, `status.md`, `access.md` (where applicable), `incidents.md`, `risks.md`, `roadmap.md`.
+
+| Folder | Environment | Start with |
+|---|---|---|
+| [`lucashome-selfhost/`](lucashome-selfhost/) | Self-hosted Supabase on the home server `lucashome` (`https://lucashome.tail8a86e4.ts.net`, tailnet only). Target backend; schema 073 since 2026-10-12 | [`status.md`](lucashome-selfhost/status.md) |
+| [`hosted-supabase/`](hosted-supabase/) | Hosted Supabase project `shwephala` (Free plan, Singapore). Original backend; frozen read-only fallback | [`status.md`](hosted-supabase/status.md) |
+| [`desktop-app/`](desktop-app/) | The Electron POS app: builds, releases, which backend each build talks to, tills | [`status.md`](desktop-app/status.md) |
+| [`runbooks/`](runbooks/) | Reusable procedures (apply migrations, tests, QA cleanup, backups) — pointers to the scripts | [`runbooks/README.md`](runbooks/README.md) |
+
+| File | Purpose |
+|---|---|
+| `status.md` | What is actually live right now, verified against the machine, not assumed |
+| `access.md` | Hosts, accounts, URLs, where each secret lives. **Never a secret value** — names and locations only |
+| `incidents.md` | What broke (or nearly broke), root cause, fix, lesson. Newest at the top |
+| `risks.md` | Open exposure, known gaps, decisions waiting on the owner |
+| `roadmap.md` | Planned and in-flight work, as checkboxes |
+
+Note: these folders are committed with the repo (merged from a local-only `ops-docs/` on 2026-10-12). They contain host names, a tailnet IP and secret *locations*, never secret values; keep it that way.
+
+## How to update the docs (the rule)
+
+Same two-step routing as `~/Projects/work/docs`.
+
+**Step 1 — folder by where the change actually happened:** the stack on `lucashome` → `lucashome-selfhost/`; the hosted project → `hosted-supabase/`; the app as shipped, a build, a release, a till → `desktop-app/`; a repeated procedure → `runbooks/`; how the code/schema works (reference that ships with the code) → the numbered guides or `selfhost-migration/`. Where it was **found** decides, not where it will be fixed; a change spanning two environments is written **once**, with a one-line pointer in the other.
+
+**Step 2 — file by kind of change:** now live/applied/deployed → `status.md` (dated, with how verified); broke and fixed, or a near-miss → `incidents.md`; new exposure or decision waiting on the owner → `risks.md` (resolved = prefix `RESOLVED <date>`, keep it); planned/started/finished/dropped → `roadmap.md` (tick with date and evidence); host/account/URL/key location → `access.md` (never a value); repeated multi-step procedure → `runbooks/<name>.md` + a row in `runbooks/README.md`.
+
+**Writing rules:** date every entry (`YYYY-MM-DD`, UTC) and name the commit/migration/version; record how a claim was checked; supersede rather than overwrite; one file per fact (pointers elsewhere); relative links with real paths; no secrets anywhere — keys live in `/srv/supabase/stack/.env` on `lucashome`, the macOS keychain, or the owner's password manager.
+
+**Standing rules for this project (owner decisions):** every change on `lucashome`, every migration, every push/PR, every release and any action against hosted needs explicit owner approval; never push to `main` directly (feature branch + PR via `Lucas1792003`); no Claude co-author lines; hosted stays unchanged as fallback; production cron jobs and email stay disabled and `rotate-audit-log` is not re-enabled (2026-10-12).
 
 ## Code Layout (one-screen orientation)
 
