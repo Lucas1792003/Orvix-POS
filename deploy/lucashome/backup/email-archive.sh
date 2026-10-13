@@ -28,10 +28,15 @@ set -euo pipefail
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--dry-run] [--force] [--build-only] [--week YYYY-Www] [--no-prune] [--help]
+Usage: $(basename "$0") [--dry-run] [--force] [--build-only] [--no-send] [--output-dir DIR] [--week YYYY-Www] [--no-prune] [--help]
   --dry-run      check configuration and list what would be archived; build and send nothing
   --force        build and send a NEW archive even if this week's was already sent (id gets a -r<ts> suffix)
   --build-only   build + encrypt + split, do not send (state stays "built"; a later run sends it)
+  --no-send      drills/tests: build + encrypt + split exactly as a real run, but NEVER send anything
+                 (no archive mail, no failure alert), not gated by EMAIL_ENABLED, recorded as job
+                 "email-archive-nosend" so the real job's status is untouched. Implies --build-only.
+  --output-dir D with --no-send: write the encrypted build (and the 0700 plaintext staging) under D
+                 instead of ARCHIVE_DIR / ARCHIVE_TMP_DIR
   --week W       archive id week label (default: current ISO week, UTC)
   --no-prune     keep more than $KEEP_EMAIL_ARCHIVE local encrypted builds
   --selftest     end-to-end check with SYNTHETIC content only (random bytes + a note; no database, no
@@ -41,13 +46,15 @@ Transport: $MAIL_TRANSPORT  to: ${ARCHIVE_MAIL_TO:-<unset>}  parts: ${ARCHIVE_PA
 EOF
 }
 
-FORCE=0; BUILD_ONLY=0; PRUNE=1; WEEK=""; SELFTEST=0
+FORCE=0; BUILD_ONLY=0; PRUNE=1; WEEK=""; SELFTEST=0; NO_SEND=0; OUTPUT_DIR=""
 while (( $# )); do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
     --selftest) SELFTEST=1 ;;
     --force) FORCE=1 ;;
     --build-only) BUILD_ONLY=1 ;;
+    --no-send) NO_SEND=1; BUILD_ONLY=1 ;;
+    --output-dir) OUTPUT_DIR="${2:-}"; shift ;;
     --week) WEEK="$2"; shift ;;
     --no-prune) PRUNE=0 ;;
     -h|--help) usage; exit 0 ;;
@@ -56,10 +63,24 @@ while (( $# )); do
   shift
 done
 
+if [[ -n "$OUTPUT_DIR" ]]; then
+  (( NO_SEND )) || die "--output-dir is only allowed together with --no-send"
+  [[ "$OUTPUT_DIR" == /* ]] || die "--output-dir must be an absolute path"
+  ARCHIVE_DIR="$OUTPUT_DIR"; ARCHIVE_TMP_DIR="$OUTPUT_DIR/.tmp"
+fi
+(( NO_SEND && SELFTEST )) && die "--no-send and --selftest are mutually exclusive"
 # shellcheck disable=SC2034  # read by backup-lib.sh (log prefix, lock + log file names)
 JOB_NAME=email-archive
+# shellcheck disable=SC2034
+(( NO_SEND )) && JOB_NAME=email-archive-nosend
 init_logging
-if (( ! DRY_RUN )); then email_gate; fi
+if (( NO_SEND )); then
+  # shellcheck disable=SC2034  # read by email_enabled() in email-lib.sh
+  EMAIL_ENABLED=false   # makes mail_alert inert; nothing below may send
+  log "--no-send: build + encrypt + split only; no mail of any kind is sent"
+elif (( ! DRY_RUN )); then
+  email_gate
+fi
 acquire_lock
 
 START=$SECONDS
@@ -68,6 +89,7 @@ START=$SECONDS
 [[ "$ARCHIVE_LABEL" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || die "ARCHIVE_LABEL must be 1-32 of [A-Za-z0-9_-]"
 ID="$ARCHIVE_LABEL-$WEEK"
 STATUS_JOB=email-archive
+(( NO_SEND )) && STATUS_JOB=email-archive-nosend
 if (( SELFTEST )); then ID="$ARCHIVE_LABEL-selftest-$WEEK-r$(ts_now)"; STATUS_JOB=email-selftest
 elif (( FORCE )); then ID="$ID-r$(ts_now)"; fi
 BUILD="$ARCHIVE_DIR/$ID"
@@ -280,9 +302,10 @@ fi
 NPARTS="$(jq -r .part_count "$BUILD/index.json")"
 TOTAL_BYTES="$(jq -r .total_bytes "$BUILD/index.json")"
 if (( BUILD_ONLY )); then
-  log "--build-only: $ID built ($NPARTS part(s)), not sent"
-  status_update "$STATUS_JOB" "$(jq -nc --arg t "$(utc_now)" --arg id "$ID" --argjson n "$NPARTS" \
-    '{last_run:$t,last_result:"built",message:"built, not sent (--build-only)",last_archive_id:$id,parts:$n}')"
+  log "--build-only: $ID built ($NPARTS part(s)) in $BUILD, not sent"
+  status_update "$STATUS_JOB" "$(jq -nc --arg t "$(utc_now)" --arg id "$ID" --argjson n "$NPARTS" --arg dir "$BUILD" \
+    --argjson dur "$(( SECONDS - START ))" \
+    '{last_run:$t,last_result:"built",message:"built, not sent (--build-only/--no-send)",last_archive_id:$id,parts:$n,build_dir:$dir,duration_s:$dur}')"
   trap - EXIT; exit 0
 fi
 

@@ -21,6 +21,7 @@ and [MAC-TIER.md](./MAC-TIER.md).
 | weekly restore drill | `restore-test.sh` | `30 3 * * 0` | restores the newest dump set and the newest base backup into throwaway containers and compares counts with those recorded at backup time | `status.json` + log |
 | failure detection | `backup-status.sh` | `*/30 * * * *` | one-screen summary; exit 1 when stale/failed/low disk/leftovers; optional healthchecks ping | `logs/backup-status.log` |
 | retention | `backup-prune.sh` | called by the jobs | keeps hourly 48 / daily 14 / weekly 8 / base 14 and prunes the WAL archive below the oldest retained base (see "Retention math"); deletes only under `backups/dump/*/`, `backups/base/` and the archive dir | — |
+| full DR drill | `dr-drill.sh run` (+ `dr-drill-fingerprint.sql`, `dr-drill-consistency.sql`) | by hand, from a scratch dir `~/phf-drill` (not deployed to `bin/`) | read-only on live: builds the weekly email archive from live data with a throwaway gpg key (`email-archive.sh --no-send`), reassembles/tamper-tests/decrypts it, restores it into a disposable compose project `phf-drill` (db, rest, auth, storage, functions, gateway on 127.0.0.1:18000, fresh throwaway secrets), compares every public table + auth/storage/migrations with live, verifies objects and functions, then PITR from base + WAL to targets around real events; `dr-drill.sh cleanup` removes everything. Evidence `docs/selfhost-migration/evidence/G6/2026-10-13-dr-drill.md` | `~/phf-drill/results/` (counts, md5s, timings) until cleanup |
 | PITR drill | `pitr-test.sh` | by hand (touches the live db) | creates `public.pitr_marker`, inserts rows around a target time T1, forces a WAL switch, restores the newest base + archive to T1 in a throwaway, proves only pre-T1 rows exist, drops the table | `status.json` job `pitr-test` + log |
 | WAL archiving | Postgres itself | continuous, `archive_timeout=300` | `archive_command` gzips every completed segment into `stack/volumes/db/wal_archive/` (bind mount) | `wal_archive/<segment>.gz` |
 | offsite sync (**disabled**) | `offsite-sync.sh wal\|dump\|base\|storage\|bundle\|check\|all` | lines prepared in `crontab.lucario`, commented out: wal `*/15`, dump `20 *`, base `45 2`, storage `0 */6`, bundle `50 2`, check `30 4` | rclone sync/copy to the crypt remote `offsite:` with `--backup-dir .versions/<tier>/<date>` on base/storage/bundle, `rclone cryptcheck` after each tier, healthchecks `offsite` pings; `check` also prunes `.versions/` (30 d) and records the remote size | `offsite.json` + `logs/offsite-<tier>.log` |
@@ -188,6 +189,23 @@ script does by hand: `docker run --rm -d --name sb-restore-test-manual --network
 Always remove the container and the temp dir afterwards; `backup-status.sh`
 flags leftovers.
 
+### D. Full DR drill (disposable, read-only on live)
+
+```
+mac$ ssh lucashome 'mkdir -m 0700 -p ~/phf-drill/bin ~/phf-drill/input' </dev/null
+mac$ scp deploy/lucashome/backup/{dr-drill.sh,dr-drill-*.sql,backup-lib.sh,email-lib.sh,email-archive.sh,email-mime.py,email-unpack.py} \
+         tools/selfhost-migration/{verify_objects.py,_common.py} lucashome:phf-drill/bin/
+mac$ scp <export>/storage-manifest.sha256 lucashome:phf-drill/input/          # hashes only
+ls$  ~/phf-drill/bin/dr-drill.sh run            # ~70 s today; needs >= 3.5 GB available, port 18000 free
+ls$  cut -f1,2,4,5 ~/phf-drill/results/results.tsv; cat ~/phf-drill/results/timings.tsv
+ls$  ~/phf-drill/bin/dr-drill.sh cleanup        # removes containers, networks, volumes and ~/phf-drill
+```
+
+Configuration is by environment (`DRILL_PORT`, `DRILL_MEM_*`, `IMG_*`, `PITR_EVENTS_SQL`,
+`PITR_PROBE_SQL`, `PITR_EXPECT`; see the script header). The PITR defaults target the three
+transactions of the 080 rollout; once the base backup before 080 is pruned (14 days), point
+`PITR_EVENTS_SQL`/`PITR_EXPECT` at newer real events.
+
 ## Retention math
 
 - Base backups: `KEEP_BASE=14` daily → the oldest retained base is 13–14 days old.
@@ -297,8 +315,9 @@ only gains the line `email tier: disabled`.
 | `email-report.sh` (+ `.sql`, `.py`) | daily per-organization business report (read-only SQL) with a backup-health block | 01:00 UTC (+03:00 retry) |
 | `email-status.sh` | email-tier health for `backup-status.sh` | embedded |
 | `email-unpack.py` | owner side: reassemble + verify the parts from `.eml`/mbox | — |
+| `email-archive.sh --no-send [--output-dir DIR]` | drills/tests: build + encrypt + split exactly like a real run, never send or alert, not gated by `EMAIL_ENABLED`, status job `email-archive-nosend` | by hand (`dr-drill.sh`) |
 
-Tests: `tests/email/run.sh` (Docker, synthetic data only; 194 checks).
+Tests: `tests/email/run.sh` (Docker, synthetic data only; 210 checks, incl. T15 `--no-send`).
 
 ## Known limitations / open items
 

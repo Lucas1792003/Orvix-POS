@@ -25,6 +25,7 @@ Decision-ready proposals for the open items below (written 2026-10-13, nothing e
 - [ ] Owner TOTP login test.
 - [ ] Push branch, open PR (via `Lucas1792003`).
 - [ ] ~~Phase F: enable offsite backups to R2 + Mac pull tier~~ — superseded 2026-10-13: owner chose **email**. Email tier (weekly encrypted archive, secrets file, daily report) built + tested on synthetic data (194/0), **not deployed**: owner checklist in [`email-backup-design.md` §10](../selfhost-migration/phase-f/email-backup-design.md); restore runbook [`restore-from-email.md`](../selfhost-migration/phase-f/restore-from-email.md); audit [`email-audit.md`](../selfhost-migration/phase-f/email-audit.md).
+- [x] **2026-10-13** Full DR drill in a disposable environment (G6): email archive path from live data (throwaway key, no mail), restore into a fresh stack, PITR around the 080 rollout; 123/0; live unchanged. `email-archive.sh --no-send` added (tests 210/0). Evidence [`G6/2026-10-13-dr-drill.md`](../selfhost-migration/evidence/G6/2026-10-13-dr-drill.md).
 - [ ] Maintenance window: reboot (pending kernel), G3 persistence test, restart `tailscaled` to clear stale 443 listener.
 - [ ] Host hardening: firewall, sshd keys-only/tailnet bind, Tailscale ACLs (tills → 443 only, Studio admin-only), second tailnet admin.
 - [ ] Tailscale on shop tills + real-device latency tests (G10).

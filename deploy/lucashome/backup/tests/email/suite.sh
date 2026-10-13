@@ -541,6 +541,36 @@ python3 -I "$T/test_email_report.py" "$BIN/email-report.py" >"$W/unit.log" 2>&1;
 tail -3 "$W/unit.log"
 check "renderer unit tests ($(grep -c ' ... ok' "$W/unit.log") ok)" test "$rc" -eq 0
 
+# ============================================================ T15 --no-send =======
+section "T15 --no-send / --output-dir: build for a drill, never send"
+MP_BEFORE="$(mp_total)"; ARCH_BEFORE="$(jq -c '.jobs["email-archive"]' "$STATUS")"
+NS="$W/nosend"; NWK=2026-W25; NID="pos-$NWK"
+EMAIL_ENABLED=false run_job email-archive.sh --no-send --output-dir "$NS" --week "$NWK"; rc=$?
+[[ $rc -eq 0 ]] || tail -10 "$W/last.log"
+check "--no-send builds while EMAIL_ENABLED=false (not gated)" test "$rc" -eq 0 -a -f "$NS/$NID/index.json"
+check "--no-send: encrypted parts are in --output-dir" test "$(jq -r .part_count "$NS/$NID/index.json" 2>/dev/null || echo 0)" -ge 3
+check "--no-send: nothing in the regular ARCHIVE_DIR for that id" test ! -e "$BK/email-archive/$NID"
+check "--no-send: no plaintext staging left in --output-dir" test -z "$(find "$NS/.tmp" -mindepth 1 2>/dev/null)"
+check "--no-send: no mail sent" test "$(mp_total)" -eq "$MP_BEFORE"
+check "--no-send: recorded as job email-archive-nosend (built)" test "$(st '.jobs["email-archive-nosend"].last_result')" == built
+check "--no-send: real email-archive status untouched" test "$(jq -c '.jobs["email-archive"]' "$STATUS")" == "$ARCH_BEFORE"
+# stage the files under the names the mails carry them (parts + <id>.index.json), as a drill does
+mkdir -p "$W/ns-mail"; cp "$NS/$NID/$NID".tar.gpg.[0-9][0-9][0-9] "$W/ns-mail/" 2>/dev/null; cp "$NS/$NID/index.json" "$W/ns-mail/$NID.index.json" 2>/dev/null
+python3 -I "$BIN/email-unpack.py" --out "$W/ns-out" "$W/ns-mail" >/dev/null 2>&1; check "--no-send build unpacks + verifies" test "$?" -eq 0
+gpg --batch --output "$W/ns-out/x.tar" --decrypt "$W/ns-out/$NID.tar.gpg" 2>/dev/null; check "--no-send build decrypts (owner key)" test "$?" -eq 0
+check "--no-send payload holds the database dump" bash -c "tar -tf $W/ns-out/x.tar | grep -q 'db/postgres.dump'"
+EMAIL_ENABLED=true run_job email-archive.sh --no-send --output-dir "$NS" --week 2026-W24; rc=$?
+check "--no-send with EMAIL_ENABLED=true still sends nothing" test "$rc" -eq 0 -a "$(mp_total)" -eq "$MP_BEFORE"
+EMAIL_ENABLED=true ARCHIVE_GPG_FPR="$FPR_OTHER" run_job email-archive.sh --no-send --output-dir "$NS" --week 2026-W23; rc=$?
+check "--no-send failure (key pin mismatch): exit != 0" test "$rc" -ne 0
+check "--no-send failure: no alert mail" test "$(mp_total)" -eq "$MP_BEFORE"
+check "--no-send failure: recorded on email-archive-nosend only" bash -c "test \"\$(jq -r '.jobs[\"email-archive-nosend\"].last_result' $STATUS)\" = fail && test '$(jq -c '.jobs["email-archive"]' "$STATUS")' = \"\$(jq -c '.jobs[\"email-archive\"]' $STATUS)\""
+run_job email-archive.sh --output-dir "$NS" --week 2026-W29; rc=$?
+check "--output-dir without --no-send is refused" test "$rc" -ne 0 -a ! -e "$NS/pos-2026-W29" -a ! -e "$BK/email-archive/pos-2026-W29"
+run_job email-archive.sh --no-send --output-dir relative/dir --week 2026-W29; rc=$?
+check "--output-dir must be absolute" test "$rc" -ne 0
+rm -rf "$NS" "$W/ns-out" "$W/ns-mail"
+
 # ------------------------------------------------------------------ teardown ----
 kill "$FR" 2>/dev/null
 docker rm -f phf-mail-db phf-mail-smtp phf-mail-restore >/dev/null 2>&1
