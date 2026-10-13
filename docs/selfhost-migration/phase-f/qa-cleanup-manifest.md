@@ -136,3 +136,9 @@ The §4 script was run twice inside a throwaway container restored from base bac
 | run 2 | refused: `movements: expected 2, got 0` → transaction aborted, nothing changed | | | | | |
 
 Throwaway container and directory removed (0 left).
+
+## 7. EXECUTED 2026-10-13 18:47 UTC (owner approval: "Approve QA cleanup of the exact 2 Testing stock adjustments, 15 expired two-factor challenges and 21 expired unreferenced upload sessions…")
+- Pre: logical + base `20261013T184632Z` (pg_verifybackup), LSN `2/26000058` recorded as `pre-qa-cleanup`; WAL failed=0; pre-state equal to §1–§3 (5 / 15 / 578).
+- Ran the §4 file unchanged (sha256 `2f72524a…`, same bytes as the §6 dry run) as `postgres`, `ON_ERROR_STOP=1`: `BEGIN` → `DO` (all three guards matched: 2 / 15 / 21) → `3|0|557` → `COMMIT`.
+- Verification: the 45-item fingerprint differs **only** in `inventory_movements` (5→3), `admin_login_codes` (15→0), `product_image_upload_sessions` (578→557). Unchanged: audit_logs 81 (same md5), products 539, auth.users 10, users 3, storage.objects 574 (same md5), 17 orphans (same md5), schema 081. "Testing" movements left: 0. Kept session (object at its path) present. `verify_objects` 574/574 by SHA-256.
+- Post: base backup verified and LSN recorded as `post-qa-cleanup` in `migration-checkpoints.txt`.
