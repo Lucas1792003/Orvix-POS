@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import { resolveBackendConfig } from './src/lib/backendConfig'
+import { assertElectronPhoneUploadOrigin } from './src/lib/phoneUploadOrigin'
 
 // https://vite.dev/config/
 export default defineConfig(({ mode, command }) => {
@@ -18,6 +19,18 @@ export default defineConfig(({ mode, command }) => {
       resolveBackendConfig(env)
     } catch (err) {
       throw new Error(`[${command}] ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  // Electron build: the packaged app runs from file://, so the phone-upload
+  // QR points at the backend-served phone page (phone-upload-page function)
+  // on the VITE_SUPABASE_URL origin. Refuse to build a till whose phone
+  // origin is missing, not https, or loopback (a phone could not open it).
+  // docs/selfhost-migration/phase-f/phone-qr-origin.md
+  if (process.env.ELECTRON_BUILD === 'true') {
+    try {
+      assertElectronPhoneUploadOrigin(env)
+    } catch (err) {
+      throw new Error(`[${command}] Electron build: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 

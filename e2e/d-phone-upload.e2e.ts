@@ -4,7 +4,23 @@
 //
 //   desktop = the real Electron app (terminal A, QA ADMIN, TOTP) on the
 //             product edit page -> "Use phone camera" -> QR modal;
-//   phone   = a Chromium page with an iPhone 13 profile that opens the QR URL.
+//   phone   = a Chromium page with an iPhone 13 profile that opens the QR URL
+//             exactly as the packaged app produces it:
+//             <E2E_SUPABASE_URL>/functions/v1/phone-upload-page#<token>
+//             (docs/selfhost-migration/phase-f/phone-qr-origin.md). The spec
+//             checks that the QR on the desktop encodes exactly that URL -
+//             the configured https API origin, never the dev server.
+//
+// Where the phone page (phone-upload-page Edge Function) comes from
+// (E2E_PHONE_PAGE):
+//   local (default UNTIL the function + router patch are deployed) - the
+//             phone's navigation to <stack>/functions/v1/phone-upload-page
+//             is answered by a disposable local edge-runtime container
+//             (helpers/edgeRuntime.ts) running this repo's copy. The page
+//             still lives on the stack's origin for the browser, so all its
+//             API calls go to the real stack.
+//   deployed - no routing: the page is served by lucashome. Switch the
+//             default to "deployed" once phone-qr-origin.md §6 is done.
 //
 // Where the phone-upload-token Edge Function runs (E2E_PHONE_FN):
 //   deployed (default) - the function deployed on the stack. No container is
@@ -26,8 +42,11 @@
 import { expect, test, type Route } from "@playwright/test";
 import { rmSync } from "node:fs";
 import path from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { QRCodeSVG } from "qrcode.react";
 import { runSql, sleep, svc } from "./helpers/db";
-import { startLocalPhoneUploadFunction, type LocalFunction } from "./helpers/edgeRuntime";
+import { startLocalFunctions, type LocalFunctionName, type LocalFunctions } from "./helpers/edgeRuntime";
 import { DEV_SERVER_URL, liveCfg, qaPassword, qaState, qaTotpSecret, RESULTS_DIR } from "./helpers/env";
 import { record } from "./helpers/evidence";
 import { assertConsistency } from "./helpers/consistency";
@@ -44,6 +63,11 @@ const BUCKET = "product-images";
 const FN_PATH = "/functions/v1/phone-upload-token";
 const FN_MODE = (process.env.E2E_PHONE_FN ?? "deployed").trim();
 if (FN_MODE !== "deployed" && FN_MODE !== "local") throw new Error(`E2E_PHONE_FN must be "deployed" or "local", got "${FN_MODE}"`);
+const PAGE_PATH = "/functions/v1/phone-upload-page";
+// Default "local" until phone-upload-page + the router patch are deployed (phone-qr-origin.md §6), then "deployed".
+const PAGE_MODE = (process.env.E2E_PHONE_PAGE ?? "local").trim();
+if (PAGE_MODE !== "deployed" && PAGE_MODE !== "local") throw new Error(`E2E_PHONE_PAGE must be "deployed" or "local", got "${PAGE_MODE}"`);
+const MODES = `fn ${FN_MODE}, page ${PAGE_MODE}`;
 const QA_OBJECT = new RegExp(`^org/${ids.org}/temp/pimg-[0-9a-f]+$`);
 // Tiny lossless WebP (34 bytes) for the programmatic race (same constant as phase-g3).
 const TINY_WEBP_B64 = "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
@@ -54,7 +78,7 @@ const PHONE_EXPIRED = "This upload link has expired. Create a new QR code on the
 const PHONE_CANCELLED = "This upload link was cancelled on the computer. Create a new QR code to upload.";
 
 let A: Terminal;
-let fn: LocalFunction | undefined;
+let local: LocalFunctions | undefined;
 /** public.app_config.supabase_public_url (080): the only origin a stored image URL may carry. */
 let trustedBase = "";
 /** max(supabase_migrations.schema_migrations.version); the 081 rate-limit cases need >= "081". */
@@ -100,7 +124,47 @@ async function openQr(): Promise<Sess> {
   // The desktop no longer signs or attaches anything: no storage sign request, no attach RPC.
   const signedByDesktop = A.requestsMatching(/\/storage\/v1\/object\/upload\/sign\/|attach_product_image_upload_session_token/, shownAt - 15_000);
   expect(signedByDesktop, "desktop must not sign/attach a token").toHaveLength(0);
-  return { sessionId: j.sessionId, token: j.token, storagePath: j.storagePath, qrUrl: `${DEV_SERVER_URL}/phone-upload/product-image/${encodeURIComponent(j.token)}`, shownAt };
+  const qrUrl = await assertQrEncodesPhonePage(j.token);
+  return { sessionId: j.sessionId, token: j.token, storagePath: j.storagePath, qrUrl, shownAt };
+}
+
+/** The URL the packaged app must put in the QR: the configured https API origin's phone page, token in the fragment. */
+const expectedQrUrl = (token: string) => `${cfg.url}${PAGE_PATH}#${encodeURIComponent(token)}`;
+
+/** `d` of every <path> of a QR rendered with the modal's own props (ProductImagePhoneUploadModal). */
+const qrPaths = (value: string): string[] =>
+  [...renderToStaticMarkup(createElement(QRCodeSVG, { value, size: 212, marginSize: 2, level: "Q", bgColor: "#ffffff", fgColor: "#0f172a", title: "Product image phone upload QR code" }))
+    .matchAll(/<path[^>]*\sd="([^"]+)"/g)].map((m) => m[1]);
+
+/**
+ * The QR shown on the desktop encodes EXACTLY expectedQrUrl(token): its
+ * modules are compared with a QR rendered for that URL (same library, same
+ * props). Also asserts the origin is the configured https stack origin, not
+ * the dev server the Electron renderer runs from in this suite, and that
+ * the renderer resolves the phone page the way a packaged (file://) app does.
+ */
+async function assertQrEncodesPhonePage(token: string): Promise<string> {
+  const url = expectedQrUrl(token);
+  const u = new URL(url);
+  expect(u.protocol).toBe("https:");
+  expect(u.origin).toBe(new URL(cfg.url).origin);
+  expect(u.origin).not.toBe(new URL(DEV_SERVER_URL).origin);
+  expect(u.pathname).toBe(PAGE_PATH);
+  expect(u.search).toBe("");
+  const shown = await A.page
+    .locator("svg", { has: A.page.locator("title", { hasText: "Product image phone upload QR code" }) })
+    .locator("path")
+    .evaluateAll((els) => els.map((e) => e.getAttribute("d") ?? ""));
+  expect(shown.length).toBeGreaterThan(0);
+  expect(shown, "the desktop QR encodes <stack>/functions/v1/phone-upload-page#<token>").toEqual(qrPaths(url));
+  expect(shown).not.toEqual(qrPaths(`${DEV_SERVER_URL}/phone-upload/product-image/${encodeURIComponent(token)}`));
+  // the renderer's own decision (Electron -> backend-served page), same code as the packaged app
+  const page = await A.page.evaluate(async (modulePath) => {
+    const m: any = await import(modulePath);
+    return m.currentPhoneUploadPage();
+  }, "/src/lib/productImagePhoneUpload.ts");
+  expect(page).toEqual({ kind: "functionPage", origin: new URL(cfg.url).origin, base: `${new URL(cfg.url).origin}${PAGE_PATH}` });
+  return url;
 }
 
 const fnCall = (status: number, text: string): FnCall => {
@@ -122,9 +186,20 @@ async function launchPhone(opts: { holdFirstPutMs?: number; dropFirstUploadRespo
   const completes: { at: number; status: number }[] = [];
   let dropped = false;
   let held = false;
+  if (PAGE_MODE === "local") {
+    // The phone navigates to <stack>/functions/v1/phone-upload-page#<token>;
+    // the browser never sends the fragment. The document is answered by the
+    // local container (this repo's function), so the page lives on the
+    // stack's origin and its API calls reach the real stack.
+    await P.context.route((u) => u.origin === new URL(cfg.url).origin && u.pathname === PAGE_PATH, async (route: Route) => {
+      expect(route.request().url(), "the token never reaches the server").not.toMatch(/#|token=/);
+      const r = await route.fetch({ url: local!.urlFor("phone-upload-page") });
+      await route.fulfill({ response: r });
+    });
+  }
   if (FN_MODE === "local") {
     await P.context.route(`${cfg.url}${FN_PATH}`, async (route: Route) => {
-      const r = await route.fetch({ url: fn!.url });
+      const r = await route.fetch({ url: local!.urlFor("phone-upload-token") });
       if (route.request().method() === "OPTIONS") return route.fulfill({ response: r });
       const text = await r.text();
       fnCalls.push(fnCall(r.status(), text));
@@ -163,7 +238,13 @@ async function launchPhone(opts: { holdFirstPutMs?: number; dropFirstUploadRespo
 }
 
 async function phoneOpens(P: Terminal, s: Sess): Promise<void> {
+  const doc = P.page.waitForResponse((r) => new URL(r.url()).pathname === PAGE_PATH && r.request().isNavigationRequest());
   await P.page.goto(s.qrUrl);
+  const res = await doc;
+  expect(res.status()).toBe(200);
+  expect(res.headers()["content-type"]).toBe("text/html; charset=utf-8");
+  expect(res.headers()["content-security-policy"]).toMatch(/default-src 'none'.*connect-src 'self'/);
+  expect(new URL(P.page.url()).origin, "the phone is on the configured https origin").toBe(new URL(cfg.url).origin);
   await expect(P.page.getByText(PHONE_READY)).toBeVisible();
 }
 
@@ -243,10 +324,25 @@ test.beforeAll(async () => {
   trustedBase = sql1(`SELECT value FROM public.app_config WHERE key = 'supabase_public_url';`);
   expect(trustedBase, "080 app_config.supabase_public_url must be set").toMatch(/^https:\/\/[a-z0-9.-]+(:\d+)?$/);
   expect(trustedBase, "the stack's trusted origin is the origin the apps are built for").toBe(cfg.url);
-  if (FN_MODE === "local") {
-    fn = await startLocalPhoneUploadFunction();
-    record("phone-upload", "local edge-runtime", "INFO", `container ${fn.container} (supabase/edge-runtime:v1.76.2) on ${fn.url.replace(/\/phone-upload-token$/, "")}, router = lucashome main/index.ts copy, VERIFY_JWT=false locally`);
-  } else {
+  const localNames: LocalFunctionName[] = [
+    ...(FN_MODE === "local" ? (["phone-upload-token"] as const) : []),
+    ...(PAGE_MODE === "local" ? (["phone-upload-page"] as const) : []),
+  ];
+  if (localNames.length) {
+    local = await startLocalFunctions(localNames);
+    record("phone-upload", "local edge-runtime", "INFO", `container ${local.container} (supabase/edge-runtime:v1.76.2) on ${local.base} serving ${localNames.join(", ")}, router = lucashome main/index.ts copy, VERIFY_JWT=false locally`);
+  }
+  if (PAGE_MODE === "deployed") {
+    // smoke: the deployed page answers a plain browser GET (no Authorization: needs the router patch)
+    const r = await fetch(`${cfg.url}${PAGE_PATH}`);
+    const html = await r.text();
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(r.headers.get("content-security-policy")).toMatch(/default-src 'none'/);
+    expect(html.includes(cfg.serviceKey)).toBe(false);
+    record("phone-upload", "deployed page", "INFO", `E2E_PHONE_PAGE=deployed: GET ${PAGE_PATH} without auth -> ${r.status} ${r.headers.get("content-type")}, CSP present, ${html.length} B, no service key`);
+  }
+  if (FN_MODE === "deployed") {
     // smoke: the deployed route answers the function's own generic 404 (no data written)
     const r = await fetch(`${cfg.url}${FN_PATH}`, { method: "POST", headers: { Authorization: `Bearer ${cfg.anonKey}`, apikey: cfg.anonKey, "content-type": "application/json" }, body: JSON.stringify({ token: "short" }) });
     const body = await r.json().catch(() => null);
@@ -294,7 +390,7 @@ test.afterAll(async () => {
   } finally {
     try { if (A) await assertConsistency("spec D", [A]); } finally {
       await A?.close();
-      fn?.stop();
+      local?.stop();
     }
   }
 });
@@ -322,7 +418,7 @@ for (const delayS of [30, 65, 120, 300]) {
       const tokenAgeAtPut = puts[0].at - fnCalls[0].at;
       const line = `| ${delayS} s | phone opened +${secs(openedAfter)} s | file picked +${secs(pickedAt - s.shownAt)} s | token issued +${secs(tokenAt)} s | PUT 200 +${secs(puts[0].at - s.shownAt)} s (token age ${tokenAgeAtPut} ms) | complete 200 | COMPLETED | desktop image ${size} |`;
       timings.push(line);
-      record("phone-upload", `D${delayS} upload at +${delayS} s`, "PASS", `[fn ${FN_MODE}] ${line} ${db}; ${img}; function answer keys {${fnCalls[0].keys}} path=session path, no ids`);
+      record("phone-upload", `D${delayS} upload at +${delayS} s`, "PASS", `[${MODES}] ${line} ${db}; ${img}; function answer keys {${fnCalls[0].keys}} path=session path, no ids`);
     } finally {
       await P.close();
     }
@@ -349,7 +445,7 @@ test("D-stale: a token used 66 s after issue is refused by storage; the phone tr
     expect(age).toBeGreaterThanOrEqual(65_000);
     const line = `| stale token | token #1 used ${secs(age)} s after issue -> PUT ${puts[0].status} ${puts[0].body.replace(/\s+/g, " ").slice(0, 90)} | token #2 +${secs(fnCalls[1].at - s.shownAt)} s -> PUT 200 | complete 200 | COMPLETED | desktop image ${size} |`;
     timings.push(line);
-    record("phone-upload", "D-stale token refused then refreshed", "PASS", `[fn ${FN_MODE}] ${line} ${db}; ${img}`);
+    record("phone-upload", "D-stale token refused then refreshed", "PASS", `[${MODES}] ${line} ${db}; ${img}`);
   } finally {
     await P.close();
   }
@@ -375,7 +471,7 @@ test("D-double-tap: two picks in a row -> one token, one PUT, one completion, on
     expect(fnCalls.map((c) => c.kind)).toEqual(["token"]);
     expect(puts.map((p) => p.status)).toEqual([200]);
     expect(completes.map((c) => c.status)).toEqual([200]);
-    record("phone-upload", "D-double-tap", "PASS", `[fn ${FN_MODE}] function calls=${fnCalls.length}, PUTs=${puts.map((p) => p.status).join(",")}, completes=${completes.map((c) => c.status).join(",")}; ${db}; ${img}`);
+    record("phone-upload", "D-double-tap", "PASS", `[${MODES}] function calls=${fnCalls.length}, PUTs=${puts.map((p) => p.status).join(",")}, completes=${completes.map((c) => c.status).join(",")}; ${db}; ${img}`);
   } finally {
     await P.close();
   }
@@ -387,14 +483,15 @@ test("D-race: two concurrent uploads of the same session (real client code) -> o
   const { P, fnCalls, puts, completes } = await launchPhone();
   try {
     await phoneOpens(P, s);
-    const results = await P.page.evaluate(async ([token, b64, modulePath]) => {
-      // the page's own module instance, served by the Vite dev server
-      const m: any = await import(modulePath);
+    const results = await P.page.evaluate(async (b64) => {
+      // the phone page's own upload code (phone-upload-page client.js), with
+      // the token it read from its own #fragment
+      const page = (window as any).shwePhaLaPhoneUpload;
       const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
       const image = { blob: new Blob([bytes], { type: "image/webp" }), bytes: bytes.length, mimeType: "image/webp" };
-      const rs = await Promise.allSettled([m.uploadPhoneProductImage(token, image), m.uploadPhoneProductImage(token, image)]);
+      const rs = await Promise.allSettled([page.uploadImage(image), page.uploadImage(image)]);
       return rs.map((r) => (r.status === "fulfilled" ? `${r.value.status}` : `rejected: ${String((r.reason as Error)?.message)}`));
-    }, [s.token, TINY_WEBP_B64, "/src/lib/productImagePhoneUpload.ts"] as const);
+    }, TINY_WEBP_B64);
     expect(results).toEqual(["COMPLETED", "COMPLETED"]);
     await expect(A.page.getByText("Upload received")).toBeVisible({ timeout: 20_000 });
     await expect(A.page.getByAltText("Uploaded product preview")).toHaveAttribute("src", publicUrl(s.storagePath));
@@ -413,7 +510,7 @@ test("D-race: two concurrent uploads of the same session (real client code) -> o
     const objRow = sql1(`SELECT COALESCE(metadata->>'size','-') || ' B, version ' || COALESCE(version,'-') || ', created ' || created_at || ', updated ' || updated_at FROM storage.objects WHERE bucket_id = '${BUCKET}' AND name = '${s.storagePath}';`);
     expect(completes.filter((c) => c.status === 200)).toHaveLength(1);
     record("phone-upload", "D-race (2 concurrent uploads)", "PASS",
-      `[fn ${FN_MODE}] both calls -> ${results.join(" / ")}; function answers=${fnCalls.map((c) => c.kind).join(",")}; PUTs=${puts.map((p) => `${p.status}${p.status !== 200 ? ` "${p.body.replace(/\s+/g, " ").slice(0, 70)}"` : ""}`).join(", ")}; completes=${completes.map((c) => c.status).join(",")}; object row: ${objRow}; ${db}; ${img}`);
+      `[${MODES}] both calls -> ${results.join(" / ")}; function answers=${fnCalls.map((c) => c.kind).join(",")}; PUTs=${puts.map((p) => `${p.status}${p.status !== 200 ? ` "${p.body.replace(/\s+/g, " ").slice(0, 70)}"` : ""}`).join(", ")}; completes=${completes.map((c) => c.status).join(",")}; object row: ${objRow}; ${db}; ${img}`);
   } finally {
     await P.close();
   }
@@ -434,7 +531,7 @@ test("D-retry: the upload response is lost after storage stored it -> phone retr
     expect(fnCalls[1].keys).toBe("alreadyUploaded,path");
     expect(puts.map((p) => `${p.status}${p.dropped ? "(dropped)" : ""}`)).toEqual(["200(dropped)"]);
     expect(completes.map((c) => c.status)).toEqual([200]);
-    record("phone-upload", "D-retry after lost response", "PASS", `[fn ${FN_MODE}] function answers=${fnCalls.map((c) => c.kind).join(",")}; PUTs=200 stored but response dropped, no second PUT; completes=200 x1; ${db}; ${img}`);
+    record("phone-upload", "D-retry after lost response", "PASS", `[${MODES}] function answers=${fnCalls.map((c) => c.kind).join(",")}; PUTs=200 stored but response dropped, no second PUT; completes=200 x1; ${db}; ${img}`);
   } finally {
     await P.close();
   }
@@ -472,7 +569,7 @@ test("D-expired: parent session expired (expires_at set to the past) -> phone sa
     await expect(A.page.getByText("Upload failed / expired")).toBeVisible({ timeout: 20_000 });
     await A.page.getByRole("button", { name: "Close", exact: true }).click();
     expect(productImageUrl()).toBe(imageBefore);
-    record("phone-upload", "D-expired session refused", "PASS", `[fn ${FN_MODE}] products.image_url unchanged; phone: "${PHONE_EXPIRED}"; function 410 inactive/EXPIRED, no token; PUTs=0, completes=0; row (desktop poll held) = ${stamped.split("|").slice(0, 1)} (stamped by the function via _by_token); objects=0; desktop after poll: "Upload failed / expired"`);
+    record("phone-upload", "D-expired session refused", "PASS", `[${MODES}] products.image_url unchanged; phone: "${PHONE_EXPIRED}"; function 410 inactive/EXPIRED, no token; PUTs=0, completes=0; row (desktop poll held) = ${stamped.split("|").slice(0, 1)} (stamped by the function via _by_token); objects=0; desktop after poll: "Upload failed / expired"`);
   } finally {
     release();
     await A.page.unroute(pollGlob).catch(() => undefined);
@@ -501,7 +598,7 @@ test("D-cancelled: desktop closes the QR (cancel) -> phone refused with a clear 
     expect(sessionRow(s.sessionId).split("|")[0]).toBe("CANCELED");
     expect(objectsUnder(s)).toBe(0);
     expect(productImageUrl()).toBe(imageBefore);
-    record("phone-upload", "D-cancelled session refused", "PASS", `[fn ${FN_MODE}] products.image_url unchanged; desktop Close -> cancel RPC, modal gone; phone: "${PHONE_CANCELLED}"; function 410 inactive/CANCELED, no token; PUTs=0, completes=0; row CANCELED; objects=0`);
+    record("phone-upload", "D-cancelled session refused", "PASS", `[${MODES}] products.image_url unchanged; desktop Close -> cancel RPC, modal gone; phone: "${PHONE_CANCELLED}"; function 410 inactive/CANCELED, no token; PUTs=0, completes=0; row CANCELED; objects=0`);
   } finally {
     await P.close();
   }
@@ -548,7 +645,7 @@ test("D-ratelimit-wait [081]: the phone hits the session burst limit (429) -> sh
     expect(fnCalls[1].at - fnCalls[0].at).toBeGreaterThanOrEqual(wait * 1000 - 500);
     expect(puts.map((p) => p.status)).toEqual([200]);
     expect(completes.map((c) => c.status)).toEqual([200]);
-    record("phone-upload", "D-ratelimit-wait [081]", "PASS", `[fn ${FN_MODE}] 5 tokens taken directly, phone's request -> 429 retry_after=${wait} s, page showed the wait message and retried after ${secs(fnCalls[1].at - fnCalls[0].at)} s -> token -> PUT 200 -> complete 200; ${db}; ${img}`);
+    record("phone-upload", "D-ratelimit-wait [081]", "PASS", `[${MODES}] 5 tokens taken directly, phone's request -> 429 retry_after=${wait} s, page showed the wait message and retried after ${secs(fnCalls[1].at - fnCalls[0].at)} s -> token -> PUT 200 -> complete 200; ${db}; ${img}`);
   } finally {
     await P.close();
   }
@@ -575,7 +672,7 @@ test("D-ratelimit-used-up [081]: the session reached its lifetime cap -> 429 unt
     expect(sessionRow(s.sessionId).split("|")[0]).toBe("PENDING");
     await A.page.getByRole("button", { name: "Close", exact: true }).click();
     expect(productImageUrl()).toBe(imageBefore);
-    record("phone-upload", "D-ratelimit-used-up [081]", "PASS", `[fn ${FN_MODE}] counter at 20 -> function 429 retry_after=${JSON.parse(fnCalls[0].text).retry_after_seconds} s (until expiry), no automatic retry; phone: "${PHONE_LINK_USED_UP}"; PUTs=0, completes=0, objects=0; desktop closed (cancelled)`);
+    record("phone-upload", "D-ratelimit-used-up [081]", "PASS", `[${MODES}] counter at 20 -> function 429 retry_after=${JSON.parse(fnCalls[0].text).retry_after_seconds} s (until expiry), no automatic retry; phone: "${PHONE_LINK_USED_UP}"; PUTs=0, completes=0, objects=0; desktop closed (cancelled)`);
   } finally {
     await P.close();
   }
