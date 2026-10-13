@@ -20,7 +20,13 @@
 //   7 anon / authenticated: no access to public.app_config, no EXECUTE on
 //     app_upload_session_public_url
 //   8 function abuse: 50 sequential + 50 concurrent token requests for one
-//     live session, 50 invalid-token requests (measured, nothing changed)
+//     live session, 50 invalid-token requests (measured, nothing changed).
+//     PRE-081 ONLY (skipped once the schema is >= 081: the limits refuse it)
+//   9-13 migration 081 rate limits (run ONLY when the schema is >= 081, i.e.
+//     after the owner approved and applied 081 + the rate-limited function;
+//     docs/selfhost-migration/phase-f/rate-limiting.md): per-session burst +
+//     Retry-After + window reset, concurrent burst, lifetime cap, per-org
+//     window, per-user session creation (HTTP 429)
 //
 // Skipped unless LIVE_SUPABASE_URL is set. QA data only: organizations
 // created the console way (service-role INSERT + ADMIN row), ids qa-g4<x>-,
@@ -77,6 +83,9 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
   let trusted = "";
   let configBefore = "";
   let realBefore = "";
+  /** max(supabase_migrations.schema_migrations.version), e.g. "080" / "081" */
+  let schema = "";
+  const has081 = () => schema >= "081";
 
   const sql1 = (q: string): string => runSql(cfg, q).trim();
   const derived = (p: string) => `${trusted}/storage/v1/object/public/${BUCKET}/${p}`;
@@ -93,7 +102,7 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
   const createSession = async (o: Org): Promise<Sess> => ok(await rpc(o.admin, "create_product_image_upload_session", { p_shop_id: o.shop, p_product_id: o.prod }), `${o.key} create session`);
   const complete = (s: Sess, over: Record<string, unknown> = {}) =>
     rpc(anon, "complete_product_image_upload_session", { p_token: s.token, p_storage_path: s.storagePath, p_public_url: url(s.storagePath), p_bytes: TINY_WEBP.length, p_mime_type: "image/webp", ...over });
-  const callFn = async (token: unknown): Promise<{ status: number; body: any; ms: number }> => {
+  const callFn = async (token: unknown): Promise<{ status: number; body: any; ms: number; retryAfter: string | null }> => {
     const t0 = performance.now();
     const res = await fetch(`${cfg.url}${FN}`, {
       method: "POST",
@@ -103,7 +112,7 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     const text = await res.text();
     let body: any = null;
     try { body = JSON.parse(text); } catch { body = text; }
-    return { status: res.status, body, ms: performance.now() - t0 };
+    return { status: res.status, body, ms: performance.now() - t0, retryAfter: res.headers.get("retry-after") };
   };
   const put = async (p: string, uploadToken: string) => {
     const res = await fetch(`${cfg.url}/storage/v1/object/upload/sign/${BUCKET}/${p}?token=${encodeURIComponent(uploadToken)}`, {
@@ -143,7 +152,10 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     cfg = liveConfig();
     svc = makeClient(cfg, cfg.serviceKey);
     anon = makeClient(cfg, cfg.anonKey);
-    expect(sql1(`SELECT max(version) FROM supabase_migrations.schema_migrations;`)).toBe("080");
+    schema = sql1(`SELECT max(version) FROM supabase_migrations.schema_migrations;`);
+    expect(schema >= "080", `schema ${schema} must be >= 080`).toBe(true);
+    // 081's limiter is present exactly when the schema says so (no half-applied state)
+    expect(sql1(`SELECT to_regprocedure('public.claim_phone_upload_token_issue(text)') IS NOT NULL;`)).toBe(has081() ? "t" : "f");
     trusted = sql1(`SELECT value FROM public.app_config WHERE key = 'supabase_public_url';`);
     expect(trusted).toBe(cfg.url);
     configBefore = sql1(CONFIG_SQL);
@@ -428,7 +440,10 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
   });
 
   // =========================================================================
-  it("8. function abuse: 50 sequential + 50 concurrent token requests for ONE live session, 50 invalid tokens (measured)", async () => {
+  it("8. function abuse: 50 sequential + 50 concurrent token requests for ONE live session, 50 invalid tokens (measured; pre-081 only)", async (ctx) => {
+    // The pre-081 measurement (no limit at all). With 081 the same load is
+    // refused after 5 tokens; tests 9-13 cover that.
+    if (has081()) ctx.skip();
     const s = await createSession(A);
     const md5 = rowMd5(s.sessionId);
     const stats = (label: string) => {
@@ -506,5 +521,117 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     };
     process.stdout.write(`\n[phase-g4 abuse] ${JSON.stringify(summary, null, 1)}\n`);
     ev.info("8 function abuse (measured)", `sequential 50 -> ${JSON.stringify(statuses)} in ${summary.sequential.total_ms} ms (${summary.sequential.rate_per_s}/s, ${summary.sequential.latency}); concurrent 50 -> ${JSON.stringify(conStatuses)} in ${summary.concurrent.total_ms} ms (${summary.concurrent.latency}); every 200 asked storage to sign again: ${tokens.length} tokens returned, ${distinct} distinct (= ${iatSeconds} distinct iat seconds: same-second requests get an identical JWT), lifetime ${[...lifetimes].join("/")} s, all for the one path; no 429 / no server-side limit; issuing wrote nothing; capability unchanged: first PUT ${first.status}, PUT with token #${Math.floor(tokens.length / 2) + 1} -> ${mid.status}, with the last -> ${last.status} "${short(last.body, 60)}", 1 object, function then answers alreadyUploaded; 50 invalid tokens -> ${JSON.stringify(badStatuses)} in ${summary.invalid.total_ms} ms (${summary.invalid.latency}); resources before: ${resBefore} | after: ${resAfter}`);
+  });
+  // =========================================================================
+  // 081 rate limits. Run ONLY when the stack's schema is >= 081 (after the
+  // owner approved and applied 081 and deployed the rate-limited function);
+  // on an 080 stack they are skipped. Limits: per session 20 lifetime / 5 per
+  // 10 s, per organization 60 per 60 s, per creating user 120 sessions/hour.
+  // =========================================================================
+  const counters = (id: string) => sql1(`SELECT token_issue_count || '|' || token_window_count FROM product_image_upload_sessions WHERE id = '${id}';`);
+  const expect429 = (r: { status: number; body: any; retryAfter: string | null }, max: number) => {
+    expect(r.status, JSON.stringify(r.body)).toBe(429);
+    expect(Object.keys(r.body ?? {}).sort()).toEqual(["code", "error", "retry_after_seconds"]);
+    expect(r.body.code).toBe("rate_limited");
+    expect(Number.isInteger(r.body.retry_after_seconds)).toBe(true);
+    expect(r.body.retry_after_seconds).toBeGreaterThanOrEqual(1);
+    expect(r.body.retry_after_seconds).toBeLessThanOrEqual(max);
+    expect(r.retryAfter).toBe(String(r.body.retry_after_seconds));
+  };
+
+  it("9. [081] per-session burst: 5 tokens, then 429 + Retry-After; after the wait a token again and the upload completes; invalid tokens still a plain 404", async (ctx) => {
+    if (!has081()) ctx.skip();
+    const s = await createSession(A);
+    const first = [];
+    for (let i = 0; i < 5; i++) first.push(await callFn(s.token));
+    expect(first.map((r) => r.status)).toEqual([200, 200, 200, 200, 200]);
+    const sixth = await callFn(s.token);
+    expect429(sixth, 10);
+    expect(counters(s.sessionId)).toBe("5|5");
+    expect(objCount(s.storagePath)).toBe("0");
+    const waitS = sixth.body.retry_after_seconds;
+    await new Promise((r) => setTimeout(r, (waitS + 1) * 1000));
+    const after = await callFn(s.token);
+    expect(after.status, JSON.stringify(after.body)).toBe(200);
+    expect(counters(s.sessionId)).toBe("6|1");
+    const p = await put(s.storagePath, after.body.token);
+    expect(p.status, p.body).toBe(200);
+    const done = ok(await complete(s), "complete after the wait");
+    expect(done.status).toBe("COMPLETED");
+    const bad = await Promise.all(Array.from({ length: 20 }, () => callFn(randomBytes(64).toString("hex"))));
+    expect(bad.every((r) => r.status === 404)).toBe(true);
+    ev.pass("9 [081] session burst", `5 x 200, 6th -> 429 ${JSON.stringify(sixth.body)} Retry-After ${sixth.retryAfter}; counters 5|5, no object; after ${waitS + 1} s -> 200 (counters 6|1), PUT 200, COMPLETED; 20 invalid tokens -> 404 (not limited by the DB layer; see the Envoy snippet)`);
+  });
+
+  it("10. [081] 30 concurrent token requests for ONE session -> exactly 5 issued, 25 x 429", async (ctx) => {
+    if (!has081()) ctx.skip();
+    const s = await createSession(A);
+    const burst = await Promise.all(Array.from({ length: 30 }, () => callFn(s.token)));
+    const ok200 = burst.filter((r) => r.status === 200);
+    const r429 = burst.filter((r) => r.status === 429);
+    expect(ok200).toHaveLength(5);
+    expect(r429).toHaveLength(25);
+    for (const r of r429) expect429(r, 10);
+    expect(counters(s.sessionId)).toBe("5|5");
+    ok(await rpc(A.admin, "cancel_product_image_upload_session", { p_session_id: s.sessionId }), "cancel");
+    ev.pass("10 [081] concurrent burst", `30 concurrent -> ${ok200.length} x 200 + ${r429.length} x 429; session counters 5|5 (atomic in the DB, across function workers)`);
+  });
+
+  it("11. [081] per-session lifetime cap: the 20th token is the last; then 429 with Retry-After = the session's remaining lifetime", async (ctx) => {
+    if (!has081()) ctx.skip();
+    const s = await createSession(A);
+    expect(s.sessionId).toMatch(/^pimg-[0-9a-f]+$/);
+    // QA session only: fast-forward its counter to 19
+    sql1(`UPDATE product_image_upload_sessions SET token_issue_count = 19 WHERE id = '${s.sessionId}' AND created_by = '${A.adminId}';`);
+    const last = await callFn(s.token);
+    expect(last.status).toBe(200);
+    const capped = await callFn(s.token);
+    const left = Number(sql1(`SELECT ceil(extract(epoch FROM expires_at - clock_timestamp())) FROM product_image_upload_sessions WHERE id = '${s.sessionId}';`));
+    expect429(capped, 600);
+    expect(Math.abs(capped.body.retry_after_seconds - left)).toBeLessThanOrEqual(5);
+    expect(counters(s.sessionId).split("|")[0]).toBe("20");
+    ok(await rpc(A.admin, "cancel_product_image_upload_session", { p_session_id: s.sessionId }), "cancel");
+    ev.pass("11 [081] lifetime cap", `token #20 -> 200; #21 -> 429 retry_after ${capped.body.retry_after_seconds} s (session lifetime left ${left} s); counter stays 20`);
+  });
+
+  it("12. [081] per-organization window: 65 requests over 13 sessions in one minute -> 60 issued, 5 x 429; another org unaffected", async (ctx) => {
+    if (!has081()) ctx.skip();
+    const sessions: Sess[] = [];
+    for (let i = 0; i < 13; i++) sessions.push(await createSession(A));
+    const sB = await createSession(B);
+    // fresh window for the QA org only (row cascades away with the QA org at cleanup)
+    sql1(`DELETE FROM phone_upload_org_rate WHERE org_id = '${A.orgId}';`);
+    const results: { status: number; body: any; retryAfter: string | null }[] = [];
+    for (const s of sessions) for (let j = 0; j < 5; j++) results.push(await callFn(s.token));
+    const n200 = results.filter((r) => r.status === 200).length;
+    const n429 = results.filter((r) => r.status === 429);
+    expect(n200).toBe(60);
+    expect(n429).toHaveLength(5);
+    for (const r of n429) expect429(r, 60);
+    expect(sql1(`SELECT issued FROM phone_upload_org_rate WHERE org_id = '${A.orgId}';`)).toBe("60");
+    const other = await callFn(sB.token);
+    expect(other.status).toBe(200);
+    for (const s of [...sessions]) ok(await rpc(A.admin, "cancel_product_image_upload_session", { p_session_id: s.sessionId }), "cancel");
+    ok(await rpc(B.admin, "cancel_product_image_upload_session", { p_session_id: sB.sessionId }), "cancel B");
+    ev.pass("12 [081] org window", `13 sessions x 5 -> ${n200} x 200 + ${n429.length} x 429 (retry_after ${n429.map((r) => r.body.retry_after_seconds).join(",")} s); org counter 60; org B session -> 200`);
+  });
+
+  it("13. [081] per-user session creation: the 121st session within an hour -> HTTP 429 (PT429); another user unaffected", async (ctx) => {
+    if (!has081()) ctx.skip();
+    const recent = Number(sql1(`SELECT count(*) FROM product_image_upload_sessions WHERE created_by = '${B.adminId}' AND created_at > now() - interval '1 hour';`));
+    // QA filler rows for B's QA admin up to 119 (removed by cleanup.sql with the QA user)
+    sql1(`INSERT INTO product_image_upload_sessions (id, token_hash, created_by, shop_id, storage_path, expires_at)
+          SELECT 'pimg-qag4fill' || g || '${ts}', md5('qa-g4-fill' || g || clock_timestamp()), '${B.adminId}', '${B.shop}', 'org/${B.orgId}/temp/pimg-qag4fill' || g || '${ts}', now() + interval '10 minutes'
+            FROM generate_series(1, ${Math.max(0, 119 - recent)}) g;`);
+    const ok120 = await rpc(B.admin, "create_product_image_upload_session", { p_shop_id: B.shop, p_product_id: B.prod });
+    expect(ok120.error).toBeNull();
+    const refused = await rpc(B.admin, "create_product_image_upload_session", { p_shop_id: B.shop, p_product_id: B.prod });
+    expect(refused.status).toBe(429);
+    expect(String(refused.error?.message)).toMatch(/^Too many phone upload links were created\. Try again in \d+ minutes\.$/);
+    expect(sql1(`SELECT count(*) FROM product_image_upload_sessions WHERE created_by = '${B.adminId}' AND created_at > now() - interval '1 hour';`)).toBe("120");
+    const aStill = await rpc(A.admin, "create_product_image_upload_session", { p_shop_id: A.shop, p_product_id: A.prod });
+    expect(aStill.error).toBeNull();
+    ok(await rpc(A.admin, "cancel_product_image_upload_session", { p_session_id: aStill.data.sessionId }), "cancel");
+    ev.pass("13 [081] per-user sessions", `B admin at 119 (filler QA rows) -> 120th created; 121st -> HTTP ${refused.status} ${refused.error?.code} "${short(refused.error?.message, 80)}"; A admin unaffected`);
   });
 });

@@ -76,8 +76,26 @@ const seed = async (world: World, over: Record<string, unknown> = {}) => {
     }
     return [200, { sessionId: row.id, storagePath: row.storage_path, status: row.status, expiresAt: row.expires_at, uploadToken: null }];
   };
+  // The 081 limiter (claim_phone_upload_token_issue), modelled: per-session
+  // burst of 5 (no clock here: tests reset it explicitly) and a lifetime cap
+  // of 20. Tests override world.db.rpcs[CLAIM] for other answers.
+  world.db.rpcs[CLAIM] = (args) => {
+    const row = world.db.tables.product_image_upload_sessions.find((r) => r.id === SESSION_ID);
+    if (!row || args.p_token !== QR_TOKEN) return [200, { allowed: false, reason: "invalid" }];
+    if (row.status !== "PENDING") return [200, { allowed: false, reason: "inactive", status: row.status }];
+    const issued = Number(row.token_issue_count ?? 0);
+    const windowCount = Number(row.token_window_count ?? 0);
+    if (issued >= 20) return [200, { allowed: false, reason: "rate_limited", scope: "session", retry_after_seconds: 412 }];
+    if (windowCount >= 5) return [200, { allowed: false, reason: "rate_limited", scope: "session_burst", retry_after_seconds: 7 }];
+    row.token_issue_count = issued + 1;
+    row.token_window_count = windowCount + 1;
+    return [200, { allowed: true, issued: issued + 1, remaining: 19 - issued }];
+  };
   return await loadHandler("phone-upload-token");
 };
+
+const CLAIM = "claim_phone_upload_token_issue";
+const CLAIM_TRACE = `db:POST rpc/${CLAIM}`;
 
 const run = async (fn: (world: World) => Promise<void>) => {
   setEnv();
@@ -121,15 +139,20 @@ test("phone-upload-token: valid PENDING session -> a signed token for exactly th
     assertEquals(payload.url, `product-images/${PATH}`);
     assertEquals(body.expiresAt, new Date(payload.exp * 1000).toISOString());
     assertNoLeak(text.replace(body.path, "<path>"));
-    // the row is read with the service role and NOT written (no token stored)
+    // the row is read with the service role; the only write is the limiter's counter (no token stored)
     assertEquals(world.trace(), [
       "db:GET product_image_upload_sessions",
       "db:GET users",
       "db:GET products",
       "db:GET shops",
+      CLAIM_TRACE,
       "storage:HEAD object",
       "storage:POST sign",
     ]);
+    // the limiter got the raw QR token (it hashes it itself, like _by_token) and nothing else
+    const claimCall = world.calls.find((c) => c.path.endsWith(`/rpc/${CLAIM}`))!;
+    assertEquals(claimCall.body, { p_token: QR_TOKEN });
+    assertEquals(world.db.tables.product_image_upload_sessions[0].token_issue_count, 1);
     assertEquals(world.db.tables.product_image_upload_sessions[0].signed_upload_token, null);
     assertEquals(world.db.tables.product_image_upload_sessions[0].status, "PENDING");
     // the lookup used the hash, never the raw token
@@ -139,7 +162,7 @@ test("phone-upload-token: valid PENDING session -> a signed token for exactly th
   });
 });
 
-test("phone-upload-token: refresh while PENDING issues a new token each time for the same path (no state written)", async () => {
+test("phone-upload-token: refresh while PENDING issues a new token each time for the same path (only the limiter writes)", async () => {
   await run(async (world) => {
     const handler = await seed(world);
     const a = await readJson(await handler(req({ token: QR_TOKEN })));
@@ -147,7 +170,8 @@ test("phone-upload-token: refresh while PENDING issues a new token each time for
     assertEquals([a.status, b.status], [200, 200]);
     assert(a.body.token !== b.body.token);
     assertEquals([a.body.path, b.body.path], [PATH, PATH]);
-    assertEquals(world.calls.filter((c) => c.method === "PATCH" || c.method === "POST" && c.kind === "postgrest").length, 0);
+    assertEquals(world.calls.filter((c) => c.method === "PATCH" || c.method === "POST" && c.kind === "postgrest" && !c.path.endsWith(`/rpc/${CLAIM}`)).length, 0);
+    assertEquals(world.calls.filter((c) => c.path.endsWith(`/rpc/${CLAIM}`)).length, 2);
   });
 });
 
@@ -267,7 +291,7 @@ test("phone-upload-token: session without product/shop is fine (no product/shop 
     const handler = await seed(world, { product_id: null, shop_id: null });
     const res = await readJson(await handler(req({ token: QR_TOKEN })));
     assertEquals(res.status, 200);
-    assertEquals(world.trace(), ["db:GET product_image_upload_sessions", "db:GET users", "storage:HEAD object", "storage:POST sign"]);
+    assertEquals(world.trace(), ["db:GET product_image_upload_sessions", "db:GET users", CLAIM_TRACE, "storage:HEAD object", "storage:POST sign"]);
   });
 });
 
@@ -325,4 +349,166 @@ test("phone-upload-token: missing service config -> 503 before any call; CORS pr
     world.restore();
     setEnv();
   }
+});
+
+// ---------------------------------------------------------------- 081 rate limits
+// docs/selfhost-migration/phase-f/rate-limiting.md
+
+test("phone-upload-token 081: burst exceeded -> 429 rate_limited + Retry-After, nothing signed, no storage call", async () => {
+  await run(async (world) => {
+    const handler = await seed(world);
+    const ok: number[] = [];
+    for (let i = 0; i < 5; i++) ok.push((await handler(req({ token: QR_TOKEN }))).status);
+    assertEquals(ok, [200, 200, 200, 200, 200]);
+    const storageBefore = world.storage.calls.length;
+    const res = await handler(req({ token: QR_TOKEN }));
+    const text = await res.text();
+    assertEquals(res.status, 429);
+    assertEquals(res.headers.get("retry-after"), "7");
+    assertEquals(res.headers.get("cache-control"), "no-store");
+    assertStringIncludes(res.headers.get("access-control-expose-headers") ?? "", "Retry-After");
+    assertEquals(JSON.parse(text), { error: "Too many upload attempts. Please wait a moment and try again.", code: "rate_limited", retry_after_seconds: 7 });
+    assertEquals(world.storage.calls.length, storageBefore, "no HEAD / sign after a refusal");
+    assertEquals(world.storage.signed.length, 5);
+    assertNoLeak(text);
+    assert(!text.includes("session_burst"), "the limiter scope stays server-side");
+  });
+});
+
+test("phone-upload-token 081: lifetime cap -> 429 with Retry-After = seconds until the session expires", async () => {
+  await run(async (world) => {
+    const handler = await seed(world, { token_issue_count: 20 });
+    const res = await handler(req({ token: QR_TOKEN }));
+    assertEquals(res.status, 429);
+    assertEquals(res.headers.get("retry-after"), "412");
+    assertEquals((await res.json()).retry_after_seconds, 412);
+    assertEquals(world.storage.calls.length, 0);
+  });
+});
+
+test("phone-upload-token 081: retry_after is clamped to an integer 1..3600 (header and body agree)", async () => {
+  for (const [given, expected] of [[0, 1], [0.2, 1], [9.1, 10], [99999, 3600]] as const) {
+    await run(async (world) => {
+      const handler = await seed(world);
+      world.db.rpcs[CLAIM] = () => [200, { allowed: false, reason: "rate_limited", scope: "org", retry_after_seconds: given }];
+      const res = await handler(req({ token: QR_TOKEN }));
+      assertEquals(res.status, 429, String(given));
+      assertEquals(res.headers.get("retry-after"), String(expected));
+      assertEquals((await res.json()).retry_after_seconds, expected);
+    });
+  }
+});
+
+test("phone-upload-token 081: FAIL CLOSED - limiter RPC error / missing (pre-081 schema) / permission denied -> 503, no token, no storage call", async () => {
+  const failures: [string, number, unknown][] = [
+    ["db error", 500, { code: "XX000", message: "boom secret detail", details: null, hint: null }],
+    ["function missing (schema < 081)", 404, { code: "PGRST202", message: "Could not find the function public.claim_phone_upload_token_issue(p_token) in the schema cache", details: null, hint: null }],
+    ["permission denied", 403, { code: "42501", message: "permission denied for function claim_phone_upload_token_issue", details: null, hint: null }],
+    ["gateway timeout", 504, { message: "upstream timeout" }],
+  ];
+  for (const [name, status, body] of failures) {
+    await run(async (world) => {
+      const handler = await seed(world);
+      world.db.rpcs[CLAIM] = () => [status, body];
+      const res = await handler(req({ token: QR_TOKEN }));
+      const text = await res.text();
+      assertEquals(res.status, 503, name);
+      assertEquals(JSON.parse(text), { error: "Phone upload is temporarily unavailable. Try again.", code: "unavailable" }, name);
+      assertEquals(world.storage.calls.length, 0, name);
+      assertEquals(world.storage.signed.length, 0, name);
+      assert(!text.includes("boom") && !text.includes("PGRST") && !text.includes(SERVICE_ROLE_KEY), name);
+    });
+  }
+});
+
+test("phone-upload-token 081: FAIL CLOSED - unexpected limiter answers never issue a token", async () => {
+  const answers: unknown[] = [
+    null,
+    {},
+    { allowed: "true" },
+    { allowed: 1 },
+    { allowed: false },
+    { allowed: false, reason: "rate_limited" },
+    { allowed: false, reason: "rate_limited", retry_after_seconds: "5" },
+    { allowed: false, reason: "rate_limited", retry_after_seconds: null },
+    { allowed: false, reason: "something-new" },
+    [{ allowed: true }],
+    "allowed",
+  ];
+  for (const answer of answers) {
+    await run(async (world) => {
+      const handler = await seed(world);
+      world.db.rpcs[CLAIM] = () => [200, answer];
+      const res = await handler(req({ token: QR_TOKEN }));
+      assertEquals(res.status, 503, JSON.stringify(answer));
+      assertEquals(world.storage.signed.length, 0, JSON.stringify(answer));
+      assertEquals(world.storage.calls.length, 0, JSON.stringify(answer));
+    });
+  }
+});
+
+test("phone-upload-token 081: limiter says inactive / invalid / refused (state changed between the read and the claim) -> 410 / 404 / 403", async () => {
+  const cases: [unknown, number, Record<string, unknown>][] = [
+    [{ allowed: false, reason: "inactive", status: "COMPLETED" }, 410, { error: "This upload link is no longer active.", code: "inactive", status: "COMPLETED" }],
+    [{ allowed: false, reason: "inactive", status: "EXPIRED" }, 410, { error: "This upload link has expired.", code: "inactive", status: "EXPIRED" }],
+    [{ allowed: false, reason: "invalid" }, 404, { error: "Invalid upload link.", code: "invalid" }],
+    [{ allowed: false, reason: "refused" }, 403, { error: "This upload link can no longer be used.", code: "refused" }],
+  ];
+  for (const [answer, status, body] of cases) {
+    await run(async (world) => {
+      const handler = await seed(world);
+      world.db.rpcs[CLAIM] = () => [200, answer];
+      const res = await readJson(await handler(req({ token: QR_TOKEN })));
+      assertEquals(res.status, status, JSON.stringify(answer));
+      assertEquals(res.body, body);
+      assertEquals(world.storage.calls.length, 0);
+    });
+  }
+});
+
+test("phone-upload-token 081: the limiter is consulted only after every session check (invalid / inactive / refused never count)", async () => {
+  await run(async (world) => {
+    const handler = await seed(world, { status: "CANCELED" });
+    await handler(req({ token: QR_TOKEN }));
+    await handler(req({ token: "f".repeat(128) }));
+    await handler(req({ token: "short" }));
+    assertEquals(world.calls.filter((c) => c.path.endsWith(`/rpc/${CLAIM}`)).length, 0);
+  });
+  await run(async (world) => {
+    const handler = await seed(world);
+    world.db.tables.products[0].org_id = OTHER_ORG;
+    assertEquals((await handler(req({ token: QR_TOKEN }))).status, 403);
+    assertEquals(world.calls.filter((c) => c.path.endsWith(`/rpc/${CLAIM}`)).length, 0);
+  });
+});
+
+test("phone-upload-token 081: the claim comes BEFORE the storage HEAD, so a rate-limited caller costs storage nothing (alreadyUploaded included)", async () => {
+  await run(async (world) => {
+    const handler = await seed(world, { token_window_count: 5 });
+    world.storage.objects.add(`product-images/${PATH}`);
+    const res = await handler(req({ token: QR_TOKEN }));
+    assertEquals(res.status, 429);
+    assertEquals(world.storage.calls.length, 0);
+  });
+  await run(async (world) => {
+    const handler = await seed(world);
+    world.storage.objects.add(`product-images/${PATH}`);
+    const res = await readJson(await handler(req({ token: QR_TOKEN })));
+    assertEquals(res.body, { alreadyUploaded: true, path: PATH });
+    assertEquals(world.trace().slice(-2), [CLAIM_TRACE, "storage:HEAD object"]);
+  });
+});
+
+test("phone-upload-token 081: concurrent requests are decided by the database, not the worker (no in-memory counter)", async () => {
+  await run(async (world) => {
+    const handler = await seed(world);
+    // 12 in flight at once: the modelled DB allows exactly 5 (burst), the rest 429
+    const results = await Promise.all(Array.from({ length: 12 }, async () => (await handler(req({ token: QR_TOKEN }))).status));
+    assertEquals(results.filter((s) => s === 200).length, 5);
+    assertEquals(results.filter((s) => s === 429).length, 7);
+    assertEquals(world.calls.filter((c) => c.path.endsWith(`/rpc/${CLAIM}`)).length, 12);
+    // a fresh DB window (reset in the DB) is honoured immediately by the same worker
+    world.db.tables.product_image_upload_sessions[0].token_window_count = 0;
+    assertEquals((await handler(req({ token: QR_TOKEN }))).status, 200);
+  });
 });

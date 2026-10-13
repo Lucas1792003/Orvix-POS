@@ -835,6 +835,27 @@ export const translations: Record<Language, Record<string, Record<string, string
       saveFailed: "Could not save profile",
     },
 
+    // Phone product-photo upload page (QR, anonymous phone)
+    phoneUpload: {
+      title: "Product photo upload",
+      loading: "Checking upload link...",
+      ready: "Choose or take a product photo.",
+      compressing: "Compressing photo...",
+      uploading: "Uploading photo...",
+      complete: "Photo uploaded. You can return to the computer.",
+      expired: "This upload link has expired. Create a new QR code on the computer.",
+      cancelled: "This upload link was cancelled on the computer. Create a new QR code to upload.",
+      failed: "Upload failed.",
+      takePhoto: "Take photo",
+      chooseFromLibrary: "Choose from library",
+      compressed: "Compressed: {size}",
+      invalidLink: "Invalid upload link.",
+      rateLimitedWaiting: "Too many attempts right now. Trying again automatically in {seconds} s...",
+      rateLimitedLater: "Too many upload attempts. Please wait about {minutes} min and try again.",
+      rateLimitedLinkUsedUp: "This upload link has been used too many times. Create a new QR code on the computer.",
+      language: "မြန်မာ",
+    },
+
     // Auth
     auth: {
       loginTitle: "Login to your account",
@@ -1738,6 +1759,27 @@ export const translations: Record<Language, Record<string, Record<string, string
       saving: "သိမ်းနေသည်…",
       saved: "ပရိုဖိုင် သိမ်းပြီး",
       saveFailed: "ပရိုဖိုင် သိမ်း၍ မရပါ",
+    },
+
+    // Phone product-photo upload page (QR, anonymous phone)
+    phoneUpload: {
+      title: "ကုန်ပစ္စည်းဓာတ်ပုံ တင်ရန်",
+      loading: "အပ်လုဒ်လင့်ခ်ကို စစ်ဆေးနေသည်...",
+      ready: "ကုန်ပစ္စည်းဓာတ်ပုံကို ရွေးပါ သို့မဟုတ် ရိုက်ပါ။",
+      compressing: "ဓာတ်ပုံကို ချုံ့နေသည်...",
+      uploading: "ဓာတ်ပုံကို တင်နေသည်...",
+      complete: "ဓာတ်ပုံ တင်ပြီးပါပြီ။ ကွန်ပျူတာသို့ ပြန်သွားနိုင်ပါသည်။",
+      expired: "ဤအပ်လုဒ်လင့်ခ် သက်တမ်းကုန်သွားပါပြီ။ ကွန်ပျူတာတွင် QR ကုဒ်အသစ် ပြုလုပ်ပါ။",
+      cancelled: "ဤအပ်လုဒ်လင့်ခ်ကို ကွန်ပျူတာတွင် ပယ်ဖျက်လိုက်ပါပြီ။ ဓာတ်ပုံတင်ရန် QR ကုဒ်အသစ် ပြုလုပ်ပါ။",
+      failed: "ဓာတ်ပုံတင်ခြင်း မအောင်မြင်ပါ။",
+      takePhoto: "ဓာတ်ပုံရိုက်ရန်",
+      chooseFromLibrary: "ဓာတ်ပုံများထဲမှ ရွေးရန်",
+      compressed: "ချုံ့ပြီး အရွယ်အစား: {size}",
+      invalidLink: "အပ်လုဒ်လင့်ခ် မမှန်ကန်ပါ။",
+      rateLimitedWaiting: "ယခု ကြိုးစားမှု များလွန်းနေပါသည်။ {seconds} စက္ကန့်အကြာတွင် အလိုအလျောက် ထပ်ကြိုးစားပါမည်...",
+      rateLimitedLater: "ဓာတ်ပုံတင်ရန် ကြိုးစားမှု များလွန်းနေပါသည်။ {minutes} မိနစ်ခန့် စောင့်ပြီး ထပ်ကြိုးစားပါ။",
+      rateLimitedLinkUsedUp: "ဤအပ်လုဒ်လင့်ခ်ကို အကြိမ်များစွာ အသုံးပြုပြီးပါပြီ။ ကွန်ပျူတာတွင် QR ကုဒ်အသစ် ပြုလုပ်ပါ။",
+      language: "English",
     },
 
     // Auth
