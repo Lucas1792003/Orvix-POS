@@ -6,13 +6,14 @@ critical operational writes go through `SECURITY DEFINER` RPCs;
 business data lives in Supabase, not localStorage. Admin sign-in adds a
 second factor (authenticator app or emailed code), the UI is fully
 English/Myanmar, the business brand (name + logo) is admin-editable, and
-the complete app supports System / Light / Dark themes. The current desktop
-release is **v1.0.11**; it carries v1.0.10's fix for the real root cause of
-the recurring Windows updater "cannot be closed" failure (v1.0.7/v1.0.9
-targeted the wrong NSIS check — see document 10 for the full diagnosis),
-plus a corrected side-by-side sidebar footer layout. See document 10 for
-the direct Windows download, stuck-installer recovery steps, and remaining
-real-hardware verification item.
+the complete app supports System / Light / Dark themes. The latest published
+desktop release is **v1.0.15**. The backend can run on hosted Supabase or on
+a self-hosted Supabase stack; the self-host support work (multi-tenant
+isolation, idempotent RPCs, offline authorization, upload security) is
+documented under [`selfhost-migration/`](#self-host-support-design-notes)
+below. Document 10 covers the Windows updater history and stuck-installer
+recovery. Deployment safeguards (which builds can deploy, and the owner's
+dashboard checklist) are in [deployment-safety.md](./deployment-safety.md).
 
 ## Quick Start
 
@@ -45,6 +46,28 @@ Full setup, env, Supabase, and deployment notes:
 | 08 | [Testing & QA](./08-testing-qa.md) | Verifying a change end-to-end before shipping. |
 | 09 | [Roadmap & TODO](./09-roadmap-todo.md) | Picking up open work; tracking what's still outstanding. |
 | 10 | [Offline-First & Desktop — Known Issues & TODO](./10-offline-desktop-known-issues.md) | Touching the sync outbox, local cache, or the Electron wrapper; before trusting offline mode in production. |
+| — | [Deployment safety](./deployment-safety.md) | Before connecting, changing or triggering any deployment (Vercel, GitHub Pages, releases). |
+
+## Self-host support (design notes)
+
+Engineering notes for the self-host support work. Operational records for
+specific environments (hosts, access, backups, live evidence) are kept
+outside this public repository.
+
+| Doc | Topic |
+|---|---|
+| [phase-d/idempotency-contract.md](./selfhost-migration/phase-d/idempotency-contract.md) | Idempotency keys for mutating RPCs (062–063, 074) |
+| [phase-d/offline-authorization.md](./selfhost-migration/phase-d/offline-authorization.md) | Offline authorization window design |
+| [phase-d/migrations-reconciliation.md](./selfhost-migration/phase-d/migrations-reconciliation.md) | Reconciling the migration history with the production schema |
+| [phase-e/offline-authorization-verification.md](./selfhost-migration/phase-e/offline-authorization-verification.md) | Offline authorization verified in the Electron app |
+| [phase-e/e2e-results.md](./selfhost-migration/phase-e/e2e-results.md) | Electron end-to-end suite results |
+| [phase-g/org-isolation-audit.md](./selfhost-migration/phase-g/org-isolation-audit.md) | Organization isolation (067–073) |
+| [phase-g/login-signup-fix.md](./selfhost-migration/phase-g/login-signup-fix.md) | Login never creates accounts; `/setup` first-admin flow; fail-closed backend config |
+| [phase-g/remaining-security-fixes.md](./selfhost-migration/phase-g/remaining-security-fixes.md) | Migrations 074–076 |
+| [phase-g/upload-security-and-077.md](./selfhost-migration/phase-g/upload-security-and-077.md) | Upload security and new-org price levels (077–079) |
+| [phase-g/phone-upload-jit.md](./selfhost-migration/phase-g/phone-upload-jit.md) | Just-in-time phone upload tokens (`phone-upload-token` function) |
+| [phase-g/migration-080.md](./selfhost-migration/phase-g/migration-080.md) | Trusted upload completion URL (080) |
+| [phase-g/realtime-reconciliation.md](./selfhost-migration/phase-g/realtime-reconciliation.md) | Realtime gap reconciliation |
 
 ## Code Layout (one-screen orientation)
 
