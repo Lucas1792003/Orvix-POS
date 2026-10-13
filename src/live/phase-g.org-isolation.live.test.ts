@@ -202,9 +202,14 @@ SELECT format('products=%s inventory=%s inv_qty_sum=%s users=%s shops=%s busines
     await ins("brands", { id: o.brand, category_id: o.cat, name: `QA ${o.key} Brand ${ts}`, is_active: true, sort_order: 0 });
     await ins("unit_types", { id: o.unitType, name: `QA ${o.key} Carton ${ts}`, abbreviation: `qc${o.key}${ts.slice(-4)}`, is_active: true, sort_order: 0 });
     // Same code in both orgs on purpose (per-org uniqueness since 068). Org A already has its
-    // default level from seed.sql; org B (console-created, no level at all) gets its default here -
-    // without one complete_sale raises "No active price level available" (072, per-org lookup).
-    await ins("price_levels", { id: o.priceLevel, code: `QA-RETAIL-${ts}`, name: `QA Retail ${ts}`, is_default: o.key === "B", is_active: true, sort_order: 0 });
+    // default level from seed.sql. Org B (console-created): before 077 it had no level at all and
+    // got its default here - without one complete_sale raises "No active price level available"
+    // (072, per-org lookup). Since 077 the organizations AFTER INSERT trigger already seeded
+    // Retail (default) / Wholesale / Special, so a second active default would violate
+    // price_levels_one_active_default_per_org: only mark this level default when the org has none.
+    const defaults = await svcCount("price_levels", (q) => q.eq("org_id", o.orgId).eq("is_default", true).eq("is_active", true));
+    await ins("price_levels", { id: o.priceLevel, code: `QA-RETAIL-${ts}`, name: `QA Retail ${ts}`, is_default: o.key === "B" && defaults === 0, is_active: true, sort_order: 0 });
+    if (o.key === "B") ev.info("setup B price levels", `active default levels before buildCatalog=${defaults} (077 trigger seeds 1 for a console-created org); ${o.priceLevel} is_default=${defaults === 0}`);
     await ins("product_unit_prices", { id: o.pup, product_unit_id: o.units[0], price_level_id: o.priceLevel, shop_id: null, price_mmk: o.prices[0], is_active: true });
     await ins("price_tiers", { id: o.tier, product_id: o.prods[0], shop_id: o.shop, min_qty: 50, price_mmk: o.prices[0] - 1, is_active: true, created_by: o.adminId });
     await ins("supplier_products", { supplier_id: o.sup, product_id: o.prods[0] });

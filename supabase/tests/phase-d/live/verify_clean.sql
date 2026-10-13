@@ -78,6 +78,13 @@ BEGIN
     UNION ALL SELECT 'storage.objects (qa upload paths)', count(*) FROM storage.objects
                 WHERE name LIKE 'temp/pimg-%' AND name IN (SELECT storage_path FROM product_image_upload_sessions WHERE created_by LIKE 'qa-%')
                    OR name LIKE '%qa-prod-%' OR name LIKE '%qa-%' OR name LIKE '%QA%'
+    -- 078/079: org-scoped paths. A QA org prefix, or the prefix of an
+    -- organization that no longer exists (console-created QA orgs have
+    -- org-<uuid> ids without a qa- marker), must be empty after cleanup.
+    UNION ALL SELECT 'storage.objects (org/<qa or deleted org>/...)', count(*) FROM storage.objects
+                WHERE name LIKE 'org/%'
+                  AND (split_part(name, '/', 2) LIKE 'qa-%'
+                       OR split_part(name, '/', 2) NOT IN (SELECT id FROM organizations))
     UNION ALL SELECT 'storage.objects (uploaded by a QA or deleted account)', count(*) FROM storage.objects o
                 WHERE COALESCE(o.owner_id, o.owner::text) IS NOT NULL
                   AND (COALESCE(o.owner_id, o.owner::text) IN (SELECT id::text FROM auth.users WHERE email LIKE '%@qa.invalid')

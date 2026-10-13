@@ -67,6 +67,30 @@ SELECT 'qa sets' AS "table",
               (SELECT count(*) FROM qa_orgs), (SELECT count(*) FROM qa_shops), (SELECT count(*) FROM qa_users),
               (SELECT count(*) FROM qa_products), (SELECT count(*) FROM qa_suppliers)) AS deleted;
 
+-- Since 078/079 QA uploads live under org/<qa org>/... (products/<id>/<file>
+-- and temp/<session>). They are NOT deleted here (SQL would leave the file on
+-- disk): the suites remove them through the Storage API. Reported so a
+-- leftover is visible before the org rows that resolve them disappear;
+-- verify_clean.sql fails while any remain.
+SELECT 'storage.objects under QA org prefixes (remove via Storage API)' AS "table",
+       count(*) AS remaining
+  FROM storage.objects
+ WHERE name LIKE 'org/%' AND split_part(name, '/', 2) IN (SELECT id FROM qa_orgs);
+
+-- 077: price levels of QA organizations (the organizations AFTER INSERT
+-- trigger seeds Retail/Wholesale/Special with random plv-<hex> ids for every
+-- console-created org; seed.sql's replica-mode org gets its own qa-pl-*).
+-- They are deleted below by org_id (and would cascade with the org since
+-- 077's ON DELETE CASCADE). Guard: never a level of a non-QA organization.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM price_levels l
+              WHERE (l.id LIKE 'qa-%' OR l.org_id IN (SELECT id FROM qa_orgs))
+                AND l.org_id NOT IN (SELECT id FROM qa_orgs)) THEN
+    RAISE EXCEPTION 'cleanup: a qa- price level belongs to a non-QA organization - aborting';
+  END IF;
+END $$;
+
 CREATE TEMP TABLE qa_sales ON COMMIT DROP AS
   SELECT id FROM sales
    WHERE shop_id LIKE 'qa-%' OR cashier_id LIKE 'qa-%'
