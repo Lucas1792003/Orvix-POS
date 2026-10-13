@@ -91,8 +91,9 @@ outside this public repository.
 - **`src/i18n/`** — `translations.ts` (English / Myanmar) used by
   `useTranslation`.
 - **`supabase/`** — `schema.sql`, ordered `migrations/`, and Edge
-  Functions in `functions/` (`email-sales-report`, `weekly-sales-report`,
-  `rotate-audit-log`, `admin-2fa`).
+  Functions in `functions/` (`email-sales-report`, `admin-2fa`,
+  `phone-upload-token`, `platform-console`). `rotate-audit-log` and
+  `weekly-sales-report` were removed on 2026-10-13.
 
 ## Where Did The Old Docs Go?
 

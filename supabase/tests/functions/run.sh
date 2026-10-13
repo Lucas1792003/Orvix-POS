@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Hermetic tests for supabase/functions/* (rotate-audit-log, weekly-sales-report,
-# email-sales-report, admin-2fa). The real function code runs under Deno with
+# Hermetic tests for supabase/functions/* (email-sales-report, admin-2fa,
+# phone-upload-token). The real function code runs under Deno with
 # fetch replaced in-process (Resend + PostgREST + GoTrue mocks) — no database,
 # no email provider, no server. See the cron/email audit §7 (private ops notes).
 #
