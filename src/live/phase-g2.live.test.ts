@@ -26,7 +26,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
-  Evidence, liveConfig, makeClient, randomPassword, runSql, runSqlFile, signUpUser, signedInClient,
+  Evidence, liveConfig, makeClient, randomPassword, runSql, runSqlFile, createAuthUser, signedInClient,
   uuid, type LiveConfig,
 } from "./liveHelpers";
 
@@ -91,8 +91,8 @@ describe.skipIf(!LIVE)("Phase G live checks for 074-076 (self-hosted stack)", ()
       casha: `qa-cashier-a-${ts}@qa.invalid`, cashb: `qa-cashier-b-${ts}@qa.invalid`,
     };
     const auth = {
-      admin: await signUpUser(cfg, e.admin, password), mgr: await signUpUser(cfg, e.mgr, password),
-      casha: await signUpUser(cfg, e.casha, password), cashb: await signUpUser(cfg, e.cashb, password),
+      admin: await createAuthUser(cfg, e.admin, password), mgr: await createAuthUser(cfg, e.mgr, password),
+      casha: await createAuthUser(cfg, e.casha, password), cashb: await createAuthUser(cfg, e.cashb, password),
     };
     const seed = runSqlFile(cfg, SEED_SQL, { ts, auth_admin: auth.admin, auth_mgr: auth.mgr, auth_casha: auth.casha, auth_cashb: auth.cashb }).trim();
     ev.info("setup A (seed.sql as supabase_admin)", seed);
@@ -106,7 +106,7 @@ describe.skipIf(!LIVE)("Phase G live checks for 074-076 (self-hosted stack)", ()
     B.orgId = `qa-g2b-org-${ts}`;
     B.adminId = `qa-g2b-admin-${ts}`;
     B.email = `qa-g2b-admin-${ts}@qa.invalid`;
-    const bAuth = await signUpUser(cfg, B.email, password);
+    const bAuth = await createAuthUser(cfg, B.email, password);
     const oi = await svc.from("organizations").insert({ id: B.orgId, name: `QA G2 Org B ${ts}` });
     if (oi.error) throw new Error(`service-role org insert: ${oi.error.message}`);
     const ui = await svc.from("users").insert({ id: B.adminId, name: "QA G2 B Admin", email: B.email, role: "ADMIN", org_id: B.orgId, auth_id: bAuth, is_active: true, created_at: new Date().toISOString() });
@@ -212,7 +212,7 @@ describe.skipIf(!LIVE)("Phase G live checks for 074-076 (self-hosted stack)", ()
     const refused = (r: Rpc) => r.error !== null && r.error.code === "42501" && /^SETUP_ALREADY_COMPLETED/.test(String(r.error.message)) && r.data === null;
     // (1) orphan auth user (GoTrue signup, no users row)
     const orphanEmail = `qa-g2-orphan-${ts}@qa.invalid`;
-    const orphanAuth = await signUpUser(cfg, orphanEmail, password);
+    const orphanAuth = await createAuthUser(cfg, orphanEmail, password);
     const orphan = await signedInClient(cfg, orphanEmail, password);
     others.push(orphan);
     const rOrphan = await rpc(orphan, "bootstrap_first_admin", {});

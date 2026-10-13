@@ -39,7 +39,7 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { Evidence, liveConfig, makeClient, randomPassword, runSql, signUpUser, signedInClient, type LiveConfig } from "./liveHelpers";
+import { Evidence, liveConfig, makeClient, randomPassword, runSql, createAuthUser, signedInClient, type LiveConfig } from "./liveHelpers";
 
 const LIVE = Boolean(process.env.LIVE_SUPABASE_URL);
 vi.setConfig({ testTimeout: 600_000, hookTimeout: 600_000 });
@@ -134,7 +134,7 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     o.orgId = `qa-g4${o.key}-org-${ts}`;
     o.adminId = `qa-g4${o.key}-admin-${ts}`;
     o.email = `qa-g4${o.key}-admin-${ts}@qa.invalid`;
-    o.adminAuth = await signUpUser(cfg, o.email, password);
+    o.adminAuth = await createAuthUser(cfg, o.email, password);
     const oi = await svc.from("organizations").insert({ id: o.orgId, name: `QA G4 Org ${o.key.toUpperCase()} ${ts}` }).select("id");
     if (oi.error) throw new Error(`org insert ${o.orgId}: ${oi.error.message}`);
     const ui = await svc.from("users").insert({ id: o.adminId, name: `QA G4 ${o.key.toUpperCase()} Admin`, email: o.email, role: "ADMIN", org_id: o.orgId, auth_id: o.adminAuth, is_active: true, created_at: new Date().toISOString() });

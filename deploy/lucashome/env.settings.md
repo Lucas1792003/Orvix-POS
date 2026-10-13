@@ -14,7 +14,7 @@ which are never recorded anywhere but `.env`.
 | `API_EXTERNAL_URL` | `https://lucashome.tail8a86e4.ts.net/auth/v1` | must include `/auth/v1` (upstream 0.7.0 change) |
 | `SITE_URL` | `https://lucashome.tail8a86e4.ts.net` | auth redirects |
 | `JWT_EXPIRY` | `3600` | hosted parity (decision A6 pending) |
-| `DISABLE_SIGNUP` | `false` | app creates staff via `auth.signUp` |
+| `DISABLE_SIGNUP` | `false` (planned `true`) | was needed while the app created staff via `auth.signUp`; since the `staff-admin` function (Phase F, [staff-creation.md](../../docs/selfhost-migration/phase-f/staff-creation.md)) the app no longer signs up — set `true` after that function is deployed (not done yet, 2026-10-13) |
 | `ENABLE_EMAIL_SIGNUP` | `true` | — |
 | `ENABLE_EMAIL_AUTOCONFIRM` | `true` | hosted parity |
 | `ENABLE_PHONE_SIGNUP` / `ENABLE_PHONE_AUTOCONFIRM` | `false` / `false` | no SMS provider |

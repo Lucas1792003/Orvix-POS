@@ -55,14 +55,26 @@ export function makeClient(cfg: LiveConfig, key: string): SupabaseClient {
   });
 }
 
-export async function signUpUser(cfg: LiveConfig, email: string, password: string): Promise<string> {
-  const client = makeClient(cfg, cfg.anonKey);
-  const { data, error } = await client.auth.signUp({ email, password });
-  if (error) throw new Error(`signup ${email} failed: ${error.message}`);
+/**
+ * Create a confirmed QA auth account through the GoTrue ADMIN API (service
+ * key). The self-hosted stack runs with DISABLE_SIGNUP=true (Phase F,
+ * docs/selfhost-migration/phase-f/staff-creation.md), so the public sign-up
+ * endpoint the suites used before is refused. Returns the auth user id.
+ */
+export async function createAuthUser(cfg: LiveConfig, email: string, password: string): Promise<string> {
+  const admin = makeClient(cfg, cfg.serviceKey);
+  const { data, error } = await admin.auth.admin.createUser({ email, password, email_confirm: true });
+  if (error) throw new Error(`create auth user ${email} failed: ${error.message}`);
   const id = data.user?.id;
-  if (!id) throw new Error(`signup ${email} returned no user id`);
-  await client.auth.signOut().catch(() => undefined);
+  if (!id) throw new Error(`create auth user ${email} returned no user id`);
   return id;
+}
+
+/** Delete a QA auth account through the GoTrue admin API (cleanup). */
+export async function deleteAuthUser(cfg: LiveConfig, authId: string): Promise<void> {
+  const admin = makeClient(cfg, cfg.serviceKey);
+  const { error } = await admin.auth.admin.deleteUser(authId);
+  if (error && !/not found/i.test(error.message)) throw new Error(`delete auth user ${authId} failed: ${error.message}`);
 }
 
 export async function signedInClient(cfg: LiveConfig, email: string, password: string): Promise<SupabaseClient> {

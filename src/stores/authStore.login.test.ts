@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Phase G regression coverage — docs/selfhost-migration/phase-g/login-signup-fix.md.
 //
 // login() must ONLY sign in. The previous implementation fell through to
-// supabase.auth.signUp() after any failed password sign-in (to serve the
+// the client's public sign-up call after any failed password sign-in (to serve the
 // "very first user" case it could not detect anonymously), which is how a
 // probe pointed at the hosted project created an orphan auth user there
 // (evidence/G9/2026-10-12-phase-e.md "Incident"). Now a failed sign-in

@@ -3,6 +3,7 @@ import { supabase } from "../lib/supabase";
 import { isNetworkError, OFFLINE_AUTHORIZATION_ERROR } from "../lib/errors";
 import { localDb, SYNC_STATE_KEYS, type CachedAuthUser } from "../lib/localDb";
 import { setActiveAuthId } from "./authCache";
+import { createBootstrapAccount } from "../lib/staffAdmin";
 
 export interface LoginResult {
   error: string | null;
@@ -63,14 +64,15 @@ interface AuthState {
   isAuthLoading: boolean;
   /** Password sign-in ONLY. Never creates an auth account: a failed sign-in
    *  returns GoTrue's message as-is. (Phase G — the previous implicit
-   *  signUp() fallback created an orphan user on the hosted project.) */
+   *  sign-up fallback created an orphan user on the hosted project.) */
   login: (email: string, password: string) => Promise<LoginResult>;
   /** The explicit first-admin bootstrap behind the /setup page: refuses
    *  unless app_setup_needed() says the install has no users, then creates
    *  (or signs in to) the auth account and calls bootstrap_first_admin()
    *  (migration 076), which creates the first organization + ADMIN row
-   *  atomically server-side. The only place the app ever calls
-   *  auth.signUp() for itself. */
+   *  atomically server-side. The auth account itself is created by the
+   *  staff-admin Edge Function (bootstrap_account) — the app never uses
+   *  GoTrue's public sign-up, so the backend can disable it. */
   bootstrapFirstAdmin: (email: string, password: string) => Promise<LoginResult>;
   logout: () => Promise<void>;
   restoreSession: () => Promise<void>;
@@ -443,7 +445,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
   login: async (email, password) => {
     // Sign in, and nothing else. A failed password sign-in is reported with
     // GoTrue's own message and the call ends here — the previous "maybe this
-    // is the very first user" signUp() fallback is gone (Phase G: it created
+    // is the very first user" sign-up fallback is gone (Phase G: it created
     // an orphan auth user on the hosted project; see
     // docs/selfhost-migration/phase-g/login-signup-fix.md). First-time setup
     // is the explicit bootstrapFirstAdmin() action behind /setup.
@@ -521,13 +523,16 @@ export const useAuthStore = create<AuthState>()((set) => ({
 
     // 2. The auth account. Sign in first (the account may already exist —
     //    e.g. created through the auth admin API, or an earlier attempt that
-    //    stopped before the users row); only when that fails, create it.
-    //    This is the ONLY place the app calls auth.signUp() for itself, and
-    //    it is reached solely through the explicit /setup action.
+    //    stopped before the users row); only when that fails, ask the server
+    //    to create it: the staff-admin function (bootstrap_account) creates a
+    //    confirmed account with the GoTrue admin API, and only while
+    //    app_setup_needed() is true and no organization exists. The app never
+    //    calls GoTrue's public sign-up endpoint (it is disabled on the
+    //    self-hosted backend).
     let authResult = await supabase.auth.signInWithPassword({ email, password });
     if (authResult.error) {
-      const signUp = await supabase.auth.signUp({ email, password });
-      if (signUp.error) return { error: signUp.error.message };
+      const createError = await createBootstrapAccount(email, password);
+      if (createError) return { error: createError };
       authResult = await supabase.auth.signInWithPassword({ email, password });
       if (authResult.error) return { error: authResult.error.message };
     }

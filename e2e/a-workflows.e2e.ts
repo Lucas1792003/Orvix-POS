@@ -334,19 +334,22 @@ test("A6 staff management: create a QA cashier via the Users page -> public.user
   const staffEmail = `qa-staff-ui-${st.ts}-${Date.now()}@qa.invalid`;
   await A.page.getByPlaceholder("Full name").fill("QA Staff UI");
   await A.page.getByPlaceholder("staff@yourcompany.com").fill(staffEmail);
-  await A.page.getByPlaceholder("Password (min 6 characters)").fill(pw);
+  await A.page.getByPlaceholder("Password (min 8 characters)").fill(pw);
   await A.page.locator("select").nth(1).selectOption("CASHIER");
   await A.page.locator("select").nth(2).selectOption(ids.shop);
   await A.page.getByRole("button", { name: "Create account" }).click();
   await expect(A.page.getByText("created. They can now log in with")).toBeVisible({ timeout: 30_000 });
-  const staffId = `user-${staffEmail.replace(/[^a-z0-9]/gi, "-").toLowerCase()}`;
-  const staff = await row("users", { id: staffId });
+  // Phase F: created server-side by the staff-admin function; the row id is
+  // derived from the request's idempotency key (user-<32 hex>).
+  const staff = await row("users", { email: staffEmail.toLowerCase() });
+  const staffId: string = staff.id;
+  expect(staffId).toMatch(/^user-[0-9a-f]{32}$/);
   expect(staff).toMatchObject({ org_id: ids.org, role: "CASHIER", shop_id: ids.shop, is_active: true, email: staffEmail });
   expect(staff.auth_id).toBeTruthy();
   const authRow = runSql(`SELECT count(*) FROM auth.users WHERE id = '${staff.auth_id}' AND email = '${staffEmail}';`).trim();
   expect(authRow).toBe("1");
   expect(await count("audit_logs", { entity_id: staffId, action_type: "USER_CREATED", actor_id: ids.admin })).toBe(1);
-  // the admin session survived the sign-up detour (still ADMIN in the shell)
+  // the admin session is untouched (no client-side sign-up any more; still ADMIN in the shell)
   await expect(A.page.locator("aside.sidebar .user-role")).toHaveText("ADMIN");
   // and the new cashier can really sign in
   const staffClient = await userClient(staffEmail, pw);
@@ -354,7 +357,7 @@ test("A6 staff management: create a QA cashier via the Users page -> public.user
   expect(me.data).toMatchObject({ id: staffId, org_id: ids.org });
   await staffClient.auth.signOut();
   record("A", "staff creation via Users page", "PASS",
-    `created ${staffId}: org_id=${staff.org_id} role=CASHIER shop=${staff.shop_id} auth_id linked (auth.users row=1); USER_CREATED audit=1; admin session intact after sign-up detour; new cashier signs in and resolves own row`);
+    `created ${staffId}: org_id=${staff.org_id} role=CASHIER shop=${staff.shop_id} auth_id linked (auth.users row=1); USER_CREATED audit=1; admin session intact (server-side creation); new cashier signs in and resolves own row`);
 });
 
 test("A7 Realtime across terminals: a sale on A changes the stock shown on B without reload", async () => {

@@ -1,6 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useDataStore } from "../stores/dataStore";
-import { supabase } from "../lib/supabase";
+import { newIdempotencyKey } from "../stores/data/idempotentRpc";
+import { STAFF_PASSWORD_MIN, StaffAdminError } from "../lib/staffAdmin";
+import { buildCreateStaffInput } from "../features/admin/staffForm";
 import type { Role } from "../types";
 import { PageHeader } from "../components/layout/PageHeader";
 import { Card } from "../components/ui/Card";
@@ -12,7 +14,7 @@ import { mapUserFormError, USER_FORM_MESSAGES } from "../features/admin/userForm
 export const UsersPage = () => {
   const users = useDataStore((state) => state.users);
   const shops = useDataStore((state) => state.shops);
-  const addUser = useDataStore((state) => state.addUser);
+  const createStaffUser = useDataStore((state) => state.createStaffUser);
   const updateUser = useDataStore((state) => state.updateUser);
   const deactivateUser = useDataStore((state) => state.deactivateUser);
 
@@ -24,6 +26,11 @@ export const UsersPage = () => {
   const [shopId, setShopId] = useState<string | undefined>(undefined);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  // One idempotency key per create attempt; cleared whenever the form changes.
+  const submitKey = useRef<string | null>(null);
+  useEffect(() => {
+    submitKey.current = null;
+  }, [name, email, password, role, shopId]);
 
   // Pre-compute the maps the form needs to render correctly:
   //   * existingAdmin       — if present, ADMIN cannot be picked as a new role
@@ -144,56 +151,32 @@ export const UsersPage = () => {
       return;
     }
 
-    // Create new user
-    if (!email.trim()) { setFeedback({ type: "error", message: "Email is required." }); return; }
-    if (password.length < 6) { setFeedback({ type: "error", message: "Password must be at least 6 characters." }); return; }
-
-    const alreadyExists = users.some((u) => u.email === email.trim());
-    if (alreadyExists) { setFeedback({ type: "error", message: "A user with this email already exists." }); return; }
+    // Create new user. The auth account AND the users row are created
+    // server-side by the staff-admin Edge Function (GoTrue admin API +
+    // create_app_user() as this admin). The browser never signs up, so the
+    // admin's session is never swapped out and the backend can keep public
+    // sign-up disabled. The idempotency key stays the same until the form
+    // changes, so a retry after a lost response returns the row the first
+    // attempt created instead of failing as a duplicate.
+    if (!submitKey.current) submitKey.current = newIdempotencyKey();
+    const request = buildCreateStaffInput(
+      { name, email, password, role, shopId: requiresShop ? shopId : undefined },
+      users.map((u) => u.email),
+      submitKey.current,
+    );
+    if ("error" in request) { setFeedback({ type: "error", message: request.error }); return; }
 
     setIsSubmitting(true);
     setFeedback(null);
-
-    // Preserve the admin's session — supabase.auth.signUp() signs the browser
-    // in as the new user, which would make the users-table insert run as the
-    // new (unprivileged) user and fail RLS.
-    const { data: { session: adminSession } } = await supabase.auth.getSession();
-
-    // Create the Supabase Auth account.
-    const signUpResult = await supabase.auth.signUp({
-      email: email.trim(),
-      password,
-    });
-
-    if (signUpResult.error && !signUpResult.error.message.includes("already registered")) {
-      setIsSubmitting(false);
-      setFeedback({ type: "error", message: `Auth error: ${signUpResult.error.message}` });
-      return;
-    }
-
-    // Restore the admin session so the users-table insert runs as the admin.
-    if (adminSession) {
-      await supabase.auth.setSession({
-        access_token: adminSession.access_token,
-        refresh_token: adminSession.refresh_token,
-      });
-    }
-
-    // Create user record in our users table, linked to the new auth account.
-    const newAuthId = signUpResult.data.user?.id;
-    const userId = `user-${email.trim().replace(/[^a-z0-9]/gi, "-").toLowerCase()}`;
     try {
-      await addUser({
-        id: userId,
-        name: name.trim(),
-        email: email.trim().toLowerCase(),
-        role,
-        shopId: requiresShop ? shopId : undefined,
-        authId: newAuthId,
-      });
+      await createStaffUser(request.input);
     } catch (error) {
       setIsSubmitting(false);
-      setFeedback({ type: "error", message: mapUserFormError(error) });
+      // The server's own refusals (permission, verification, duplicate email,
+      // rate limit) are written for the admin; database business-rule errors
+      // (they carry a Postgres code) go through the Users form mapping.
+      const message = error instanceof StaffAdminError && !error.code ? error.message : mapUserFormError(error);
+      setFeedback({ type: "error", message });
       // Modal stays open on failure so the operator can fix the input
       // (e.g. pick a different shop) and resubmit without re-entering everything.
       return;
@@ -294,7 +277,7 @@ export const UsersPage = () => {
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Password (min 6 characters)"
+                placeholder={`Password (min ${STAFF_PASSWORD_MIN} characters)`}
                 autoComplete="new-password"
               />
             </>
@@ -365,7 +348,7 @@ export const UsersPage = () => {
 
           {!editingId && (
             <div className="rounded-2xl border border-dashed border-slate-200 p-3 text-xs text-slate-400">
-              Make sure email confirmation is disabled in Supabase → Auth → Settings, otherwise staff need to confirm their email before logging in.
+              The account is created on the server and is ready to use immediately — no confirmation email is sent. Share the password with the staff member directly.
             </div>
           )}
         </div>
