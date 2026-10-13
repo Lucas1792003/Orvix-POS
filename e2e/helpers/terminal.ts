@@ -190,6 +190,9 @@ export class Terminal {
     void _ignored;
     const browser = await chromium.launch({ headless: options.headless ?? true });
     const context = await browser.newContext({ ...iphone });
+    // The phone page is bilingual since 081's page change and follows the app's
+    // persisted language (default Myanmar); the specs assert the English text.
+    await context.addInitScript(LANG_INIT);
     const page = await context.newPage();
     return new Terminal("browser", page, context, undefined, browser);
   }
