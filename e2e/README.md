@@ -14,7 +14,8 @@ export E2E_SERVICE_KEY="$(ssh -o BatchMode=yes lucashome 'grep "^SERVICE_ROLE_KE
 unset ELECTRON_RUN_AS_NODE          # set by some shells; it turns the Electron binary into plain Node
 
 npx playwright install chromium     # once
-npm run e2e                         # all specs, in order: a-workflows, b-failures, c-offline-auth, d-phone-upload, e-consistency-gate
+npm run e2e                         # all specs, in order: a-workflows, b-failures, c-offline-auth, d-phone-upload, e-consistency-gate, f-queue-export
+npx playwright test e2e/f-queue-export.e2e.ts  # only the queue export + recovery replay spec (docs/selfhost-migration/phase-f/queue-export.md)
 npx playwright test e2e/d-phone-upload.e2e.ts   # only the phone-upload spec (docs/selfhost-migration/phase-g/phone-upload-jit.md)
 E2E_PHONE_FN=local npx playwright test e2e/d-phone-upload.e2e.ts   # same, function from this repo in a local container (needs Docker)
 npm run e2e:cleanup                 # cleanup.sql -> audit_purge.sql -> verify_clean.sql (+ storage file count)
@@ -52,6 +53,7 @@ on purpose: both would write the anon key / QA bearer tokens to disk
 | `d-phone-upload.e2e.ts` | phone QR upload with the just-in-time token (`phone-upload-token`), Electron desktop + iPhone-profile Chromium phone, real timing (30/65/120/300 s, stale token, double tap, race, lost response, expired, cancelled); each success also saves the product and checks `products.image_url` = the server-derived URL (080: `public.app_config` origin + `/storage/v1/object/public/product-images/<session path>`); ~14 min |
 | `helpers/edgeRuntime.ts` | `E2E_PHONE_FN=local` only: runs `supabase/functions/phone-upload-token` in a disposable local `supabase/edge-runtime:v1.76.2` container (127.0.0.1 only, keys passed as env names only) and the phone's function request is routed to it |
 | `helpers/saleLedger.ts` (+ `.test.ts`) | duplicate/lost-sale detection used by the consistency gate: sale ↔ committed `complete_sale` idempotency key (exactly one each way), one client operation (cashier + shift + client event time) → one sale, receipt numbers unique per shop, and the terminals' own request ledger (one operation → one key) |
+| `f-queue-export.e2e.ts` | Phase F: offline queue (shift opened offline + 3 sales) survives an offline restart, is exported through the UI (save dialog stubbed in the main process) and checked (encrypted, every entry, no secrets, queue byte-identical); the real recovery CLI replays it into the QA org (target rules, dry run, replay x3 → no duplicates) while the till drains the same keys after a B13-style outage; consistency gate. `E2E_QX_PASSPHRASE` fixes the export passphrase (else random) |
 | `e-consistency-gate.e2e.ts` | proves the gate: two distinct identical-basket queued sales PASS; a forged second sale row and one UI operation re-sent under a new key FAIL; both forgeries reverted |
 
 Hard guards: every terminal aborts and records any request to `*.supabase.co`

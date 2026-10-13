@@ -296,6 +296,64 @@ ipcMain.handle("updates:install", () => {
 ipcMain.handle("app:get-version", () => app.getVersion());
 
 // ------------------------------------------------------------------
+// Pending-queue export (src/lib/queueExport/, docs/selfhost-migration/
+// phase-f/queue-export.md). The renderer encrypts the export itself and
+// sends only the finished envelope string; this handler is the narrow
+// write path: it accepts nothing but an encrypted queue-export envelope,
+// lets the user pick the location in the native save dialog, and writes
+// the file (owner-only permissions, temp file + rename). The renderer never
+// learns anything about the file system beyond the path the user chose.
+// ------------------------------------------------------------------
+const QUEUE_EXPORT_MAX_BYTES = 64 * 1024 * 1024;
+
+function isEncryptedQueueExport(contents) {
+  if (typeof contents !== "string" || contents.length === 0 || contents.length > QUEUE_EXPORT_MAX_BYTES) return false;
+  let env;
+  try {
+    env = JSON.parse(contents);
+  } catch {
+    return false;
+  }
+  return Boolean(env) && typeof env === "object" && !Array.isArray(env)
+    && env.format === "shwephala-queue-export"
+    && env.encrypted === true
+    && typeof env.ciphertext === "string" && env.ciphertext.length > 0
+    && env.kdf && typeof env.kdf.salt === "string"
+    && env.cipher && typeof env.cipher.iv === "string"
+    // plaintext must never be written: no decrypted fields at the top level
+    && !("entries" in env) && !("payload" in env);
+}
+
+function safeExportFileName(name) {
+  const base = path.basename(typeof name === "string" ? name : "").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
+  return base.endsWith(".spqx") ? base : `${base || "pending-queue"}.spqx`;
+}
+
+ipcMain.handle("queue-export:save", async (event, request) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: "Not allowed" };
+  const contents = request && request.contents;
+  if (!isEncryptedQueueExport(contents)) return { ok: false, error: "Refusing to write: not an encrypted queue export" };
+  // Looked up at call time (not destructured) so automated tests can stub it.
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: "Save pending transactions export",
+    defaultPath: path.join(app.getPath("documents"), safeExportFileName(request.defaultFileName)),
+    filters: [{ name: "Shwe Pha La queue export", extensions: ["spqx"] }],
+    properties: ["createDirectory", "showOverwriteConfirmation"],
+  });
+  if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+  const target = result.filePath;
+  const tmp = `${target}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, contents, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(tmp, target);
+    return { ok: true, filePath: target };
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* nothing to remove */ }
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+// ------------------------------------------------------------------
 // Receipt printing: silent-print to a system printer (no dialog, no
 // --kiosk-printing launch flag needed — see docs/06-ui-printing-hardware.md
 // for the browser-only workaround this replaces). Most ESC/POS thermal
