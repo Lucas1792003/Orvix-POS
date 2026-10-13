@@ -310,14 +310,23 @@ only gains the line `email tier: disabled`.
 
 | Script | What | Cadence (commented in `crontab.lucario`) |
 |---|---|---|
-| `email-archive.sh` | weekly encrypted recovery archive (dumps, roles, storage files, functions, config, manifest) → gpg to the owner's public key → 15 MiB parts → one mail per part; resume-aware, idempotent per week; `--selftest` sends synthetic content only | Sun 04:30 UTC (+06:30 resume) |
+| `email-archive.sh` | weekly encrypted recovery archive (dumps, roles, storage files, functions, config, manifest) → gpg to the owner's public key → 15 MiB parts → one mail per part; resume-aware, idempotent per week; `--selftest [--selftest-parts N] [--selftest-mib M]` sends synthetic content only (single part or forced multipart) | Sun 04:30 UTC (+06:30 resume) |
 | `email-secrets.sh` | separate gpg-encrypted `.env` + pgsodium key + backup config; kept locally, mailed only in `EMAIL_SECRETS_MODE=email` and only on change | Sun 04:40 UTC |
 | `email-report.sh` (+ `.sql`, `.py`) | daily per-organization business report (read-only SQL) with a backup-health block | 01:00 UTC (+03:00 retry) |
 | `email-status.sh` | email-tier health for `backup-status.sh` | embedded |
 | `email-unpack.py` | owner side: reassemble + verify the parts from `.eml`/mbox | — |
+| `gmail-oauth-mint.py` | owner's Mac: mint the `gmail.send`-only OAuth credential (`gmail-oauth.json`, 0600) for `MAIL_TRANSPORT=gmail-api`; on the server `--check FILE` does one token refresh and prints only scope/expiry | by hand |
 | `email-archive.sh --no-send [--output-dir DIR]` | drills/tests: build + encrypt + split exactly like a real run, never send or alert, not gated by `EMAIL_ENABLED`, status job `email-archive-nosend` | by hand (`dr-drill.sh`) |
 
-Tests: `tests/email/run.sh` (Docker, synthetic data only; 210 checks, incl. T15 `--no-send`).
+Transports (`MAIL_TRANSPORT`): `gmail-api` (Gmail API `users.messages.send`, OAuth scope
+`gmail.send` only, from a dedicated sender Gmail; recommended without a domain), `resend`, `smtp`.
+Credentials live in `/srv/supabase/backup/credentials/` (0600, owned by the backup user; refused
+otherwise) and never appear in argv, logs or status. A broken Gmail token fails closed with
+`gmail oauth token invalid — owner must re-mint`; no alert can travel that path, so a missing Sunday
+archive / daily report and the `backup-status.sh` PROBLEM line are the dead-man signals.
+
+Tests: `tests/email/run.sh` (Docker, synthetic data only; 340 checks: 210 for T1–T15 incl. `--no-send`,
+130 for T16 Gmail API against a local mock of Google; `PHF_PREFIX=phf-gm` names the containers).
 
 ## Known limitations / open items
 

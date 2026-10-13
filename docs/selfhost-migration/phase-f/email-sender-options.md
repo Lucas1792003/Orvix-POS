@@ -184,7 +184,7 @@ No send-only credential prevents this. Mitigation: the owner watches the weekly 
 - Google explicitly allows personal-use unverified apps.
 - Cost: a one-time console setup, plus re-minting the token after any password change on the sender account.
 
-**Fallback: Gmail SMTP with an app password on the same sender account.**
+**Fallback: Gmail SMTP with an app password on the same sender account.** *(Rejected by the owner on 2026-10-13: no Gmail app passwords; see §5.2.)*
 - Use it if the OAuth setup is too much for the owner, or while a token is being re-minted.
 - It's simpler (a standard SMTP client such as `msmtp`). The credential reaches only the sender mailbox, which holds only copies of what the server already has.
 - Accept Google's "not recommended" stance and possible future deprecation.
@@ -215,6 +215,14 @@ The engineer never sees the values. The owner types them; the engineer checks on
 3. **Backup Gmail filter.** Add one in the backup Gmail: `from:(shwephala.backup.sender@gmail.com)` → Never send to Spam, apply label `backups`. Optionally forward `subject:(daily summary)` to the owner's personal inbox.
 
 ### 5.1 Primary: Gmail API with the `gmail.send` scope
+
+> **Superseded 2026-10-13 by the implementation.** The transport is built (`MAIL_TRANSPORT=gmail-api`
+> in `email-lib.sh`) together with a stdlib-only mint helper (`deploy/lucashome/backup/gmail-oauth-mint.py`,
+> no `google-auth-oauthlib`). The authoritative owner steps, paths and file modes are in
+> [email-backup-design.md §10](email-backup-design.md#10-owner-approval-enablement-checklist-gmail-api):
+> the credential lives at `/srv/supabase/backup/credentials/gmail-oauth.json`, mode **0600, owned by the
+> backup (SSH) user** (the jobs refuse anything else), not under `/etc/shwephala`. The steps below are
+> kept as research notes only.
 
 **Create the OAuth client.** Signed in as the **sender** Gmail at console.cloud.google.com:
 
@@ -254,6 +262,10 @@ The engineer never sees the values. The owner types them; the engineer checks on
 11. **Re-mint** (steps 5–9) after any password change on the sender account, or if the token goes unused for 6 months.
 
 ### 5.2 Fallback: Gmail SMTP with an app password
+
+> **Not allowed (owner decision, 2026-10-13): Gmail app passwords are never used.** Kept as research
+> notes only. Alternatives that are implemented: Resend (`MAIL_TRANSPORT=resend`) and a send-only
+> SMTP relay credential (`MAIL_TRANSPORT=smtp`).
 
 1. Signed in as the **sender** Gmail: myaccount.google.com → Security → 2-Step Verification → **App passwords** → name `shwephala-server` → copy the 16 characters. Don't paste them anywhere else.
 2. On the server, as the owner. The value is typed, never echoed, and never in shell history:

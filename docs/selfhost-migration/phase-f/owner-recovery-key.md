@@ -1,6 +1,6 @@
 # Owner instructions · The backup recovery key
 
-For the owner only. Written 2026-10-13. Technical detail: [email-backup-design.md §10](email-backup-design.md#10-owner-approval-enablement-checklist), restore procedure: [restore-from-email.md](restore-from-email.md).
+For the owner only. Written 2026-10-13. Technical detail: [email-backup-design.md §10](email-backup-design.md#10-owner-approval-enablement-checklist-gmail-api), restore procedure: [restore-from-email.md](restore-from-email.md).
 
 ## What this key is
 The weekly recovery archive is encrypted to **your** OpenPGP key. The server holds only the **public** half, which can lock archives but never open them. Only the **private** half, plus its passphrase, can open an archive. Without it, every emailed backup is useless — including to you.
@@ -63,10 +63,10 @@ The revocation certificate is in `$(gpgconf --list-dirs homedir)/openpgp-revocs.
 Also record, in the password manager: the backup mailbox login and its 2-step recovery codes.
 
 ## 3. Give the server the public key
-Only `owner-backup.pub.asc` and the fingerprint. You can paste the fingerprint to the engineer; it is not secret. Copy the file yourself (commands in design §10 step 7) or hand the `.pub.asc` file to the engineer.
+Only `owner-backup.pub.asc` and the fingerprint. You can paste the fingerprint to the engineer; it is not secret. Copy the file yourself (commands in design §10 step 11) or hand the `.pub.asc` file to the engineer.
 
 ## 4. Test it once (before any real archive)
-After the synthetic self-test mail arrives (design §10 step 11): download it, unpack, decrypt with your key, and confirm the test text is readable. This proves you can open archives **before** you need to.
+After the synthetic self-test mails arrive (design §10 steps 16–20: one single-part and one multipart selftest): download them, unpack, decrypt with your key, and confirm the test text is readable. This proves you can open archives **before** you need to.
 Repeat a decrypt test every 3 months (restore runbook §5) so you still remember the passphrase.
 
 ## 5. If the server is completely lost

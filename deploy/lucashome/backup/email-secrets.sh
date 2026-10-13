@@ -4,8 +4,8 @@
 #   db-config/                     pgsodium_root.key (+ conf.d) from the db-config volume (docker mode)
 #   backup/backup.env              backup configuration
 #   backup/report-targets.conf     daily-report routing (if present)
-# NOT included: the mail credential files (RESEND_KEY_FILE / SMTP_NETRC_FILE) — a rebuilt host gets a
-# fresh send-only key from the owner.
+# NOT included: the mail credential files (RESEND_KEY_FILE / SMTP_NETRC_FILE / GMAIL_OAUTH_FILE) — a
+# rebuilt host gets a fresh send-only credential from the owner.
 #
 # tar | gpg (owner PUBLIC key, same as the archive) -> $SECRETS_DIR/<ts>.tar.gpg (0600). Plaintext is
 # never written: tar streams into gpg (docker mode: tar runs in a throwaway container with every
@@ -54,7 +54,7 @@ cleanup() {
     rm -f -- "$TMP"
     log "FAILED (rc=$rc)"
     if (( ! DRY_RUN )); then
-      status_update email-secrets "$(jq -nc --arg t "$(utc_now)" --arg m "exit $rc, see $LOG_FILE" '{last_run:$t,last_result:"fail",message:$m}')" || true
+      status_update email-secrets "$(jq -nc --arg t "$(utc_now)" --arg m "exit $rc, see $LOG_FILE${EMAIL_FAIL_REASON:+: $EMAIL_FAIL_REASON}" '{last_run:$t,last_result:"fail",message:$m}')" || true
       mail_alert email-secrets "secrets file job failed (exit $rc)"
     fi
   fi

@@ -28,7 +28,8 @@ set -euo pipefail
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--dry-run] [--force] [--build-only] [--no-send] [--output-dir DIR] [--week YYYY-Www] [--no-prune] [--help]
+Usage: $(basename "$0") [--dry-run] [--force] [--build-only] [--no-send] [--output-dir DIR] [--week YYYY-Www] [--no-prune]
+       $(basename "$0") --selftest [--selftest-parts N] [--selftest-mib M]
   --dry-run      check configuration and list what would be archived; build and send nothing
   --force        build and send a NEW archive even if this week's was already sent (id gets a -r<ts> suffix)
   --build-only   build + encrypt + split, do not send (state stays "built"; a later run sends it)
@@ -42,15 +43,21 @@ Usage: $(basename "$0") [--dry-run] [--force] [--build-only] [--no-send] [--outp
   --selftest     end-to-end check with SYNTHETIC content only (random bytes + a note; no database, no
                  files): encrypt to the owner key, mail it, record job "email-selftest". The owner then
                  unpacks + decrypts it on their device. Use for the first send and after key changes.
+  --selftest-parts N  selftest only: split the synthetic archive into exactly N parts (1-$ARCHIVE_MAX_PARTS)
+                 so multipart delivery can be tested with zero business data (default 1)
+  --selftest-mib M    selftest only: M MiB of random bytes as payload (default 64 KiB for 1 part,
+                 256 KiB per part otherwise); each part must stay <= ARCHIVE_PART_BYTES
 Transport: $MAIL_TRANSPORT  to: ${ARCHIVE_MAIL_TO:-<unset>}  parts: ${ARCHIVE_PART_BYTES} bytes, max $ARCHIVE_MAX_PARTS
 EOF
 }
 
-FORCE=0; BUILD_ONLY=0; PRUNE=1; WEEK=""; SELFTEST=0; NO_SEND=0; OUTPUT_DIR=""
+FORCE=0; BUILD_ONLY=0; PRUNE=1; WEEK=""; SELFTEST=0; NO_SEND=0; OUTPUT_DIR=""; SELFTEST_PARTS=""; SELFTEST_MIB=""
 while (( $# )); do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
     --selftest) SELFTEST=1 ;;
+    --selftest-parts) SELFTEST_PARTS="${2:-}"; shift ;;
+    --selftest-mib) SELFTEST_MIB="${2:-}"; shift ;;
     --force) FORCE=1 ;;
     --build-only) BUILD_ONLY=1 ;;
     --no-send) NO_SEND=1; BUILD_ONLY=1 ;;
@@ -69,6 +76,14 @@ if [[ -n "$OUTPUT_DIR" ]]; then
   ARCHIVE_DIR="$OUTPUT_DIR"; ARCHIVE_TMP_DIR="$OUTPUT_DIR/.tmp"
 fi
 (( NO_SEND && SELFTEST )) && die "--no-send and --selftest are mutually exclusive"
+if [[ -n "$SELFTEST_PARTS$SELFTEST_MIB" ]]; then
+  (( SELFTEST )) || die "--selftest-parts / --selftest-mib need --selftest"
+  [[ -z "$SELFTEST_PARTS" ]] || { [[ "$SELFTEST_PARTS" =~ ^[0-9]+$ ]] && (( SELFTEST_PARTS >= 1 && SELFTEST_PARTS <= ARCHIVE_MAX_PARTS )); } \
+    || die "--selftest-parts must be 1-$ARCHIVE_MAX_PARTS"
+  [[ -z "$SELFTEST_MIB" ]] || { [[ "$SELFTEST_MIB" =~ ^[0-9]+$ ]] && (( SELFTEST_MIB >= 1 && SELFTEST_MIB <= 200 )); } \
+    || die "--selftest-mib must be 1-200"
+fi
+: "${SELFTEST_PARTS:=1}"
 # shellcheck disable=SC2034  # read by backup-lib.sh (log prefix, lock + log file names)
 JOB_NAME=email-archive
 # shellcheck disable=SC2034
@@ -112,7 +127,7 @@ cleanup() {
   [[ -d "$BUILD.partial" ]] && rm -rf -- "$BUILD.partial"
   if (( rc != 0 )); then
     log "FAILED in phase '$PHASE' (rc=$rc) after $(( SECONDS - START ))s"
-    fail_record "failed during $PHASE (exit $rc)"
+    fail_record "failed during $PHASE (exit $rc)${EMAIL_FAIL_REASON:+: $EMAIL_FAIL_REASON}"
   fi
   exit "$rc"
 }
@@ -167,7 +182,9 @@ build_archive() {
 
   if (( SELFTEST )); then
   PHASE="selftest payload"
-  head -c 65536 /dev/urandom >"$P/files/random.bin"
+  local rnd=65536
+  if [[ -n "$SELFTEST_MIB" ]]; then rnd=$(( SELFTEST_MIB * 1048576 )); elif (( SELFTEST_PARTS > 1 )); then rnd=$(( SELFTEST_PARTS * 262144 )); fi
+  head -c "$rnd" /dev/urandom >"$P/files/random.bin"
   printf 'Self-test archive %s, created %s (UTC).\nSynthetic content only: random bytes, no business data.\nIf you can read this after decrypting, the owner key, the mail path and the unpack tool all work.\n' \
     "$ID" "$(utc_now)" >"$P/SELFTEST.txt"
   echo '{"selftest":true}' >"$P/db/counts.json"
@@ -243,7 +260,14 @@ build_archive() {
   total="$(stat -c %s "$enc")"; total_sha="$(sha256sum "$enc" | cut -d' ' -f1)"
 
   PHASE="split"
+  if (( SELFTEST )); then
+    # exactly SELFTEST_PARTS parts: part size = ceil(total / N) (payload >= 64 KiB per part, so N is met)
+    local want=$(( (total + SELFTEST_PARTS - 1) / SELFTEST_PARTS ))
+    (( want <= ARCHIVE_PART_BYTES )) || die "selftest parts of $want bytes would exceed ARCHIVE_PART_BYTES=$ARCHIVE_PART_BYTES; use more parts or fewer MiB"
+    ARCHIVE_PART_BYTES=$want
+  fi
   local nparts=$(( (total + ARCHIVE_PART_BYTES - 1) / ARCHIVE_PART_BYTES ))
+  (( ! SELFTEST || nparts == SELFTEST_PARTS )) || die "selftest split gives $nparts parts, expected $SELFTEST_PARTS"
   if (( nparts > ARCHIVE_MAX_PARTS )); then
     die "archive is $(human "$total") = $nparts parts of $(human "$ARCHIVE_PART_BYTES"), over ARCHIVE_MAX_PARTS=$ARCHIVE_MAX_PARTS: email is no longer a suitable channel (see email-backup-design.md §growth)"
   fi
@@ -333,9 +357,9 @@ while IFS=$'\t' read -r n f bytes sha; do
   if mail_send "$WORK" "$ARCHIVE_MAIL_TO" "$subject" "$WORK/body.txt" - "$ID-p$n-${sha:0:16}" \
        "$BUILD/$f::$f::application/octet-stream" "$BUILD/INDEX.txt::$ID.INDEX.txt::text/plain" "$BUILD/index.json::$ID.index.json::application/json"; then
     json_state_write "$BUILD/state.json" "$(jq -c --arg n "$n" --arg id "$MAIL_LAST_ID" --arg at "$(utc_now)" --arg d "$MAIL_LAST_DETAIL" \
-      '.sent[$n] = {id:$id, at:$at, result:$d}' "$BUILD/state.json")"
+      --arg th "$MAIL_LAST_THREAD" '.sent[$n] = ({id:$id, at:$at, result:$d} + (if $th == "" then {} else {thread_id:$th} end))' "$BUILD/state.json")"
     SENT_IDS+=("$MAIL_LAST_ID")
-    log "part $n/$NPARTS accepted: $MAIL_LAST_DETAIL id=$MAIL_LAST_ID"
+    log "part $n/$NPARTS accepted: $MAIL_LAST_DETAIL id=$MAIL_LAST_ID${MAIL_LAST_THREAD:+ thread=$MAIL_LAST_THREAD}"
   else
     die "part $n/$NPARTS NOT accepted: $MAIL_LAST_DETAIL"
   fi
