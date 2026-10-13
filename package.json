@@ -16,7 +16,9 @@
     "electron:build": "npm run build:electron && electron-builder",
     "electron:build:mac": "npm run build:electron && electron-builder --mac --x64 --arm64",
     "electron:build:win": "npm run build:electron && electron-builder --win --x64",
-    "seed:service-role": "tsx scripts/seed/seedServiceRole.ts"
+    "seed:service-role": "tsx scripts/seed/seedServiceRole.ts",
+    "e2e": "playwright test",
+    "e2e:cleanup": "tsx e2e/seed/cleanup.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -35,6 +37,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@playwright/test": "^1.64.0",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",

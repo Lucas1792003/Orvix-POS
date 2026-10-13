@@ -1,0 +1,21 @@
+{
+  // Editor/type-check config for the Playwright suite only. Not referenced
+  // by the root tsconfig.json build (tsc -b / vite build stay unaffected);
+  // check with `npx tsc -p e2e/tsconfig.json`.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "paths": { "dexie": ["../node_modules/dexie/dist/dexie.d.ts"] },
+    "skipLibCheck": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true
+  },
+  "include": ["./**/*.ts", "../playwright.config.ts", "../src/types/electron.d.ts", "../src/live/liveHelpers.ts"]
+}
