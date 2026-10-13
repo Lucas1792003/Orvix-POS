@@ -162,6 +162,31 @@ External checks the owner does by hand:
 
 ---
 
+## 3A. Recovery paths — verified 2026-10-13 (read-only, engineer) and the gate before ANY live change
+
+| Path | State today | How checked |
+|---|---|---|
+| SSH over Tailscale from the Mac | **works** — the only working remote path; relayed via DERP (no direct path) | `ssh lucashome` BatchMode; `tailscale status` shows `relay "tor"` |
+| Authorized keys | **one** key only (the Mac's ed25519), listed **twice** in `authorized_keys`; no second device or offline key | `ssh-keygen -lf` fingerprints on both sides match |
+| SSH over the home LAN | **does not work**: the Mac and the server share the router (same gateway MAC) but the Mac cannot even ARP the server; ping/22/3000 time out → Wi-Fi **client isolation** on the router/AP | `arp`, `ping`, `nc` from the Mac (2026-10-13) |
+| Password login | the account has a password set (`passwd -S` = P) and sshd very likely allows passwords (§1.1) | read-only |
+| sudo | user is in `sudo`; sudo needs the account password (`sudo -n` → authentication required) | read-only |
+| Physical console | laptop keyboard/screen at home — **not verified by the engineer** | owner |
+| Tailscale SSH | off | `tailscale status --json` |
+
+Consequences:
+- Every "LAN device" check and the "LAN ssh" ufw rule below are **moot** until client isolation is removed for the server (Ethernet, or the router's isolation setting). Do not count LAN SSH as a fallback.
+- If Tailscale on the server breaks (key expiry, logout, bad policy), the **only** way back in is the physical console.
+- If the Mac is lost after Stage 2 (key-only), there is **no** key left → console only.
+
+**Gate R (must all be YES before Stage 1, 2 or 3; owner + engineer):**
+1. Owner logs in at the **physical console** with the account password and runs `sudo -v` successfully (proves console + sudo password). Record date.
+2. A **second authorized key** from another device the owner controls (e.g. a Windows PC or a hardware key), added by the owner, tested with `ssh -o IdentitiesOnly=yes -i <that key> lucario@<tailnet name> true`; the duplicate line removed. Fingerprints recorded in `access.md` (fingerprints only).
+3. Tailscale node key expiry **disabled** for the server in the admin console (Stage 1 first item) and confirmed (`tailscale status --json` → `KeyExpiry` absent).
+4. Fresh verified base backup + LSN (backup-status OK) on the day.
+5. Owner present at the console for Stage 2 and Stage 3 (dead-man timers cover a lost session, the console covers a lost network).
+6. Optional but recommended: Ethernet for the server, or client isolation off for it — gives a real LAN path and a direct Tailscale path.
+
 ## 4. Stages
 
 ### Stage 0 — read-only sudo inspection · **needs owner approval — not executed**
@@ -247,7 +272,7 @@ Notes:
 - **Testing:** the `tests` block runs on every save, and the console **refuses to save** a policy whose tests fail. Also use Access controls → *Preview rules* for `lucashome`. There is no `tailscale debug` command that dry-runs a policy file.
 - **On-node verification after saving** (read-only, from the Mac):
   `ssh -o BatchMode=yes lucashome 'tailscale debug netmap | jq -c .PacketFilterRules' </dev/null` → the src set for `*` ports now lists only the owner's device IPs, plus a 443-only rule for tag:till/phone once such devices exist. Then run `ssh lucashome true` (new session) and **SVC-CHECK**.
-- **Dead-man:** the console has no timer. The safety net is that the owner grant keeps the Mac path, that the tests block the save, and that the backup file restores the old policy in one paste. If the Mac loses access anyway, use the LAN SSH path (`ssh lucario@10.10.124.245` from a LAN device) or the console. The policy itself can always be edited from any browser.
+- **Dead-man:** the console has no timer. The safety net is that the owner grant keeps the Mac path, that the tests block the save, and that the backup file restores the old policy in one paste. If the Mac loses access anyway, use the console (the LAN SSH path does not work today: client isolation, §3A). The policy itself can always be edited from any browser.
 - **Rollback:** Access controls → paste the backup → Save.
 
 ---
@@ -303,7 +328,7 @@ sudo systemctl reload ssh && systemctl is-active ssh ssh.socket
 | Mac (tailnet) | `ssh -o BatchMode=yes lucashome 'echo ok'` | `ok` |
 | Mac | `ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password,keyboard-interactive lucashome true` | `Permission denied (publickey).` |
 | Mac | `ssh -o BatchMode=yes root@100.74.43.4 true` | `Permission denied` |
-| LAN device | `ssh lucario@10.10.124.245 'echo lan-ok'` (with its key) | `lan-ok` (or skip if console-only is accepted) |
+| LAN device | `ssh lucario@10.10.124.245 'echo lan-ok'` (with its key) | `lan-ok` — **skip today**: LAN path blocked by client isolation (§3A) |
 | host | `journalctl -u ssh --since -10min --no-pager \| tail` | no errors |
 | Mac | **SVC-CHECK** | baseline |
 

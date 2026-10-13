@@ -11,6 +11,15 @@ The weekly recovery archive is encrypted to **your** OpenPGP key. The server hol
 - Use a passphrase of at least 6 random words. Store it in your password manager and write it on the paper copy's envelope only if the envelope is kept somewhere safe (see below).
 
 ## 1. Create the key (≈ 15 min, on your own Mac or PC, not the server)
+
+**Guided (recommended):** in Terminal on your Mac, from the repository folder:
+```bash
+brew install gnupg pinentry-mac paperkey
+bash deploy/lucashome/backup/owner-key-setup.sh
+```
+It refuses to run over SSH or inside iCloud-synced folders, creates the key in your keyring (gpg asks for the passphrase in its own window), writes the five files to `~/pos-backup-key-<date>/`, and proves the key with an encrypt/decrypt round trip. Then follow the printed steps. The manual equivalent is below.
+
+**Manual:**
 ```bash
 brew install gnupg paperkey                         # Mac; on Windows use Gpg4win
 gpg --quick-gen-key 'POS backup owner <backup-owner@invalid>' default default never
