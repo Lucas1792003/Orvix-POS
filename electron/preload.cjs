@@ -26,6 +26,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
   /** Quits and installs an already-downloaded update (only valid once onUpdateStatus reports "downloaded"). */
   installUpdate: () => ipcRenderer.invoke("updates:install"),
 
+  /**
+   * Saves an already-ENCRYPTED pending-queue export (see
+   * src/lib/queueExport/) via the native save dialog. Only a string goes
+   * across; the main process validates it is an encrypted envelope, asks
+   * the user where to save, and writes it. No path or fs access is exposed.
+   */
+  saveQueueExport: (request) => ipcRenderer.invoke("queue-export:save", {
+    defaultFileName: request && typeof request.defaultFileName === "string" ? request.defaultFileName : "",
+    contents: request && typeof request.contents === "string" ? request.contents : "",
+  }),
+
   /** Subscribes to update lifecycle events. Returns an unsubscribe function. */
   onUpdateStatus: (callback) => {
     const listener = (_event, status) => callback(status);

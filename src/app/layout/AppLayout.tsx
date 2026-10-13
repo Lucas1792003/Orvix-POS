@@ -12,6 +12,8 @@ import { useViewportWidth } from "../../hooks/useViewportWidth";
 import { supabase } from "../../lib/supabase";
 import { clearNeedsReauth, countPendingOutbox, drainOutbox, refreshSyncStatus } from "../../stores/data/outbox";
 import { subscribeInventoryRealtime, syncInventoryScope } from "../../stores/data/inventoryRealtime";
+import { ExportQueueDialog } from "../../components/sync/ExportQueueDialog";
+import { useTranslation } from "../../hooks/useTranslation";
 
 const MIN_SUPPORTED_WIDTH = 768;
 
@@ -42,6 +44,8 @@ export const AppLayout = () => {
   const navigate = useNavigate();
   const viewportWidth = useViewportWidth();
   const [showInventoryBadge, setShowInventoryBadge] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const { t } = useTranslation();
 
   useEffect(() => {
     if (!isLoaded && !isLoading && !loadError) {
@@ -244,6 +248,20 @@ export const AppLayout = () => {
             {isDraining ? "Syncing — " : ""}{queuedLabel}
           </div>
         )}
+        {(pendingCount > 0 || conflictCount > 0) && (
+          // Outage recovery: any signed-in role can save an encrypted copy of
+          // the queue, offline too (docs/selfhost-migration/phase-f/queue-export.md).
+          <button
+            type="button"
+            onClick={() => setExportOpen(true)}
+            data-testid="export-queue-open"
+            className="flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-700 shadow-lg hover:bg-slate-50"
+            title={t("queueExport", "buttonLong")}
+          >
+            <span className="material-symbols-rounded text-sm leading-none">download</span>
+            {t("queueExport", "button")}
+          </button>
+        )}
         {conflictCount > 0 && (
           <div className="rounded-full bg-rose-100 px-3 py-1 text-xs text-rose-800 shadow-lg border border-rose-200">
             {conflictCount} sync {conflictCount === 1 ? "conflict needs" : "conflicts need"} attention
@@ -280,6 +298,7 @@ export const AppLayout = () => {
           </div>
         )}
       </div>
+      <ExportQueueDialog open={exportOpen} onClose={() => setExportOpen(false)} />
     </div>
   );
 };

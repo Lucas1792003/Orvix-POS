@@ -8,6 +8,8 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { useTranslation } from "../hooks/useTranslation";
 import { LanguageSwitcher } from "../components/layout/LanguageSwitcher";
+import { ExportQueueDialog } from "../components/sync/ExportQueueDialog";
+import { localDb } from "../lib/localDb";
 
 export const LoginPage = () => {
   const navigate = useNavigate();
@@ -21,9 +23,22 @@ export const LoginPage = () => {
   // (migration 067) — then, and only then, the first-time-setup link is
   // offered. Signing in never creates an account (Phase G).
   const [setupNeeded, setSetupNeeded] = useState(false);
+  // Signed out (e.g. after the 24 h offline limit) with sales still queued:
+  // the queue is kept, and its encrypted export stays reachable here because
+  // signing in needs the server (docs/selfhost-migration/phase-f/queue-export.md).
+  const [queuedCount, setQueuedCount] = useState(0);
+  const [exportOpen, setExportOpen] = useState(false);
 
   const login = useAuthStore((state) => state.login);
   const setAppShopId = useAppStore((state) => state.setShopId);
+
+  useEffect(() => {
+    let cancelled = false;
+    void localDb.syncOutbox.count().then((n) => { if (!cancelled) setQueuedCount(n); }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -164,6 +179,15 @@ export const LoginPage = () => {
                 t("auth", "staffCreatedByAdmin")
               )}
             </div>
+            {queuedCount > 0 && (
+              <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900" data-testid="login-queue-export">
+                {t("queueExport", "loginHint", { n: queuedCount })}{" "}
+                <button type="button" className="font-medium underline" onClick={() => setExportOpen(true)}>
+                  {t("queueExport", "loginLink")}
+                </button>
+              </div>
+            )}
+            <ExportQueueDialog open={exportOpen} onClose={() => setExportOpen(false)} />
           </div>
         </div>
       </Card>

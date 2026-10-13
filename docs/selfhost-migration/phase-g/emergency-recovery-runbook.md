@@ -16,7 +16,8 @@ Related: [release compatibility + earlier emergency notes](release-compatibility
 [backup README](../../../deploy/lucashome/backup/README.md) ·
 [WAL archiving / PITR](../../../deploy/lucashome/backup/WAL-ARCHIVING.md) ·
 [offsite enable](../../../deploy/lucashome/backup/OFFSITE-ENABLE.md) ·
-[e2e results](../phase-e/e2e-results.md).
+[e2e results](../phase-e/e2e-results.md) ·
+[queue export + recovery tool](../phase-f/queue-export.md).
 
 ---
 
@@ -28,7 +29,7 @@ Related: [release compatibility + earlier emergency notes](release-compatibility
 | **15 min** | | engineer | §2 diagnose (Tailscale, host, containers) |
 | **1 h** | | engineer → owner | report cause + ETA; inspect one till's queue (§4) |
 | **2 h** (operational maximum before escalation) | | owner | decide: keep trading offline / restore from backup (§5.3) / prepare paper fallback |
-| **8 h** | | owner + shop managers | paper receipts ready; export every till's queue (§4.3) |
+| **8 h** | | owner + shop managers | paper receipts ready; every till: **Export pending** button (§4.3) |
 | **12 h** (hard stop, enforced by the app) | **new sales refused** on each till 12 h after its last successful contact | shop managers | switch to paper; tills stay ON with their queue |
 | 24 h | till signs out on next boot; queue kept | engineer | server must be back or rebuilt (§5.4) before staff sign in again |
 
@@ -132,6 +133,8 @@ B9 (gateway 503), B10 (database unavailable, simulated) — results in
 - Before **any** intervention on a till (reinstall, Windows repair, moving the
   till, a new build), export its queue first (§4.3) and keep the export with
   the incident.
+- Exporting never changes the queue: the till keeps every entry and keeps
+  syncing on its own. An export is a copy, not a hand-over.
 
 ### 4.2 Look at the queue (no export)
 
@@ -139,43 +142,77 @@ B9 (gateway 503), B10 (database unavailable, simulated) — results in
 - ADMIN on that till: **Sync Conflicts** page (`/app/admin/sync-conflicts`):
   conflicts needing action + entries still syncing.
 
-### 4.3 Export a till's queue (manual; the app has no export button yet)
+### 4.3 Export a till's queue (button)
 
-**Cold copy first** (always, before anything else; app closed):
-- Windows: copy the whole folder `%APPDATA%\retails-shop\` (contains
-  `IndexedDB\file__0.indexeddb.leveldb\`, `Local Storage\`, logs) to a USB
-  stick / the Mac, named `<shop>-<till>-<UTC time>`.
-- macOS: `~/Library/Application Support/retails-shop/`.
-This copy can be put back byte-for-byte into the same path on the same or a
-replacement machine with the same build, and the queue reappears.
+**Staff, on the till (works offline, after a restart, any role):**
+1. Bottom-right corner, next to "N actions waiting to sync": press
+   **Export pending** (Myanmar UI: "စောင့်ဆိုင်းနေသည်များ ထုတ်ယူရန်").
+   Signed out (e.g. after the 24 h limit)? The login page shows "This till
+   still holds N transactions … **Export them (encrypted)**". ADMIN can also
+   use **Export pending transactions** on the Sync Conflicts page.
+2. Check the count in the dialog, type a passphrase of at least 10
+   characters twice, press **Encrypt and save**, pick the USB stick (default:
+   Documents, name `pending-queue-<till>-<date>-<time>Z.spqx`).
+3. Write the passphrase on paper, **not** on the stick; hand both to the
+   engineer separately. Note the till id from the file name.
+4. The dialog says "Nothing was removed": leave the till as it is; it syncs by
+   itself when the server is back.
 
-**Readable export** (app open, signed in, any role):
-1. `Ctrl+Shift+I` (macOS `Cmd+Alt+I`) or menu View → Toggle Developer Tools
-   (the default Electron menu is present in the packaged build).
-2. Console, paste:
-   ```js
-   (async () => {
-     const db = await new Promise((ok, ko) => { const r = indexedDB.open("shwe-phala-local"); r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error); });
-     const all = (s) => new Promise((ok) => { if (!db.objectStoreNames.contains(s)) return ok([]); const q = db.transaction(s).objectStore(s).getAll(); q.onsuccess = () => ok(q.result); });
-     const out = { exportedAt: new Date().toISOString(), outbox: await all("syncOutbox"), syncState: await all("syncState"),
-       pendingSales: (await all("sales")).filter((s) => s.pendingSync), pendingShifts: (await all("shifts")).filter((s) => s.pendingSync),
-       idMap: await all("provisionalIdMap") };
-     copy(JSON.stringify(out, null, 1));   // DevTools helper: puts it on the clipboard
-     return `${out.outbox.length} outbox entries, ${out.pendingSales.length} pending sales copied`;
-   })();
-   ```
-3. Paste into a text file next to the cold copy. It contains sale lines,
-   amounts, shift ids and idempotency keys; no passwords or tokens (the auth
-   session lives in Local Storage, which this snippet does not read).
-4. DevTools → Application → IndexedDB → `shwe-phala-local` → `syncOutbox`
-   shows the same rows for a visual check (status `pending` / `failed` /
-   `conflict`, `attempts`, `lastError`, `idempotencyKey`).
+**Cold copy as well** before any intervention on the till itself (app
+closed): Windows `%APPDATA%\retails-shop\`, macOS
+`~/Library/Application Support/retails-shop/`, copied whole to the stick as
+`<shop>-<till>-<UTC time>`. It can be put back byte-for-byte on the same or a
+replacement machine with the same build, and the queue reappears. It is also
+the fallback when the app does not start at all.
 
-**Proposed feature** (not built): "Export queue" on the Sync Conflicts page
-that writes the JSON above through the main process (`dialog.showSaveDialog`),
-plus a boot guard that refuses to run `loadData` on a build older than the
-database's schema when the outbox is non-empty (release-compatibility §5,
-safeguards 2–3). Until it exists, §4.3 is the procedure.
+File format, encryption (AES-256-GCM, PBKDF2-SHA-256 600k) and what is / is
+not in the file: [queue-export §2–3](../phase-f/queue-export.md). No tokens,
+keys or passwords are ever in it.
+
+**Builds without the button** (the button is on branch
+`feature/queue-export`, not released as of 2026-10-13): cold copy as above,
+then, app open and signed in, DevTools (`Ctrl+Shift+I` / `Cmd+Alt+I`) →
+Console:
+```js
+(async () => {
+  const db = await new Promise((ok, ko) => { const r = indexedDB.open("shwe-phala-local"); r.onsuccess = () => ok(r.result); r.onerror = () => ko(r.error); });
+  const all = (s) => new Promise((ok) => { if (!db.objectStoreNames.contains(s)) return ok([]); const q = db.transaction(s).objectStore(s).getAll(); q.onsuccess = () => ok(q.result); });
+  const out = { exportedAt: new Date().toISOString(), outbox: await all("syncOutbox"), idMap: await all("provisionalIdMap") };
+  copy(JSON.stringify(out, null, 1));
+  return `${out.outbox.length} outbox entries copied`;
+})();
+```
+Paste into a text file next to the cold copy (unencrypted: treat the stick
+accordingly). The recovery tool reads only `.spqx` exports; such a file is
+replayed by hand or by importing the cold copy into a till with the button.
+
+### 4.4 Read or replay an export (engineer, from the Mac)
+
+```sh
+cd <repo>     # branch with tools/queue-recovery
+npx tsx tools/queue-recovery/cli.ts inspect <file.spqx>          # passphrase prompted; summary, no network
+npx tsx tools/queue-recovery/cli.ts replay <file.spqx> --target https://lucashome.tail8a86e4.ts.net --dry-run
+QUEUE_RECOVERY_ANON_KEY="$(ssh -o BatchMode=yes lucashome 'grep "^ANON_KEY=" /srv/supabase/stack/.env | cut -d= -f2-')" \
+  npx tsx tools/queue-recovery/cli.ts replay <file.spqx> --target https://lucashome.tail8a86e4.ts.net \
+  --email <the cashier who rang the sales up> --report <incident dir>/replay-<till>.json
+```
+- When: only if the till itself cannot sync (till lost/broken, or after a
+  rebuild while the till is gone). If the till still exists, let it drain on
+  its own; replaying as well is harmless (original keys → the server returns
+  the stored result, TESTED F2: replay ×3 + till drain = still one sale each).
+- `--target` is mandatory and never defaults; `*.supabase.co` is refused; a
+  different host (rebuilt stack under a new name, a disposable restore) must
+  be repeated with `--confirm-host <host>`.
+- Replay as the user who queued the entries (shift/actor checks, 055/074).
+  Optional `QUEUE_RECOVERY_SERVICE_KEY` (same ssh pattern, `SERVICE_ROLE_KEY`)
+  only reads the idempotency ledger so the report says exactly
+  `applied` vs `already-applied`.
+- A transient failure stops the run (`not-attempted` for the rest): re-run the
+  same command later. Conflicts the till had parked are skipped unless
+  `--include-conflicts`. Exit 0 = all done; 4 = something rejected/blocked.
+- After a PITR restore (§5.3) a replay re-executes sales whose keys are not in
+  the restored ledger — the desired result for sales after the restore point.
+- Then run the §7 queries.
 
 ## 5. Server-side recovery options, in this order
 
@@ -263,6 +300,7 @@ the secrets bundle), and run one offsite restore drill and record the RTO.
 | Publish or install a v1.0.15-based build ("rollback") on tills that ran 1.0.16 | Its first online load deletes every queued entry, its own and 1.0.16's, without sending them (observed, release-compatibility §5 step 9); the auto-updater would install a published 1.0.17 on every till at next restart |
 | Downgrade any till with unsynced transactions | Same deletion; Dexie opens the newer database without error, so nothing warns |
 | Clear app data / reinstall a till before exporting its queue (§4.3) | The queue is the only copy |
+| Replay an export with a target you did not type yourself, or into hosted | The tool refuses hosted and has no default; a wrong but reachable backend would execute the sales there (§4.4) |
 | Restore the database without deciding what happens to sales after the restore point (§5.3) | Already-drained sales after the target are not resent by the tills |
 | Edit tills' clocks or the offline windows to "buy time" | The 12 h / 24 h bounds are the revocation guarantee; extending them by hand is not supported |
 | Change `UPLOAD_SIGNED_URL_EXPIRATION_TIME`, compose files or `.env` during an incident without a written change | Not needed for recovery; adds a second variable |
@@ -302,5 +340,6 @@ scheduled on lucashome today).
 | Consistency gate proof (E1–E3) | distinct identical-basket queued sales PASS; forged duplicate row and same-operation-under-new-key FAIL; reverted → PASS | `e2e/e-consistency-gate.e2e.ts`, `e2e/helpers/saleLedger.test.ts` |
 | Offline windows | C1 11 h write ok / 13 h refused, queue kept; C2 23 h read ok / 25 h signed out, queue kept and drained after sign-in | `e2e/c-offline-auth.e2e.ts` |
 | PITR | 2026-10-11 drill, 9 s, rows at target only | `deploy/lucashome/backup/WAL-ARCHIVING.md` |
+| Queue export + replay | F1: offline shift + 3 sales, offline restart, exported via the badge button, encrypted file, queue byte-identical; F2: tool refused no target / hosted / other host / wrong passphrase, dry run sends nothing, replay ×3 into the QA org + the till draining the same keys after a 45 s API outage = 3 sales, 4 keys, gate PASS; disposable drill (throwaway DB + PostgREST, re-seeded QA tenant): replay ×2(+1) → 0 duplicates, §7 queries 0 | `e2e/f-queue-export.e2e.ts`, `tools/queue-recovery/disposable/run.sh`, [queue-export §5](../phase-f/queue-export.md) |
 | Offsite rebuild | **not tested — disabled** | §5.4 |
 | Service restart on lucashome | not exercised (no restarts permitted during this verification) | §5.1 |
