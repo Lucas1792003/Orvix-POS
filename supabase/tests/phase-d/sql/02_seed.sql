@@ -92,5 +92,15 @@ SELECT test.logout() AS zz \gset
 
 INSERT INTO test.initial_inventory SELECT shop_id, product_id, qty_base_units FROM inventory;
 
+-- 080: the per-environment trusted public API origin (public.app_config).
+-- Only when 080 is applied; a run capped below 080 is unchanged.
+DO $$
+BEGIN
+  IF to_regclass('public.app_config') IS NOT NULL THEN
+    INSERT INTO public.app_config (key, value) VALUES ('supabase_public_url', 'https://pos.test')
+    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+  END IF;
+END $$;
+
 SELECT 'seeded: ' || (SELECT count(*) FROM users) || ' users, ' || (SELECT count(*) FROM products) || ' products, '
        || (SELECT count(*) FROM inventory) || ' inventory rows, ' || (SELECT count(*) FROM purchase_orders) || ' POs' AS seed;

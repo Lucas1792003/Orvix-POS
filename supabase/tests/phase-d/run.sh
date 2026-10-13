@@ -227,6 +227,12 @@ if [ "$((10#$MAX_MIG))" -ge 79 ]; then
 else
   log "skipping t14_upload_security / t15_anon_audit (migrations capped at $MAX_MIG < 079)"
 fi
+# 080: completion stores a server-derived URL and requires the object.
+if [ "$((10#$MAX_MIG))" -ge 80 ]; then
+  run_sql_test "$SQL/t16_completion_url.sql"
+else
+  log "skipping t16_completion_url (migrations capped at $MAX_MIG < 080)"
+fi
 # Concurrent first-time setup (076). MUST RUN LAST: t12_bootstrap_prep
 # empties public.users (TRUNCATE ... CASCADE) to recreate a fresh install in
 # this throwaway database. Two sessions call bootstrap_first_admin(); A holds

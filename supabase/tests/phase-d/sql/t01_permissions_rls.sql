@@ -29,7 +29,10 @@ SELECT test.check('authenticated can execute every public function except comple
        || CASE WHEN to_regprocedure('public.app_seed_default_price_levels(text)') IS NOT NULL
                THEN ARRAY['app_seed_default_price_levels'] ELSE '{}'::text[] END
        || CASE WHEN to_regprocedure('public.app_storage_object_org(text)') IS NOT NULL
-               THEN ARRAY['app_storage_object_org'] ELSE '{}'::text[] END) x),
+               THEN ARRAY['app_storage_object_org'] ELSE '{}'::text[] END
+       -- 080: URL helper reading service_role-only configuration
+       || CASE WHEN to_regprocedure('public.app_upload_session_public_url(text)') IS NOT NULL
+               THEN ARRAY['app_upload_session_public_url'] ELSE '{}'::text[] END) x),
   (SELECT string_agg(p.proname, ',') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public' AND NOT has_function_privilege('authenticated', p.oid, 'EXECUTE')));
 
@@ -47,7 +50,9 @@ SELECT test.check('public function count = 58 + 3 idem helpers (+1 after 067, +9
        -- 077: app_seed_default_price_levels + organizations_seed_price_levels
        + CASE WHEN to_regprocedure('public.app_seed_default_price_levels(text)') IS NOT NULL THEN 2 ELSE 0 END
        -- 078: app_storage_object_org / _object_in_my_org / _can_write_path
-       + CASE WHEN to_regprocedure('public.app_storage_object_org(text)') IS NOT NULL THEN 3 ELSE 0 END,
+       + CASE WHEN to_regprocedure('public.app_storage_object_org(text)') IS NOT NULL THEN 3 ELSE 0 END
+       -- 080: app_upload_session_public_url
+       + CASE WHEN to_regprocedure('public.app_upload_session_public_url(text)') IS NOT NULL THEN 1 ELSE 0 END,
   (SELECT count(*)::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'));
 
 SELECT test.check('no overloaded public functions after 063 (old signatures dropped)',
@@ -87,7 +92,7 @@ SELECT test.check('table grants match hosted-grants.txt exactly (065)',
     SELECT table_name, grantee, string_agg(privilege_type, ',' ORDER BY privilege_type) AS privs
       FROM information_schema.role_table_grants
      WHERE table_schema = 'public' AND grantee IN ('anon','authenticated','service_role')
-       AND table_name <> 'idempotency_keys'
+       AND table_name NOT IN ('idempotency_keys', 'app_config')  -- both new after the snapshot; app_config (080) checked in t16
      GROUP BY 1,2
     EXCEPT SELECT table_name, grantee, privs FROM test.expected_grants
   ) AND NOT EXISTS (

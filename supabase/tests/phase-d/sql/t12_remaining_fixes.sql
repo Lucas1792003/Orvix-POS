@@ -240,6 +240,12 @@ SELECT test.expect_error('t12/075: completion of a CANCELED session is rejected'
   'Upload link is no longer active');
 
 -- valid session completes; completing it again is rejected
+-- (the phone's uploadToSignedUrl first creates the object - storage superuser;
+-- 080 refuses completion without it)
+RESET ROLE;
+INSERT INTO storage.objects (bucket_id, name, owner, owner_id)
+VALUES ('product-images', :'s4'::jsonb->>'storagePath', :'AA', :'AA');
+SET ROLE anon;
 SELECT public.complete_product_image_upload_session(:'s4'::jsonb->>'token', :'s4'::jsonb->>'storagePath',
   :'url_s4', 1000, 'image/webp') AS c4 \gset
 RESET ROLE;
