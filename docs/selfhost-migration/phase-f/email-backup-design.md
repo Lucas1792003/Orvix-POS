@@ -663,7 +663,7 @@ password or the stack secrets; the engineer only ever checks file metadata
     scp ~/pos-backup-keys/gmail-oauth.json lucashome:/srv/supabase/backup/credentials/gmail-oauth.json
     scp owner-backup.pub.asc               lucashome:/srv/supabase/backup/credentials/owner-backup.pub.asc
     ssh lucashome 'chmod 0600 /srv/supabase/backup/credentials/* && stat -c "%U %a %s %n" /srv/supabase/backup/credentials/*'
-    rm -P ~/pos-backup-keys/gmail-oauth.json ~/Downloads/client_secret_*.json   # after the --check below is ok
+    rm ~/pos-backup-keys/gmail-oauth.json ~/Downloads/client_secret_*.json   # after the --check below is ok
     ```
 12. Check the token **on the server, as the backup user** (one token refresh,
     no mail sent; requires step D13's deploy, which copies the helper):
