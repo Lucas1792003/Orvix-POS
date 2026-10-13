@@ -8,28 +8,50 @@ The weekly recovery archive is encrypted to **your** OpenPGP key. The server hol
 ## Rules
 - The private key and its passphrase are **never** sent to Claude or any AI tool, never placed in the repository, never put on the server, never emailed, and never stored in the backup mailbox.
 - The engineer (and Claude) only ever sees the **public** key and its fingerprint.
-- Use a passphrase of at least 6 random words. Store it in your password manager and write it on the paper copy's envelope only if the envelope is kept somewhere safe (see below).
+- Use a passphrase of at least 6 random words. Store it in your password manager. **Never** write it on or inside the paper-key envelope: paper key + passphrase together = the backups. If you want a written passphrase too, keep it sealed at a **different** place from the paper key.
 
-## 1. Create the key (≈ 15 min, on your own Mac or PC, not the server)
+## 1. Create the key and prove every copy (≈ 30 min, at your Mac, in Terminal)
 
-**Guided (recommended):** in Terminal on your Mac, from the repository folder:
+`gnupg` 2.5 and `paperkey` are already installed on the Mac (engineer, 2026-10-13, for testing the script with a throwaway key that was deleted; your keyring has no key yet). Optional nicer passphrase window: `brew install pinentry-mac` and `echo "pinentry-program $(brew --prefix)/bin/pinentry-mac" >> ~/.gnupg/gpg-agent.conf; gpgconf --kill gpg-agent`.
+
+Sit at the Mac (not over SSH), Wi-Fi may stay on (the script does no network access), then:
+
 ```bash
-brew install gnupg pinentry-mac paperkey
+cd ~/Projects/personal/ShwePhaLa
 bash deploy/lucashome/backup/owner-key-setup.sh
 ```
-It refuses to run over SSH or inside iCloud-synced folders, creates the key in your keyring (gpg asks for the passphrase in its own window), writes the five files to `~/pos-backup-key-<date>/`, and proves the key with an encrypt/decrypt round trip. Then follow the printed steps. The manual equivalent is below.
+1. gpg asks for a new passphrase twice → use 6+ random words; save it in the password manager **immediately**.
+2. The script writes `~/pos-backup-key-<date>/` (folder 0700, files 0600) and then asks for the passphrase again for the round-trip test (it clears gpg's cache first, so this proves you have the passphrase). Expect `round-trip OK` and the fingerprint.
+3. Password manager: new entry "POS backup key" → attach `owner-backup.SECRET.asc` and `owner-backup.revoke.asc`, fill in passphrase + fingerprint.
+4. **Prove the password-manager copy** — download the attachment back from the password manager (e.g. to `~/Downloads`), then:
+   ```bash
+   bash deploy/lucashome/backup/owner-key-setup.sh --verify-copy ~/Downloads/owner-backup.SECRET.asc
+   rm ~/Downloads/owner-backup.SECRET.asc
+   ```
+   Expect `OK: this copy restores key <fingerprint> and decrypts`. It uses a throwaway keyring (deleted afterwards), so it proves the copy on its own, not your Mac's keyring.
+5. **Paper copy:** print `owner-backup.paper.txt` (about one page), then prove the file you printed restores:
+   ```bash
+   bash deploy/lucashome/backup/owner-key-setup.sh --verify-copy ~/pos-backup-key-<date>/owner-backup.paper.txt --pub ~/pos-backup-key-<date>/owner-backup.pub.asc
+   ```
+   For a full test of the printout itself: type (or OCR) the printed page back into a text file and run the same command on it; paperkey checks a CRC on every line and names the line with a typo. Seal the printout; ideally a second copy at another family home.
+6. Optional encrypted USB stick: Disk Utility → Erase → format "APFS (Encrypted)" → copy `owner-backup.SECRET.asc` + `owner-backup.revoke.asc` → run step 4's command against the file on the stick → eject and store away from the Mac.
+7. Delete the private files from the Mac (the key stays in your keyring):
+   ```bash
+   rm ~/pos-backup-key-<date>/owner-backup.SECRET.asc ~/pos-backup-key-<date>/owner-backup.paper.txt ~/pos-backup-key-<date>/owner-backup.revoke.asc
+   ```
+8. Hand over **only** `owner-backup.pub.asc` and the fingerprint (§3).
 
-**Manual:**
+What the script guarantees (reviewed and tested 2026-10-13 with a throwaway key and passphrase, everything deleted afterwards): refuses root, non-Mac, non-interactive or SSH sessions and cloud-synced output folders; never reads or stores the passphrase (gpg's own prompt); no network calls, no keyserver; output 0700/0600; secret exports stay passphrase-protected (iterated+salted S2K, verified with `gpg --list-packets`); creation refuses to overwrite an existing key or folder; `--verify-copy` detects a wrong key and a one-byte paper typo (CRC error, line named).
+
+**Manual equivalent** (if the script cannot be used):
 ```bash
-brew install gnupg paperkey                         # Mac; on Windows use Gpg4win
-gpg --quick-gen-key 'POS backup owner <backup-owner@invalid>' default default never
-#   → enter the passphrase twice
-gpg --fingerprint 'POS backup owner'                # write down the 40-character fingerprint
-gpg --armor --export <FINGERPRINT> > owner-backup.pub.asc                  # PUBLIC — this goes to the server
-gpg --armor --export-secret-keys <FINGERPRINT> > owner-backup.SECRET.asc   # PRIVATE — password manager, then delete the file
-gpg --export-secret-keys <FINGERPRINT> | paperkey --output owner-backup.paper.txt   # print it, then delete the file
+gpg --quick-gen-key 'POS backup owner <backup-owner@invalid>' ed25519 sign never
+gpg --quick-add-key <FINGERPRINT> cv25519 encr never
+gpg --armor --export <FINGERPRINT> > owner-backup.pub.asc
+gpg --armor --export-secret-keys <FINGERPRINT> > owner-backup.SECRET.asc
+gpg --export-secret-keys <FINGERPRINT> | paperkey --output owner-backup.paper.txt
 ```
-The revocation certificate is created automatically in `~/.gnupg/openpgp-revocs.d/<FINGERPRINT>.rev`; attach it to the same password-manager entry.
+The revocation certificate is in `$(gpgconf --list-dirs homedir)/openpgp-revocs.d/<FINGERPRINT>.rev`.
 
 ## 2. Keep three copies of the private key
 | Copy | Where | Protects against |
