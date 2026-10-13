@@ -13,8 +13,7 @@ export interface ProductImageUploadSession {
   status: ProductImageUploadSessionStatus;
 }
 
-export interface ProductImageUploadSignedSession extends ProductImageUploadSession {
-  uploadToken: string;
+export interface ProductImageUploadQrSession extends ProductImageUploadSession {
   qrUrl: string;
 }
 
@@ -89,31 +88,216 @@ export async function createProductImageUploadSession(input: {
   };
 }
 
-export async function createSignedProductImageUploadSession(input: {
+/**
+ * Desktop (signed in): create the QR session. The desktop no longer signs a
+ * storage upload token or attaches one to the session: a signed token lives
+ * only UPLOAD_SIGNED_URL_EXPIRATION_TIME (60 s on lucashome) while the QR is
+ * valid for the whole session (10 min), so the phone obtains its token just
+ * in time from the `phone-upload-token` Edge Function right before it uploads
+ * (docs/selfhost-migration/phase-g/phone-upload-jit.md). The desktop only
+ * polls the session status. attach_product_image_upload_session_token stays
+ * on the server for older builds but is not called by this flow.
+ */
+export async function createPhoneProductImageUploadSession(input: {
   productId: string;
   shopId?: string | null;
   origin?: string;
-}): Promise<ProductImageUploadSignedSession> {
+}): Promise<ProductImageUploadQrSession> {
   const session = await createProductImageUploadSession(input);
-  const { supabase } = await import("./supabase");
-  const { data, error } = await supabase.storage
-    .from(PRODUCT_IMAGE_BUCKET)
-    .createSignedUploadUrl(session.storagePath);
-  if (error) throw new Error(`Could not create phone upload URL: ${error.message}`);
-  if (!data?.token) throw new Error("Phone upload URL did not include an upload token.");
-
-  const { error: attachError } = await supabase.rpc("attach_product_image_upload_session_token", {
-    p_session_id: session.sessionId,
-    p_signed_upload_token: data.token,
-  });
-  if (attachError) throw new Error(`Could not activate phone upload URL: ${attachError.message}`);
-
   const origin = input.origin ?? window.location.origin;
   return {
     ...session,
-    uploadToken: data.token,
     qrUrl: buildProductImagePhoneUploadQrUrl(origin, session.token),
   };
+}
+
+export const PHONE_UPLOAD_TOKEN_FUNCTION = "phone-upload-token";
+
+/** The session is no longer PENDING (expired, cancelled or completed): the phone must stop. */
+export class PhoneUploadInactiveError extends Error {
+  readonly status: ProductImageUploadSessionStatus;
+  constructor(status: ProductImageUploadSessionStatus, message?: string) {
+    super(
+      message ??
+        (status === "EXPIRED"
+          ? "This upload link has expired."
+          : status === "CANCELED"
+            ? "This upload link was cancelled on the computer."
+            : "This upload link is no longer active."),
+    );
+    this.name = "PhoneUploadInactiveError";
+    this.status = status;
+  }
+}
+
+/** The server refused to issue a token (invalid link, or the session no longer matches its organization). */
+export class PhoneUploadRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PhoneUploadRefusedError";
+  }
+}
+
+/** What the phone does next: upload with this fresh token, or (the object is
+ *  already there) go straight to completion. */
+export type PhoneUploadTarget =
+  | { kind: "upload"; storagePath: string; uploadToken: string; expiresAt: string | null }
+  | { kind: "alreadyUploaded"; storagePath: string };
+
+/** Raw function answer: HTTP status + JSON body (null when unreadable). */
+export type PhoneUploadTokenCall = (sessionToken: string) => Promise<{ status: number; body: unknown }>;
+
+const STATUSES: readonly ProductImageUploadSessionStatus[] = ["PENDING", "COMPLETED", "EXPIRED", "CANCELED"];
+
+/** Default transport: supabase.functions.invoke with the anon key only (no user session on the phone). */
+const invokePhoneUploadTokenFunction: PhoneUploadTokenCall = async (sessionToken) => {
+  const { supabase } = await import("./supabase");
+  const { data, error } = await supabase.functions.invoke(PHONE_UPLOAD_TOKEN_FUNCTION, {
+    body: { token: sessionToken },
+  });
+  if (!error) return { status: 200, body: data };
+  const context = (error as { context?: unknown }).context;
+  if (context instanceof Response) {
+    const body = await context.json().catch(() => null);
+    return { status: context.status, body };
+  }
+  throw new Error("Could not reach the server. Check the phone's connection and try again.");
+};
+
+/**
+ * Phone (anonymous): ask the server for a signed upload token RIGHT NOW,
+ * immediately before transferring the file. The server issues it only for a
+ * PENDING, unexpired session, bound to that session's own object path.
+ */
+export async function requestPhoneUploadTarget(
+  sessionToken: string,
+  call: PhoneUploadTokenCall = invokePhoneUploadTokenFunction,
+): Promise<PhoneUploadTarget> {
+  const { status, body } = await call(sessionToken);
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (status === 200) {
+    if (b.alreadyUploaded === true && typeof b.path === "string") {
+      return { kind: "alreadyUploaded", storagePath: b.path };
+    }
+    if (typeof b.token === "string" && b.token && typeof b.path === "string" && b.path) {
+      return {
+        kind: "upload",
+        storagePath: b.path,
+        uploadToken: b.token,
+        expiresAt: typeof b.expiresAt === "string" ? b.expiresAt : null,
+      };
+    }
+    throw new Error("The upload server returned an unexpected answer. Try again.");
+  }
+  const message = typeof b.error === "string" && b.error ? b.error : null;
+  if (status === 410 || b.code === "inactive") {
+    const s = STATUSES.includes(b.status as ProductImageUploadSessionStatus)
+      ? (b.status as ProductImageUploadSessionStatus)
+      : "EXPIRED";
+    throw new PhoneUploadInactiveError(s);
+  }
+  if (status === 404 || status === 403) {
+    throw new PhoneUploadRefusedError(message ?? "Invalid upload link.");
+  }
+  throw new Error(message ?? "Phone upload is temporarily unavailable. Try again.");
+}
+
+/** How a failed signed-URL upload should be handled. */
+export type StorageUploadFailure = "expired_token" | "duplicate" | "network" | "other";
+
+export function classifyStorageUploadError(error: unknown): StorageUploadFailure {
+  const e = (error ?? {}) as { name?: unknown; status?: unknown; statusCode?: unknown; message?: unknown };
+  const status = typeof e.status === "number" ? e.status : Number(e.statusCode);
+  const message = typeof e.message === "string" ? e.message : "";
+  if (status === 409 || /already exists|duplicate/i.test(message)) return "duplicate";
+  if (/InvalidJWT/i.test(String(e.statusCode)) || ((status === 400 || status === 403) && /exp|jwt|signature|token/i.test(message))) {
+    return "expired_token";
+  }
+  if (e.name === "StorageUnknownError" || !Number.isFinite(status) || status === 0) return "network";
+  return "other";
+}
+
+export interface PhoneUploadImage {
+  blob: Blob;
+  bytes: number;
+  mimeType: string;
+}
+
+export interface PhoneUploadDeps {
+  requestTarget?: (sessionToken: string) => Promise<PhoneUploadTarget>;
+  uploadToSignedUrl?: (path: string, uploadToken: string, image: PhoneUploadImage) => Promise<{ error: unknown }>;
+  publicUrl?: (path: string) => Promise<string>;
+  complete?: typeof completeProductImageUploadSession;
+  readSession?: (sessionToken: string) => Promise<ProductImageUploadSessionStatusResult>;
+}
+
+const defaultUploadToSignedUrl: NonNullable<PhoneUploadDeps["uploadToSignedUrl"]> = async (path, uploadToken, image) => {
+  const { supabase } = await import("./supabase");
+  const { error } = await supabase.storage
+    .from(PRODUCT_IMAGE_BUCKET)
+    .uploadToSignedUrl(path, uploadToken, image.blob, {
+      cacheControl: "31536000",
+      contentType: image.mimeType,
+    });
+  return { error };
+};
+
+const defaultPublicUrl = async (path: string) => {
+  const { supabase } = await import("./supabase");
+  return supabase.storage.from(PRODUCT_IMAGE_BUCKET).getPublicUrl(path).data.publicUrl;
+};
+
+/**
+ * Phone (anonymous): the whole upload. Token just in time -> transfer ->
+ * complete, retry-safe:
+ *  - storage refuses the token as expired (or the transfer fails on the
+ *    network): ask for a fresh token ONCE (the server re-checks the session,
+ *    and reports the object as already uploaded when the transfer did land);
+ *  - the object already exists (409, or the server says so): go to completion;
+ *  - completion refused because the session is already COMPLETED for this
+ *    same path (a concurrent/earlier attempt finished it): that is success.
+ * The object path is always the server's; upsert is never set, so retries
+ * cannot create a second object or overwrite the first.
+ */
+export async function uploadPhoneProductImage(
+  sessionToken: string,
+  image: PhoneUploadImage,
+  deps: PhoneUploadDeps = {},
+): Promise<ProductImageUploadSessionStatusResult> {
+  const requestTarget = deps.requestTarget ?? ((t: string) => requestPhoneUploadTarget(t));
+  const uploadToSignedUrl = deps.uploadToSignedUrl ?? defaultUploadToSignedUrl;
+  const publicUrl = deps.publicUrl ?? defaultPublicUrl;
+  const complete = deps.complete ?? completeProductImageUploadSession;
+  const readSession = deps.readSession ?? getProductImageUploadSessionByToken;
+
+  let storagePath = "";
+  for (let attempt = 0; ; attempt++) {
+    const target = await requestTarget(sessionToken);
+    storagePath = target.storagePath;
+    if (target.kind === "alreadyUploaded") break;
+    const { error } = await uploadToSignedUrl(target.storagePath, target.uploadToken, image);
+    if (!error) break;
+    const failure = classifyStorageUploadError(error);
+    if (failure === "duplicate") break;
+    if ((failure === "expired_token" || failure === "network") && attempt === 0) continue;
+    const message = (error as { message?: unknown }).message;
+    throw new Error(`Image upload failed: ${typeof message === "string" && message ? message : "unknown error"}`);
+  }
+
+  try {
+    return await complete({
+      token: sessionToken,
+      storagePath,
+      publicUrl: await publicUrl(storagePath),
+      bytes: image.bytes,
+      mimeType: image.mimeType,
+    });
+  } catch (e) {
+    const current = await readSession(sessionToken).catch(() => null);
+    if (current?.status === "COMPLETED" && current.storagePath === storagePath) return current;
+    if (current && current.status !== "PENDING") throw new PhoneUploadInactiveError(current.status);
+    throw e;
+  }
 }
 
 export async function getProductImageUploadSessionStatus(

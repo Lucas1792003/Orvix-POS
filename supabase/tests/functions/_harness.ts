@@ -7,6 +7,9 @@
 //   * <SUPABASE_URL>/rest/v1/<table>?...     -> MockPostgrest (in-memory tables; parses the
 //                                               exact filters supabase-js emits)
 //   * <SUPABASE_URL>/auth/v1/user            -> MockAuth (bearer -> user, or 401)
+//   * <SUPABASE_URL>/rest/v1/rpc/<fn>        -> MockPostgrest.rpcs[fn] when registered
+//                                               (otherwise an error, as before)
+//   * <SUPABASE_URL>/storage/v1/object/...   -> MockStorage (HEAD object, POST upload/sign)
 // Anything else throws. The tests are run WITHOUT --allow-net, so a request
 // that escaped the mock would be denied by Deno as well. No database, no
 // email provider, no server is involved.
@@ -71,7 +74,7 @@ export const loadHandler = async (name: string): Promise<Handler> => {
 // ---------------------------------------------------------------- call log
 export interface LoggedCall {
   seq: number;
-  kind: "resend" | "postgrest" | "auth";
+  kind: "resend" | "postgrest" | "auth" | "storage";
   method: string;
   url: string;
   path: string;
@@ -199,6 +202,8 @@ const RESERVED = new Set(["select", "order", "limit", "offset", "on_conflict", "
 export class MockPostgrest {
   tables: Record<string, Row[]> = {};
   calls: LoggedCall[] = [];
+  /** Registered RPC handlers (fn name -> JSON body -> [status, body]). Unregistered RPCs throw. */
+  rpcs: Record<string, (args: Record<string, unknown>) => [number, unknown]> = {};
   /** Force an error for a method+table, e.g. failDelete("audit_logs"). */
   failures: { method: string; table: string; status: number; message: string }[] = [];
   idCounter = 1;
@@ -213,7 +218,13 @@ export class MockPostgrest {
     const table = url.pathname.replace(/^\/rest\/v1\//, "");
     assert(call.headers["apikey"] === SERVICE_ROLE_KEY, `PostgREST call without the service-role apikey header (${table})`);
     assert(call.headers["authorization"] === `Bearer ${SERVICE_ROLE_KEY}`, `PostgREST call without the service-role bearer (${table})`);
-    if (table.startsWith("rpc/")) throw new Error(`MockPostgrest: rpc not expected: ${table}`);
+    if (table.startsWith("rpc/")) {
+      const fn = this.rpcs[table.slice(4)];
+      if (!fn) throw new Error(`MockPostgrest: rpc not expected: ${table}`);
+      const [status, body] = fn((call.body ?? {}) as Record<string, unknown>);
+      call.status = status;
+      return json(body, status);
+    }
     const rows = this.tables[table];
     if (!rows) {
       call.status = 404;
@@ -303,11 +314,53 @@ export class MockPostgrest {
   }
 }
 
+// ---------------------------------------------------------------- Storage mock
+/** storage-api v1.74 shapes for the two object routes the functions use:
+ *  HEAD /storage/v1/object/<bucket>/<path>          -> 200 | 400 (not found)
+ *  POST /storage/v1/object/upload/sign/<bucket>/<path> -> { url: "/object/upload/sign/<bucket>/<path>?token=<jwt>" }
+ *  Every call must carry the service-role key. Signed tokens are fake JWTs
+ *  whose payload records the path, so tests can check what was signed. */
+export class MockStorage {
+  objects = new Set<string>(); // "<bucket>/<path>"
+  calls: LoggedCall[] = [];
+  signed: { bucket: string; path: string; upsert: boolean; token: string }[] = [];
+  lifetimeSeconds = 60;
+  failSign: number | null = null;
+  handle(call: LoggedCall): Response {
+    this.calls.push(call);
+    assert(call.headers["apikey"] === SERVICE_ROLE_KEY, "storage call without the service-role apikey header");
+    assert(call.headers["authorization"] === `Bearer ${SERVICE_ROLE_KEY}`, "storage call without the service-role bearer");
+    const rest = decodeURIComponent(call.path.replace(/^\/storage\/v1\/object\//, ""));
+    if (call.method === "HEAD") {
+      const exists = this.objects.has(rest);
+      call.status = exists ? 200 : 400;
+      return new Response(null, { status: call.status });
+    }
+    if (call.method === "POST" && rest.startsWith("upload/sign/")) {
+      const full = rest.slice("upload/sign/".length);
+      const bucket = full.slice(0, full.indexOf("/"));
+      const path = full.slice(full.indexOf("/") + 1);
+      if (this.failSign) {
+        call.status = this.failSign;
+        return json({ statusCode: String(this.failSign), error: "Error", message: "simulated storage failure" }, this.failSign);
+      }
+      const now = Math.floor(Date.now() / 1000);
+      const b64 = (o: unknown) => btoa(JSON.stringify(o)).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+      const token = `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ url: `${bucket}/${path}`, upsert: call.headers["x-upsert"] === "true", iat: now, exp: now + this.lifetimeSeconds })}.mock-signature-${this.signed.length}`;
+      this.signed.push({ bucket, path, upsert: call.headers["x-upsert"] === "true", token });
+      call.status = 200;
+      return json({ url: `/object/upload/sign/${bucket}/${path}?token=${token}` }, 200);
+    }
+    throw new Error(`MockStorage: unsupported ${call.method} ${call.path}`);
+  }
+}
+
 // ---------------------------------------------------------------- fetch router
 export interface World {
   resend: MockResend;
   db: MockPostgrest;
   auth: MockAuth;
+  storage: MockStorage;
   calls: LoggedCall[];
   /** Calls in order, kind + method + table/path only — for ordering assertions. */
   trace(): string[];
@@ -328,6 +381,7 @@ export const makeWorld = (): World => {
   const resend = new MockResend();
   const db = new MockPostgrest();
   const auth = new MockAuth();
+  const storage = new MockStorage();
   const calls: LoggedCall[] = [];
   let seq = 0;
   const realFetch = globalThis.fetch;
@@ -354,6 +408,11 @@ export const makeWorld = (): World => {
       calls.push(call);
       return auth.handle(call);
     }
+    if (req.url.startsWith(`${SUPABASE_URL}/storage/v1/object/`)) {
+      call.kind = "storage";
+      calls.push(call);
+      return storage.handle(call);
+    }
     if (req.url.startsWith(`${SUPABASE_URL}/rest/v1/`)) {
       calls.push(call);
       return await db.handle(call, req);
@@ -366,11 +425,13 @@ export const makeWorld = (): World => {
     resend,
     db,
     auth,
+    storage,
     calls,
     trace: () =>
       calls.map((c) => {
         if (c.kind === "resend") return `resend:POST`;
         if (c.kind === "auth") return `auth:GET user`;
+        if (c.kind === "storage") return `storage:${c.method} ${c.path.replace("/storage/v1/object/", "").startsWith("upload/sign/") ? "sign" : "object"}`;
         return `db:${c.method} ${c.path.replace("/rest/v1/", "")}`;
       }),
     restore: () => {

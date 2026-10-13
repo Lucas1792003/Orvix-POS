@@ -2,16 +2,24 @@ import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useParams } from "react-router-dom";
 import { Button } from "../components/ui/Button";
 import { compressProductImage, formatImageSize } from "../lib/compressProductImage";
-import { PRODUCT_IMAGE_BUCKET } from "../lib/productImageStorage";
 import {
-  completeProductImageUploadSession,
   getProductImageUploadSessionByToken,
+  PhoneUploadInactiveError,
+  PhoneUploadRefusedError,
+  uploadPhoneProductImage,
   type ProductImageUploadSessionStatusResult,
 } from "../lib/productImagePhoneUpload";
-import { supabase } from "../lib/supabase";
 import { reportError } from "../lib/errors";
 
-type UploadPhase = "loading" | "ready" | "compressing" | "uploading" | "complete" | "expired" | "error";
+type UploadPhase =
+  | "loading"
+  | "ready"
+  | "compressing"
+  | "uploading"
+  | "complete"
+  | "expired"
+  | "cancelled"
+  | "error";
 
 export const PhoneProductImageUploadPage = () => {
   const { token = "" } = useParams<{ token: string }>();
@@ -21,6 +29,9 @@ export const PhoneProductImageUploadPage = () => {
   const [phase, setPhase] = useState<UploadPhase>("loading");
   const [error, setError] = useState<string | null>(null);
   const [compressedBytes, setCompressedBytes] = useState<number | null>(null);
+  // One upload at a time: a double tap (or a second file picked while the
+  // first is still compressing) must not start a second transfer.
+  const inFlightRef = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -40,10 +51,7 @@ export const PhoneProductImageUploadPage = () => {
         if (result.status === "PENDING") setPhase("ready");
         else if (result.status === "COMPLETED") setPhase("complete");
         else if (result.status === "EXPIRED") setPhase("expired");
-        else {
-          setPhase("error");
-          setError("This upload link is no longer active.");
-        }
+        else setPhase("cancelled");
       })
       .catch((e) => {
         if (!active) return;
@@ -68,18 +76,12 @@ export const PhoneProductImageUploadPage = () => {
   }, [phase, session]);
 
   const handleFile = async (file: File) => {
-    if (!session || phase !== "ready") return;
+    if (!session || phase !== "ready" || inFlightRef.current) return;
     if (Date.parse(session.expiresAt) <= Date.now()) {
       setPhase("expired");
       return;
     }
-
-    const uploadToken = session.uploadToken;
-    if (!uploadToken) {
-      setPhase("error");
-      setError("This upload link is not ready. Please create a new QR code on the computer.");
-      return;
-    }
+    inFlightRef.current = true;
 
     setError(null);
     setPhase("compressing");
@@ -88,27 +90,27 @@ export const PhoneProductImageUploadPage = () => {
       setCompressedBytes(image.bytes);
 
       setPhase("uploading");
-      const { error: uploadError } = await supabase.storage
-        .from(PRODUCT_IMAGE_BUCKET)
-        .uploadToSignedUrl(session.storagePath, uploadToken, image.blob, {
-          cacheControl: "31536000",
-          contentType: image.mimeType,
-        });
-      if (uploadError) throw new Error(`Image upload failed: ${uploadError.message}`);
-
-      const { data } = supabase.storage.from(PRODUCT_IMAGE_BUCKET).getPublicUrl(session.storagePath);
-      const completed = await completeProductImageUploadSession({
-        token,
-        storagePath: session.storagePath,
-        publicUrl: data.publicUrl,
-        bytes: image.bytes,
-        mimeType: image.mimeType,
-      });
+      // Just in time: the signed upload token (valid ~60 s) is requested from
+      // the server right now, inside uploadPhoneProductImage, immediately
+      // before the transfer - never at page load. An expired token is
+      // replaced once, and a transfer that already landed goes straight to
+      // completion (no second object, no second completion).
+      const completed = await uploadPhoneProductImage(token, image);
       setSession(completed);
       setPhase("complete");
     } catch (e) {
+      if (e instanceof PhoneUploadInactiveError) {
+        setPhase(e.status === "COMPLETED" ? "complete" : e.status === "CANCELED" ? "cancelled" : "expired");
+        return;
+      }
       setPhase("error");
-      setError(reportError("PhoneProductImageUploadPage.upload", e, "The photo could not be uploaded."));
+      setError(
+        e instanceof PhoneUploadRefusedError
+          ? e.message
+          : reportError("PhoneProductImageUploadPage.upload", e, "The photo could not be uploaded."),
+      );
+    } finally {
+      inFlightRef.current = false;
     }
   };
 
@@ -130,10 +132,12 @@ export const PhoneProductImageUploadPage = () => {
           : phase === "complete"
             ? "Photo uploaded. You can return to the computer."
             : phase === "expired"
-              ? "This upload link has expired."
-              : phase === "ready"
-                ? "Choose or take a product photo."
-                : "Upload failed.";
+              ? "This upload link has expired. Create a new QR code on the computer."
+              : phase === "cancelled"
+                ? "This upload link was cancelled on the computer. Create a new QR code to upload."
+                : phase === "ready"
+                  ? "Choose or take a product photo."
+                  : "Upload failed.";
 
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-6 text-slate-900">

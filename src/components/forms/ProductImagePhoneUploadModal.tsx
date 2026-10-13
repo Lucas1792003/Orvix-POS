@@ -5,10 +5,10 @@ import { Modal } from "../ui/Modal";
 import { formatImageSize } from "../../lib/compressProductImage";
 import {
   cancelProductImageUploadSession,
-  createSignedProductImageUploadSession,
+  createPhoneProductImageUploadSession,
   getProductImageUploadSessionStatus,
+  type ProductImageUploadQrSession,
   type ProductImageUploadSessionStatus,
-  type ProductImageUploadSignedSession,
 } from "../../lib/productImagePhoneUpload";
 
 interface ProductImagePhoneUploadModalProps {
@@ -42,7 +42,7 @@ export const ProductImagePhoneUploadModal = ({
   onClose,
   onUploaded,
 }: ProductImagePhoneUploadModalProps) => {
-  const [session, setSession] = useState<ProductImageUploadSignedSession | null>(null);
+  const [session, setSession] = useState<ProductImageUploadQrSession | null>(null);
   const [phase, setPhase] = useState<ModalPhase>("creating");
   const [error, setError] = useState<string | null>(null);
   const [uploadedBytes, setUploadedBytes] = useState<number | undefined>();
@@ -68,7 +68,7 @@ export const ProductImagePhoneUploadModal = ({
     setUploadedUrl(undefined);
     setSecondsLeft(0);
 
-    createSignedProductImageUploadSession({ productId, shopId })
+    createPhoneProductImageUploadSession({ productId, shopId })
       .then((nextSession) => {
         if (!active) return;
         setSession(nextSession);
@@ -94,6 +94,8 @@ export const ProductImagePhoneUploadModal = ({
     return () => window.clearInterval(timer);
   }, [open, phase, session]);
 
+  // No token refresh here: the phone obtains its signed upload token just in
+  // time from the phone-upload-token Edge Function. The desktop only polls.
   useEffect(() => {
     if (!open || !session || phase !== "PENDING") return;
 

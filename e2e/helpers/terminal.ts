@@ -12,7 +12,7 @@
 // navigator.onLine override + online/offline events — which is exactly what
 // the app keys its offline mode on.
 import {
-  _electron as electron, chromium, expect,
+  _electron as electron, chromium, devices, expect,
   type Browser, type BrowserContext, type ElectronApplication, type Locator, type Page, type Request, type Route,
   type WebSocketRoute,
 } from "@playwright/test";
@@ -167,6 +167,17 @@ export class Terminal {
     const context = await browser.newContext({ viewport: { width: 1366, height: 768 } });
     await context.addInitScript(LANG_INIT);
     await context.addInitScript(SHOP_WRITE_SPY);
+    const page = await context.newPage();
+    return new Terminal("browser", page, context, undefined, browser);
+  }
+
+  /** A phone: Chromium with an iPhone 13 profile (viewport, DPR, touch,
+   *  mobile UA). Used for the anonymous QR upload page. Same hosted guard. */
+  static async launchPhone(options: { headless?: boolean } = {}): Promise<Terminal> {
+    const { defaultBrowserType: _ignored, ...iphone } = devices["iPhone 13"];
+    void _ignored;
+    const browser = await chromium.launch({ headless: options.headless ?? true });
+    const context = await browser.newContext({ ...iphone });
     const page = await context.newPage();
     return new Terminal("browser", page, context, undefined, browser);
   }
