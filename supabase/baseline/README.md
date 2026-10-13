@@ -73,5 +73,5 @@ without an explicit URL. Review the diff against the previous baseline, run
 the harness against it, then commit the file - it is schema only, contains no
 rows and no secrets, and is what path (b) depends on.
 
-The raw export under `~/shwephala-migration/<timestamp>/` is **not** committed;
+The raw export under `<workspace>/<timestamp>/` is **not** committed;
 it is the evidence snapshot, not the baseline.

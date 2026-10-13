@@ -9,7 +9,7 @@ run time, URLs and paths from arguments.
 Conventions: `mac$` = this repo on the Mac; `ls$` = the self-hosted server as
 the deploy user; `db$` = inside the `db` container
 (`docker compose exec -T db psql -U supabase_admin -d postgres`). Dump files
-live in `~/shwephala-migration/<ts>/` (0700, outside the repo), never in `tools/`.
+live in `<workspace>/<ts>/` (0700, outside the repo), never in `tools/`.
 
 ## Tools
 

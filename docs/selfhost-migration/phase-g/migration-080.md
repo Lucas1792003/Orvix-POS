@@ -4,7 +4,7 @@
 the self-hosted stack, the hosted project or any real database. Every database result
 below comes from the disposable harness (`supabase/tests/phase-d/run.sh`,
 throwaway container, synthetic data). Production facts come read-only from
-the snapshot `~/shwephala-migration/<ts>/`. The storage-api facts
+the snapshot `<workspace>/<ts>/`. The storage-api facts
 come from the local `supabase/storage-api:v1.74.0` image. Nothing is
 committed.
 

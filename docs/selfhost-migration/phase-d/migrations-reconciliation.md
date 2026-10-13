@@ -1,7 +1,7 @@
 # Phase D · Reconciliation of migrations 059–061 against production
 
 Source of truth: the scrubbed production schema snapshot of 2026-10-11
-(`~/shwephala-migration/<ts>/schema.scrubbed.sql`, pg_dump of the
+(`<workspace>/<ts>/schema.scrubbed.sql`, pg_dump of the
 hosted project, no data). Every object that migrations `059`, `060` and `061`
 create or alter was compared with its definition in that snapshot: tables by
 columns/defaults/constraints/indexes, functions by body, policies by

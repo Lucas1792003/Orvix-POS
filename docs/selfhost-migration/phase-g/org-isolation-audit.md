@@ -1,7 +1,7 @@
 # Phase G — Organization / shop isolation audit (backend)
 
 **Date:** 2026-10-12 · **Scope:** server-side ORGANIZATION and SHOP isolation of
-the Postgres schema in production (`~/shwephala-migration/<ts>/
+the Postgres schema in production (`<workspace>/<ts>/
 schema.scrubbed.sql` + migrations 062–067) · **Method:** policy/function
 inventory + a second synthetic organization in the Phase D DB harness
 (`supabase/tests/phase-d/`, new `t09_org_isolation.sql`), run before and after

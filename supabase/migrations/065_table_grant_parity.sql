@@ -6,7 +6,7 @@
 -- GRANTs drift from production (and the hosted default ACL itself grants ALL
 -- to anon/authenticated/service_role on every new table). This file pins the
 -- EXACT per-relation grant set captured from hosted on 2026-10-11
--- (~/shwephala-migration/<ts>/hosted-grants.txt, 92 rows, 32
+-- (<workspace>/<ts>/hosted-grants.txt, 92 rows, 32
 -- relations incl. the rbac_assignment_violations view) so a fresh install and
 -- the upgraded production database carry identical table privileges. It is
 -- REVOKE ALL then GRANT per relation, for anon / authenticated / service_role.

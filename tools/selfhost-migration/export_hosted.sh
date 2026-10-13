@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Read-only export of the hosted Supabase project into a private workspace on this Mac.
+# Read-only export of the hosted Supabase project into a private local workspace.
 # Run by the OWNER in a terminal (the hosted DB password is prompted once, never stored):
-#   bash tools/selfhost-migration/export_hosted.sh            # new workspace
-#   W=~/shwephala-migration/<ts> bash tools/selfhost-migration/export_hosted.sh   # resume/complete an existing one
+#   MIGRATION_WORKSPACE=<dir> bash tools/selfhost-migration/export_hosted.sh            # new workspace <dir>/<ts>
+#   W=<dir>/<ts> bash tools/selfhost-migration/export_hosted.sh                          # resume/complete an existing one
+# MIGRATION_WORKSPACE (or W) is required: a private directory outside the repo.
 # Every hosted operation is a read (pg_dump / pg_dumpall --roles-only / SELECT / storage download).
 set -euo pipefail
 
@@ -11,8 +12,11 @@ T="$REPO/tools/selfhost-migration"
 cd "$REPO"
 
 umask 077
-W=${W:-"$HOME/shwephala-migration/$(date -u +%Y%m%dT%H%MZ)"}
-mkdir -p "$HOME/shwephala-migration" "$W"; chmod 700 "$HOME/shwephala-migration" "$W"
+if [ -z "${W:-}" ]; then
+  [ -n "${MIGRATION_WORKSPACE:-}" ] || { echo "set MIGRATION_WORKSPACE (private directory outside the repo) or W"; exit 2; }
+  W="$MIGRATION_WORKSPACE/$(date -u +%Y%m%dT%H%MZ)"
+fi
+mkdir -p "$(dirname "$W")" "$W"; chmod 700 "$(dirname "$W")" "$W"
 echo "workspace: $W"
 case "$W" in "$REPO"*) echo "refusing: workspace inside the repo"; exit 1;; esac
 
