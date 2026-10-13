@@ -1,0 +1,10 @@
+# Test runner that mimics the backup host: Ubuntu, bash 5, GNU coreutils,
+# gpg 2.4, curl with smtp, python3, jq. The docker CLI talks to the local
+# daemon through the mounted socket; docker-shim.sh maps
+# `docker compose exec -T db ...` to the disposable test database.
+# Synthetic data only.
+FROM ubuntu:26.04
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      gnupg curl ca-certificates python3 jq coreutils util-linux tar gzip docker-cli procps \
+ && rm -rf /var/lib/apt/lists/*

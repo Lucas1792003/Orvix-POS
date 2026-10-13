@@ -279,6 +279,27 @@ hard-linked daily/weekly dumps become objects), `--backup-dir` layout,
 round-trip (decrypt + `MANIFEST.sha256`), bundle retention, status
 thresholds. shellcheck clean.
 
+**Superseded (2026-10-13):** the owner chose email as the offsite channel; the
+R2/Mac tier above stays in the repo, disabled and unused.
+
+## Email tier (Phase F) — prepared, not deployed
+
+Design, sizes, owner checklist: `docs/selfhost-migration/phase-f/email-backup-design.md`;
+restore runbook: `docs/selfhost-migration/phase-f/restore-from-email.md`.
+Everything is gated by `EMAIL_ENABLED` (and `EMAIL_REPORT_ENABLED`) in `backup.env`:
+while false the scripts exit 0 with "email tier disabled" and `backup-status.sh`
+only gains the line `email tier: disabled`.
+
+| Script | What | Cadence (commented in `crontab.lucario`) |
+|---|---|---|
+| `email-archive.sh` | weekly encrypted recovery archive (dumps, roles, storage files, functions, config, manifest) → gpg to the owner's public key → 15 MiB parts → one mail per part; resume-aware, idempotent per week; `--selftest` sends synthetic content only | Sun 04:30 UTC (+06:30 resume) |
+| `email-secrets.sh` | separate gpg-encrypted `.env` + pgsodium key + backup config; kept locally, mailed only in `EMAIL_SECRETS_MODE=email` and only on change | Sun 04:40 UTC |
+| `email-report.sh` (+ `.sql`, `.py`) | daily per-organization business report (read-only SQL) with a backup-health block | 01:00 UTC (+03:00 retry) |
+| `email-status.sh` | email-tier health for `backup-status.sh` | embedded |
+| `email-unpack.py` | owner side: reassemble + verify the parts from `.eml`/mbox | — |
+
+Tests: `tests/email/run.sh` (Docker, synthetic data only; 194 checks).
+
 ## Known limitations / open items
 
 - RPO: bounded by `archive_timeout=300` plus archive time (measured 113–223 ms

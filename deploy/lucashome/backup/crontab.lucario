@@ -30,3 +30,16 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ## weekly restore FROM the remote into throwaways (after the local drill at 03:30)
 #30 5 * * 0   /srv/supabase/backup/bin/offsite-restore-test.sh >>/srv/supabase/backups/logs/cron.log 2>&1
 # (offsite-status.sh needs no line: backup-status.sh embeds it every 30 min)
+
+# --- email tier (Phase F, email-backup-design.md) — COMMENTED OUT until the owner enablement checklist is done ---
+# Scripts exit 0 with "email tier disabled" while EMAIL_ENABLED != true. UTC times.
+## weekly encrypted recovery archive: Sunday 04:30 UTC (11:00 Yangon), after the 03:30 restore drill
+#30 4 * * 0   /srv/supabase/backup/bin/email-archive.sh  >>/srv/supabase/backups/logs/cron.log 2>&1
+## separate secrets file (local build; mailed only when the set changed if EMAIL_SECRETS_MODE=email)
+#40 4 * * 0   /srv/supabase/backup/bin/email-secrets.sh  >>/srv/supabase/backups/logs/cron.log 2>&1
+## daily report for yesterday (Yangon business day): 01:00 UTC = 07:30 Yangon; retried at 03:00 (no double send)
+#0 1 * * *    /srv/supabase/backup/bin/email-report.sh   >>/srv/supabase/backups/logs/cron.log 2>&1
+#0 3 * * *    /srv/supabase/backup/bin/email-report.sh   >>/srv/supabase/backups/logs/cron.log 2>&1
+## second weekly attempt (resumes unsent parts, no-op if Sunday's run completed)
+#30 6 * * 0   /srv/supabase/backup/bin/email-archive.sh  >>/srv/supabase/backups/logs/cron.log 2>&1
+# (email-status.sh needs no line: backup-status.sh embeds it every 30 min)
