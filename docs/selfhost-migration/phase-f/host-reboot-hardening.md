@@ -267,6 +267,8 @@ The battery carries it (limit 50 %, ~1–2 h). If it powers off: plug in, press 
 
 Order of application: after a successful G3, one item at a time, verify, then the next. Each is $0.
 
+> SSH, firewall, Docker networking and Tailscale items (H0, H-F1, H-F2, H-S1, H-T1, H-T2, H-D1, H-U1) have a deeper audit and a staged procedure with dead-man rollback timers in [`host-hardening-staged.md`](host-hardening-staged.md) (2026-10-13). Use that file for those items.
+
 | ID | Change | Exact commands (owner, `sudo` unless noted) | Verify | Revert | Approval |
 |---|---|---|---|---|---|
 | **H0** | Read-only sudo inspection (answers N1/N6/N2 unknowns) | `sudo ufw status verbose; sudo iptables -S \| head -60; sudo nft list ruleset \| head -80; sudo sshd -T \| grep -E '^(port\|listenaddress\|passwordauthentication\|kbdinteractiveauthentication\|permitrootlogin\|pubkeyauthentication) '; sudo ss -tlnpu` | paste to engineer (no secrets) | n/a | **needs owner approval** |
