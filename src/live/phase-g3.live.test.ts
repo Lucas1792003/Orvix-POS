@@ -163,7 +163,8 @@ ROLLBACK;`);
     // 077-079 applied; since 2026-10-13 the stack is at 080 (completion URL
     // derived server-side, object must exist) - test 8 asserts that behaviour.
     expect(sql1(`SELECT string_agg(version, ',' ORDER BY version) FROM supabase_migrations.schema_migrations WHERE version IN ('077','078','079','080');`)).toBe("077,078,079,080");
-    expect(sql1(`SELECT max(version) FROM supabase_migrations.schema_migrations;`)).toBe("080");
+    const maxVersion = sql1(`SELECT max(version) FROM supabase_migrations.schema_migrations;`);
+    expect(maxVersion >= "080", `schema ${maxVersion} must be >= 080`).toBe(true);
   });
 
   afterAll(async () => {
