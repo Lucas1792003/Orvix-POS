@@ -112,7 +112,7 @@ def scrub_data(lines: list[str], drops: list[str]) -> tuple[list[str], dict, lis
         entry = {"table": name, "rows": len(block.data_lines), "line": block.start_lineno}
         if name == CRON_JOB:
             cron_lines = [redact_jwts(block.header_line)] + [redact_jwts(ln) for ln in block.data_lines] + ["\\."]
-            entry["reason"] = "cron.job redacted copy written to --cron-out; re-create with render_cron.py"
+            entry["reason"] = "cron.job redacted copy written to --cron-out; not re-created (jobs retired 2026-10-13)"
             report["cron_job_block"] = entry
             report["blocks_dropped"].append(entry)
             continue

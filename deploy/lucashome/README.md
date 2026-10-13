@@ -28,9 +28,10 @@ so `docker compose …` in `/srv/supabase/stack` always applies the override.
 ## Edge functions
 
 `/srv/supabase/stack/volumes/functions/` contains upstream `main/` and
-`deno.jsonc` plus the five app functions copied from `supabase/functions/` in
-this repo (`admin-2fa`, `email-sales-report`, `weekly-sales-report`,
-`rotate-audit-log`, `platform-console`). Upstream `hello/` removed. Re-sync
+`deno.jsonc` plus the four app functions copied from `supabase/functions/` in
+this repo (`admin-2fa`, `email-sales-report`, `phone-upload-token`,
+`platform-console`). `rotate-audit-log` and `weekly-sales-report` were removed
+2026-10-13 (moved to `~/removed-edge-functions-20261013/` on the server). Upstream `hello/` removed. Re-sync
 with:
 
 ```

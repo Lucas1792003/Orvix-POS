@@ -23,7 +23,6 @@ live in `~/shwephala-migration/<ts>/` (0700, outside the repo), never in `tools/
 | `upload_objects.py` | re-upload storage objects by name with original `Content-Type`/`Cache-Control`, 4 threads, 3 retries, `--dry-run`, `upload-report.json` |
 | `verify_objects.py` | fetch every public URL, compare sha256/md5 and size, print `N/N ok`; `--make-manifest DIR` |
 | `sql/post_restore_checks.sql` | orphan / URL-host / sequence / publication / anon-EXECUTE / RLS / policy / migration / cron / extension checks with a `status` column |
-| `render_cron.py` + `sql/recreate_cron.sql.template` | render the two `cron.schedule` statements (same expressions as `supabase/schedule_*.sql`) with the self-hosted URL and the key from `SERVICE_ROLE_KEY`, into a 0600 file |
 | `tests/` | `python3 -m unittest discover -s tests -t .` — synthetic fixtures only, a local HTTP server for upload/verify |
 
 Common input shapes: everything that reads query output accepts both the CLI's
@@ -125,16 +124,9 @@ ls$ docker compose exec -T db psql -U supabase_admin -d postgres -f /tmp/post_re
 Every row must be `ok` or `INFO`; `ACTION` rows print the statement to run
 (`setval` for `auth.refresh_tokens_id_seq`); any `FAIL` stops the gate.
 
-### 8. Cron jobs (runbook §4.8 — production only, not rehearsal before R1.12)
+### 8. Cron jobs
 
-```
-mac$ SERVICE_ROLE_KEY='<NEW service-role key>' python3 $T/render_cron.py --out $W/recreate_cron.sql
-ls$  docker compose cp $W/recreate_cron.sql db:/tmp/recreate_cron.sql
-ls$  docker compose exec -T db psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 -f /tmp/recreate_cron.sql
-ls$  docker compose exec -T db rm /tmp/recreate_cron.sql; rm $W/recreate_cron.sql
-```
-`--functions-base-url` defaults to `http://api-gw:8000/functions/v1`. The file
-is 0600 and contains the key: delete both copies afterwards.
+Removed 2026-10-13: the only two cron jobs (`rotate-audit-log`, `weekly-sales-report`) were retired with their functions (cross-org disclosure; destructive audit rotation). No cron job is to be created on the self-hosted stack. `scrub_dump.py` still drops the hosted `cron.job` rows from the dump.
 
 ### 9. Manifest comparison (runbook §4.10)
 
