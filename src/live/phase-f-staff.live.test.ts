@@ -154,7 +154,7 @@ describe.skipIf(!LIVE)("Phase F live: staff-admin with DISABLE_SIGNUP=true", () 
     B.authId = await createAuthUser(cfg, B.email, password);
     const oi = await svc.from("organizations").insert({ id: B.org, name: `QA F Org B ${ts}` });
     if (oi.error) throw new Error(`org B: ${oi.error.message}`);
-    const si = await svc.from("shops").insert({ id: B.shop, code: `QF${ts.slice(-6)}`, name: `QA F Shop B ${ts}`, org_id: B.org, is_active: true });
+    const si = await svc.from("shops").insert({ id: B.shop, code: `QF${ts.slice(-6)}`, name: `QA F Shop B ${ts}`, address: "QA F Street", org_id: B.org, is_active: true });
     if (si.error) throw new Error(`shop B: ${si.error.message}`);
     const ui = await svc.from("users").insert({ id: B.adminId, name: "QA F B Admin", email: B.email, role: "ADMIN", org_id: B.org, auth_id: B.authId, is_active: true, created_at: new Date().toISOString() });
     if (ui.error) throw new Error(`admin B: ${ui.error.message}`);

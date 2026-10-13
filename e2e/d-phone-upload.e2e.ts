@@ -65,7 +65,7 @@ const FN_MODE = (process.env.E2E_PHONE_FN ?? "deployed").trim();
 if (FN_MODE !== "deployed" && FN_MODE !== "local") throw new Error(`E2E_PHONE_FN must be "deployed" or "local", got "${FN_MODE}"`);
 const PAGE_PATH = "/functions/v1/phone-upload-page";
 // Default "local" until phone-upload-page + the router patch are deployed (phone-qr-origin.md §6), then "deployed".
-const PAGE_MODE = (process.env.E2E_PHONE_PAGE ?? "local").trim();
+const PAGE_MODE = (process.env.E2E_PHONE_PAGE ?? "deployed").trim();
 if (PAGE_MODE !== "deployed" && PAGE_MODE !== "local") throw new Error(`E2E_PHONE_PAGE must be "deployed" or "local", got "${PAGE_MODE}"`);
 const MODES = `fn ${FN_MODE}, page ${PAGE_MODE}`;
 const QA_OBJECT = new RegExp(`^org/${ids.org}/temp/pimg-[0-9a-f]+$`);
