@@ -213,9 +213,11 @@ in migration 080's header. Phone uploads depend on it.
 4. Backups first, before anything else changes: deploy the backup scripts
    (`deploy/lucashome/backup/deploy.sh`), restore `backup.env` from the
    secrets file, then run `backup-logical.sh` once and `backup-status.sh` →
-   OK. Re-enable the email tier with a **new** send-only key (revoke the old
-   one, which was on the lost host) per the design doc §10, and run
-   `--selftest`.
+   OK. Re-enable the email tier with a **new** send-only credential (revoke the old
+   one, which was on the lost host: for `gmail-api`, sender account → Security →
+   *Third-party apps & services* → remove the app, then re-mint with
+   `gmail-oauth-mint.py` on the Mac) per the design doc §10, and run
+   `--selftest` and `--selftest --selftest-parts 3`.
 5. Clean up the plaintext: on the host, `rm -rf /srv/supabase/restore`. On the
    device, `rm -rf ~/restore/out ~/restore/s` and delete the
    `secrets.tar`/`archive.tar` files. Drop `postgres_fresh` after a day of

@@ -46,6 +46,7 @@ else
   case "$MAIL_TRANSPORT" in
     resend) [[ -f "$RESEND_KEY_FILE" ]] || PROBLEMS+=("email tier: $RESEND_KEY_FILE missing") ;;
     smtp) [[ "$SMTP_NETRC_FILE" == none || -f "$SMTP_NETRC_FILE" ]] || PROBLEMS+=("email tier: $SMTP_NETRC_FILE missing") ;;
+    gmail-api) [[ -f "$GMAIL_OAUTH_FILE" ]] || PROBLEMS+=("email tier: $GMAIL_OAUTH_FILE missing (owner must mint it with gmail-oauth-mint.py)") ;;
   esac
 fi
 

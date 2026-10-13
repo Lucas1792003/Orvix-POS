@@ -19,9 +19,9 @@ done
 
 ssh "$HOST" "mkdir -p $REMOTE_BASE/bin && chmod 0700 $REMOTE_BASE $REMOTE_BASE/bin"
 # mac-pull.sh runs on the Mac (MAC-TIER.md), not on lucashome
-# email tier helpers: email-*.py (stdlib python) and email-report.sql live next to the scripts; tests/ is never copied
-rsync -a --delete --exclude deploy.sh --exclude mac-pull.sh --exclude owner-key-setup.sh --exclude tests/ --include '*.sh' --include 'email-*.py' --include 'email-*.sql' --exclude '*' "$HERE/" "$HOST:$REMOTE_BASE/bin/"
-ssh "$HOST" "chmod 0700 $REMOTE_BASE/bin/*.sh && chmod 0600 $REMOTE_BASE/bin/email-*.py $REMOTE_BASE/bin/email-*.sql"
+# email tier helpers: email-*.py + gmail-oauth-mint.py (--check on the server; stdlib python) and email-report.sql live next to the scripts; tests/ is never copied
+rsync -a --delete --exclude deploy.sh --exclude mac-pull.sh --exclude owner-key-setup.sh --exclude tests/ --include '*.sh' --include 'email-*.py' --include 'gmail-oauth-mint.py' --include 'email-*.sql' --exclude '*' "$HERE/" "$HOST:$REMOTE_BASE/bin/"
+ssh "$HOST" "chmod 0700 $REMOTE_BASE/bin/*.sh && chmod 0600 $REMOTE_BASE/bin/email-*.py $REMOTE_BASE/bin/gmail-oauth-mint.py $REMOTE_BASE/bin/email-*.sql"
 # syntax check with the target's bash (macOS ships bash 3.2, the scripts need 4+)
 ssh "$HOST" "for f in $REMOTE_BASE/bin/*.sh; do bash -n \"\$f\" || exit 1; done && echo 'remote bash -n: ok'"
 # config: never overwrite a live backup.env

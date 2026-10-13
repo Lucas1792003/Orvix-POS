@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# suite.sh — email-tier tests; runs INSIDE the phf-mail-runner container (started by run.sh).
+# suite.sh — email-tier tests; runs INSIDE the <prefix>-runner container (started by run.sh; prefix
+# PHF_PREFIX, default phf-mail, so parallel runs on one Docker host do not collide).
 # Synthetic data only: a disposable supabase/postgres seeded with fake rows, a fake server tree,
 # a throwaway gpg key in a tmpfs, a local SMTP catcher (mailpit), an SMTP fault stub and a fake
 # Resend endpoint. Nothing leaves the docker network; no real provider, mailbox or database.
@@ -11,10 +12,11 @@ IMG="${PHF_PG_IMAGE:-supabase/postgres:17.6.1.136}"
 NET="${PHF_NET:?}"
 MP_IMG="${PHF_MAILPIT_IMAGE:?}"
 BASELINE=/baseline/schema.sql
-export PHF_DB_CONTAINER=phf-mail-db
+PFX="${PHF_PREFIX:-phf-mail}"
+export PHF_DB_CONTAINER="${PFX}-db"
 export PHF_DB_PW; PHF_DB_PW="$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 PW="$PHF_DB_PW"
-MP=http://phf-mail-smtp:8025
+MP=http://${PFX}-smtp:8025
 PASS=0; FAIL=0; FAILED_NAMES=()
 ok()  { PASS=$(( PASS + 1 )); printf 'PASS  %s\n' "$*"; }
 bad() { FAIL=$(( FAIL + 1 )); FAILED_NAMES+=("$*"); printf 'FAIL  %s\n' "$*"; }
@@ -72,7 +74,7 @@ FPR="$(fpr_of /keys/owner)"; FPR_OTHER="$(fpr_of /keys/other)"
 gpg --armor --export "$FPR" >"$CRED/owner.pub.asc"
 gpg --homedir /keys/other --armor --export "$FPR_OTHER" >"$CRED/other.pub.asc"
 gpg --armor --export-secret-keys "$FPR" >"$CRED/owner.SECRET.asc" 2>/dev/null; chmod 0600 "$CRED"/*.asc
-printf 'machine phf-mail-smtp login test-sender password not-a-real-password\n' >"$CRED/smtp.netrc"
+printf 'machine %s-smtp login test-sender password not-a-real-password\n' "$PFX" >"$CRED/smtp.netrc"
 printf 're_test_%s\n' "$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')" >"$CRED/resend.key"
 printf 're_wrong_key\n' >"$CRED/resend.wrong.key"
 chmod 0600 "$CRED"/*
@@ -120,7 +122,7 @@ MAIL_TRANSPORT=smtp
 MAIL_FROM="POS backups <backups@example.invalid>"
 ARCHIVE_MAIL_TO=backup-box@example.invalid
 ALERT_MAIL_TO=alerts@example.invalid
-SMTP_URL=smtp://phf-mail-smtp:1025
+SMTP_URL=smtp://${PFX}-smtp:1025
 SMTP_REQUIRE_TLS=false
 SMTP_NETRC_FILE=$CRED/smtp.netrc
 RESEND_API_URL=http://127.0.0.1:18025/emails
@@ -140,26 +142,26 @@ EOF
 chmod 0600 "$BACKUP_ENV"
 
 # local mail catcher (3 MB message limit to exercise a provider-side rejection)
-docker rm -f phf-mail-smtp >/dev/null 2>&1
-docker run -d --name phf-mail-smtp --network "$NET" "$MP_IMG" --max-message-size 3 \
+docker rm -f ${PFX}-smtp >/dev/null 2>&1
+docker run -d --name ${PFX}-smtp --network "$NET" "$MP_IMG" --max-message-size 3 \
   --smtp-auth-accept-any --smtp-auth-allow-insecure >/dev/null || die "mailpit"
 
 # disposable source database: baseline schema + migrations + synthetic seed
-docker rm -f phf-mail-db >/dev/null 2>&1
-docker run -d --name phf-mail-db --network "$NET" --memory 1g -e POSTGRES_PASSWORD="$PW" "$IMG" >/dev/null || die "db run"
-wait_pg phf-mail-db || die "db did not start"
-su_psql phf-mail-db <"$T/prep.sql" >"$W/prep.log" 2>&1 || { cat "$W/prep.log"; die "prep"; }
+docker rm -f ${PFX}-db >/dev/null 2>&1
+docker run -d --name ${PFX}-db --network "$NET" --memory 1g -e POSTGRES_PASSWORD="$PW" "$IMG" >/dev/null || die "db run"
+wait_pg ${PFX}-db || die "db did not start"
+su_psql ${PFX}-db <"$T/prep.sql" >"$W/prep.log" 2>&1 || { cat "$W/prep.log"; die "prep"; }
 # the stack's compose init creates _supabase (analytics/supavisor metadata); the bare image does not
-su_psql phf-mail-db -c 'CREATE DATABASE _supabase' >/dev/null 2>&1
-docker exec -i -e PGPASSWORD="$PW" phf-mail-db psql -X -U supabase_admin -d _supabase -q -c 'CREATE SCHEMA _analytics; CREATE SCHEMA _supavisor;' >/dev/null || die "_supabase"
-su_psql phf-mail-db <"$BASELINE" >"$W/baseline.log" 2>&1 || { tail -20 "$W/baseline.log"; die "baseline"; }
-su_psql phf-mail-db <"$REPO/supabase/migrations/016_product_images_storage.sql" >"$W/m016.log" 2>&1 || { tail "$W/m016.log"; die "016"; }
+su_psql ${PFX}-db -c 'CREATE DATABASE _supabase' >/dev/null 2>&1
+docker exec -i -e PGPASSWORD="$PW" ${PFX}-db psql -X -U supabase_admin -d _supabase -q -c 'CREATE SCHEMA _analytics; CREATE SCHEMA _supavisor;' >/dev/null || die "_supabase"
+su_psql ${PFX}-db <"$BASELINE" >"$W/baseline.log" 2>&1 || { tail -20 "$W/baseline.log"; die "baseline"; }
+su_psql ${PFX}-db <"$REPO/supabase/migrations/016_product_images_storage.sql" >"$W/m016.log" 2>&1 || { tail "$W/m016.log"; die "016"; }
 for f in "$REPO"/supabase/migrations/*.sql; do
   n="$(basename "$f" | cut -d_ -f1)"; [[ "$n" =~ ^[0-9]+$ ]] || continue
   (( 10#$n > 61 )) || continue
-  pg_psql phf-mail-db <"$f" >"$W/mig_$n.log" 2>&1 || { tail -20 "$W/mig_$n.log"; die "migration $n"; }
+  pg_psql ${PFX}-db <"$f" >"$W/mig_$n.log" 2>&1 || { tail -20 "$W/mig_$n.log"; die "migration $n"; }
 done
-su_psql phf-mail-db -At <"$T/seed.sql" >"$W/seed.log" 2>&1 || { cat "$W/seed.log"; die "seed"; }
+su_psql ${PFX}-db -At <"$T/seed.sql" >"$W/seed.log" 2>&1 || { cat "$W/seed.log"; die "seed"; }
 grep '^seeded' "$W/seed.log"
 until curl -sf "$MP/api/v1/messages" >/dev/null; do sleep 1; done
 mp_clear() { curl -s -X DELETE "$MP/api/v1/messages" >/dev/null; }
@@ -222,22 +224,8 @@ mkdir -p "$U/functions"; tar -C "$U/functions" -xzf "$X/files/functions.tar.gz"
 check "functions source identical" diff -r "$U/functions" "$STACK/volumes/functions"
 
 # restore exactly as the runbook says: fresh stack db -> globals -> rename -> pg_restore --create
-docker rm -f phf-mail-restore >/dev/null 2>&1
-docker run -d --name phf-mail-restore --network "$NET" --memory 1g -e POSTGRES_PASSWORD="$PW" "$IMG" >/dev/null
-wait_pg phf-mail-restore || bad "restore db did not start"
-R() { docker exec -i -e PGPASSWORD="$PW" phf-mail-restore "$@"; }
-R psql -X -U supabase_admin -d postgres -q -f - <"$X/db/globals.sql" >"$W/r-globals.log" 2>&1
-R psql -X -U supabase_admin -d template1 -v ON_ERROR_STOP=1 -q >"$W/r-rename.log" 2>&1 <<'SQL'
-ALTER DATABASE postgres ALLOW_CONNECTIONS false;
-SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'postgres' AND pid <> pg_backend_pid();
-ALTER DATABASE postgres RENAME TO postgres_fresh;
-SQL
-check "runbook step: fresh 'postgres' database moved aside" test "$?" -eq 0
-R pg_restore -U supabase_admin -d template1 --create --exit-on-error <"$X/db/postgres.dump" >"$W/r-restore.log" 2>&1; rc=$?
-[[ $rc -eq 0 ]] || tail -15 "$W/r-restore.log"
-check "pg_restore --create --exit-on-error of postgres.dump succeeds" test "$rc" -eq 0
-R pg_restore -U supabase_admin -d template1 --create <"$X/db/_supabase.dump" >"$W/r-restore2.log" 2>&1
-R psql -X -U supabase_admin -d postgres -q -f - <"$X/db/db-settings.sql" >"$W/r-settings.log" 2>&1
+# restore_check CONTAINER XDIR [LABEL] — restores XDIR/db/* into a NEW disposable container and compares
+# row checksums with the source database; LABEL prefixes the check names (T3 uses none). Reused by T16.
 CHK_SQL="select json_build_object(
  'auth_users',(select count(*)||':'||md5(coalesce(string_agg(t::text,'|' order by t.id),'')) from auth.users t),
  'auth_mfa_factors',(select count(*)||':'||md5(coalesce(string_agg(t::text,'|' order by t.id),'')) from auth.mfa_factors t),
@@ -255,13 +243,33 @@ CHK_SQL="select json_build_object(
  'public_tables',(select count(*) from pg_tables where schemaname='public'),
  'public_functions',(select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public'),
  'policies',(select count(*) from pg_policies))"
-SRC_SUM="$(su_psql phf-mail-db -At -c "$CHK_SQL")"
-DST_SUM="$(R psql -X -U supabase_admin -d postgres -At -c "$CHK_SQL" 2>/dev/null)"
-for k in auth_users auth_mfa_factors auth_identities migrations organizations products sales sale_items inventory audit_logs storage_buckets storage_objects app_config public_tables public_functions policies; do
-  check "restored $k matches source (count + row checksum)" test "$(jq -r --arg k "$k" '.[$k]' <<<"$SRC_SUM")" == "$(jq -r --arg k "$k" '.[$k]' <<<"$DST_SUM")"
-done
-check "restored MFA factor secret intact (TOTP keeps working)" test "$(R psql -X -U supabase_admin -d postgres -At -c "select count(*) from auth.mfa_factors where secret like 'PHFCANARYTOTPSECRET%' and status='verified'")" == 1
-docker rm -f phf-mail-restore >/dev/null 2>&1
+restore_check() {
+  local c="$1" x="$2" lb="${3:-}" rc k src dst
+  docker rm -f "$c" >/dev/null 2>&1
+  docker run -d --name "$c" --network "$NET" --memory 1g -e POSTGRES_PASSWORD="$PW" "$IMG" >/dev/null
+  wait_pg "$c" || bad "${lb}restore db did not start"
+  R() { docker exec -i -e PGPASSWORD="$PW" "$c" "$@"; }
+  R psql -X -U supabase_admin -d postgres -q -f - <"$x/db/globals.sql" >"$W/r-globals.log" 2>&1
+  R psql -X -U supabase_admin -d template1 -v ON_ERROR_STOP=1 -q >"$W/r-rename.log" 2>&1 <<'SQL'
+ALTER DATABASE postgres ALLOW_CONNECTIONS false;
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'postgres' AND pid <> pg_backend_pid();
+ALTER DATABASE postgres RENAME TO postgres_fresh;
+SQL
+  check "${lb}runbook step: fresh 'postgres' database moved aside" test "$?" -eq 0
+  R pg_restore -U supabase_admin -d template1 --create --exit-on-error <"$x/db/postgres.dump" >"$W/r-restore.log" 2>&1; rc=$?
+  [[ $rc -eq 0 ]] || tail -15 "$W/r-restore.log"
+  check "${lb}pg_restore --create --exit-on-error of postgres.dump succeeds" test "$rc" -eq 0
+  R pg_restore -U supabase_admin -d template1 --create <"$x/db/_supabase.dump" >"$W/r-restore2.log" 2>&1
+  R psql -X -U supabase_admin -d postgres -q -f - <"$x/db/db-settings.sql" >"$W/r-settings.log" 2>&1
+  src="$(su_psql "${PFX}-db" -At -c "$CHK_SQL")"
+  dst="$(R psql -X -U supabase_admin -d postgres -At -c "$CHK_SQL" 2>/dev/null)"
+  for k in auth_users auth_mfa_factors auth_identities migrations organizations products sales sale_items inventory audit_logs storage_buckets storage_objects app_config public_tables public_functions policies; do
+    check "${lb}restored $k matches source (count + row checksum)" test "$(jq -r --arg k "$k" '.[$k]' <<<"$src")" == "$(jq -r --arg k "$k" '.[$k]' <<<"$dst")"
+  done
+  check "${lb}restored MFA factor secret intact (TOTP keeps working)" test "$(R psql -X -U supabase_admin -d postgres -At -c "select count(*) from auth.mfa_factors where secret like 'PHFCANARYTOTPSECRET%' and status='verified'")" == 1
+  docker rm -f "$c" >/dev/null 2>&1
+}
+restore_check "${PFX}-restore" "$X"
 
 # ============================================================ T5 tamper ==========
 section "T5 tampering is detected"
@@ -435,7 +443,7 @@ run_job email-report.sh --date 2026-10-12 --force; check "--force sends again" t
 printf 'org-missing  x@example.invalid\n' >"$CFG/report-targets.bad"
 REPORT_TARGETS_FILE="$CFG/report-targets.bad" run_job email-report.sh --date 2026-10-12; rc=$?
 check "unknown organization: exit != 0 and status fail" test "$rc" -ne 0 -a "$(st '.jobs["email-report"].last_result')" == fail
-SALES_BEFORE="$(su_psql phf-mail-db -At -c 'select count(*) from sales')"
+SALES_BEFORE="$(su_psql ${PFX}-db -At -c 'select count(*) from sales')"
 check "report is read-only (row counts unchanged)" test "$SALES_BEFORE" -eq 7
 check "report SQL runs in a READ ONLY transaction" grep -q 'READ ONLY' "$BIN/email-report.sql"
 
@@ -571,9 +579,13 @@ run_job email-archive.sh --no-send --output-dir relative/dir --week 2026-W29; rc
 check "--output-dir must be absolute" test "$rc" -ne 0
 rm -rf "$NS" "$W/ns-out" "$W/ns-mail"
 
+# ============================================================ T16 Gmail API ======
+# shellcheck source=suite-gmail.sh
+. "$T/suite-gmail.sh"
+
 # ------------------------------------------------------------------ teardown ----
 kill "$FR" 2>/dev/null
-docker rm -f phf-mail-db phf-mail-smtp phf-mail-restore >/dev/null 2>&1
+docker rm -f ${PFX}-db ${PFX}-smtp ${PFX}-restore phf-gm-e2e-restore >/dev/null 2>&1
 rm -rf /keys/owner /keys/other
 printf '\n==== RESULT: %d passed, %d failed ====\n' "$PASS" "$FAIL"
 for n in ${FAILED_NAMES[@]+"${FAILED_NAMES[@]}"}; do echo "  failed: $n"; done
