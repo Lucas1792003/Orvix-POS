@@ -116,19 +116,36 @@ nor read. A refresh is just another call.
 
 ### Rate limiting
 
-Not implemented. A per-session counter needs a new column, which means a
-migration, and that is out of scope here. In-memory counters are not
-reliable: edge-runtime workers are recycled and the limit would be
-per-worker. The cost of abuse is bounded:
-- every token is for the session's single path;
-- `upsert` is false, so extra tokens add no capability;
-- issuing stops at expiry (≤ 10 min);
-- a caller needs the 128-hex QR token.
+> **Update:** implemented by migration `081_phone_upload_rate_limits.sql`
+> (database-backed, atomic per-session / per-org token limiter and a
+> per-user session-creation limit), the rate-limited function, the phone
+> page's 429 handling and an optional gateway-level bucket. Design, numbers
+> and test evidence: [`../phase-f/rate-limiting.md`](../phase-f/rate-limiting.md).
+> The measurements below are the pre-081 baseline.
 
-If wanted later: add `product_image_upload_sessions.token_issued_count int` +
-`last_token_at`, and do an atomic `UPDATE … SET token_issued_count =
-token_issued_count + 1 WHERE id = … AND token_issued_count < 20 RETURNING`
-before signing.
+Measured against the deployed function before 081
+(`src/live/phase-g4.live.test.ts` test 8, one QA session):
+
+| Load | Result |
+|---|---|
+| 50 sequential requests, same session | 50 × 200 in ~2.0 s (~25/s), latency p50 36 ms / p95 ~60 ms |
+| 50 concurrent requests, same session | 50 × 200 in ~0.65 s, p50 ~0.6 s (serialised in the worker) |
+| tokens returned (100) | **3 distinct**: storage signs `{url, iat, exp}` with second resolution, so requests in the same second get an identical JWT and every new second a new one; lifetime 60 s; all for the one path |
+| capability | unchanged: first PUT 200, any other of the 100 tokens → 400 `409 Duplicate`; 1 object; the function then answers `alreadyUploaded` |
+| state written while issuing | none (session row md5 identical, 0 objects) |
+| 50 concurrent requests with random tokens | 50 × 404 in ~0.35 s (one indexed `token_hash` lookup each) |
+| server-side limit | **none** before 081 |
+
+Cost per accepted call: 1 POST through the API gateway → edge-runtime worker →
+4 service-role PostgREST reads (session, creator, product, shop) + storage
+`HEAD` + storage `POST upload/sign` (≈ 6 internal requests). An invalid token
+costs 1 read.
+
+Impact: no security impact (one path, `upsert:false`, ≤ 10 min, needs the
+128-hex QR token, writes nothing). The risk is **load amplification on a
+small server shared with the tills**: a QR-token holder can drive ~25+
+signed-token requests/s per connection, and anyone with the public anon key
+(it is in every web bundle) can spam invalid tokens.
 
 ## 4. Client changes
 

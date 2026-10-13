@@ -138,14 +138,55 @@ export class PhoneUploadRefusedError extends Error {
   }
 }
 
+/**
+ * The server refused to issue a token for now (migration 081 rate limits:
+ * HTTP 429 {code:"rate_limited", retry_after_seconds} + Retry-After).
+ */
+export class PhoneUploadRateLimitedError extends Error {
+  readonly retryAfterSeconds: number;
+  constructor(retryAfterSeconds: number, message?: string) {
+    super(message ?? "Too many upload attempts. Please wait a moment and try again.");
+    this.name = "PhoneUploadRateLimitedError";
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+/** The phone waits and retries a rate-limited token request by itself at most
+ *  this many times per upload, and only when the wait is this short. */
+export const PHONE_UPLOAD_MAX_RATE_LIMIT_RETRIES = 3;
+export const PHONE_UPLOAD_MAX_AUTO_WAIT_SECONDS = 60;
+
+export type PhoneUploadRateLimitAdvice =
+  /** short wait: the phone waits this long, then retries by itself */
+  | { kind: "wait"; seconds: number }
+  /** longer wait: tell the user to try again in about this many minutes */
+  | { kind: "later"; minutes: number }
+  /** the link will expire before it may be used again (per-session cap): a new QR is needed */
+  | { kind: "linkExhausted" };
+
+/** How the phone should react to a 429, given the session's expiry. */
+export function adviseOnRateLimit(
+  retryAfterSeconds: number,
+  opts: { expiresAt?: string | null; now?: number; retriesSoFar?: number } = {},
+): PhoneUploadRateLimitAdvice {
+  const seconds = Math.max(1, Math.ceil(Number.isFinite(retryAfterSeconds) ? retryAfterSeconds : PHONE_UPLOAD_MAX_AUTO_WAIT_SECONDS));
+  const now = opts.now ?? Date.now();
+  const expiresAt = opts.expiresAt ? Date.parse(opts.expiresAt) : NaN;
+  if (Number.isFinite(expiresAt) && now + seconds * 1000 >= expiresAt) return { kind: "linkExhausted" };
+  if (seconds <= PHONE_UPLOAD_MAX_AUTO_WAIT_SECONDS && (opts.retriesSoFar ?? 0) < PHONE_UPLOAD_MAX_RATE_LIMIT_RETRIES) {
+    return { kind: "wait", seconds };
+  }
+  return { kind: "later", minutes: Math.max(1, Math.ceil(seconds / 60)) };
+}
+
 /** What the phone does next: upload with this fresh token, or (the object is
  *  already there) go straight to completion. */
 export type PhoneUploadTarget =
   | { kind: "upload"; storagePath: string; uploadToken: string; expiresAt: string | null }
   | { kind: "alreadyUploaded"; storagePath: string };
 
-/** Raw function answer: HTTP status + JSON body (null when unreadable). */
-export type PhoneUploadTokenCall = (sessionToken: string) => Promise<{ status: number; body: unknown }>;
+/** Raw function answer: HTTP status + JSON body (null when unreadable) + the Retry-After header, if any. */
+export type PhoneUploadTokenCall = (sessionToken: string) => Promise<{ status: number; body: unknown; retryAfter?: string | null }>;
 
 const STATUSES: readonly ProductImageUploadSessionStatus[] = ["PENDING", "COMPLETED", "EXPIRED", "CANCELED"];
 
@@ -159,7 +200,7 @@ const invokePhoneUploadTokenFunction: PhoneUploadTokenCall = async (sessionToken
   const context = (error as { context?: unknown }).context;
   if (context instanceof Response) {
     const body = await context.json().catch(() => null);
-    return { status: context.status, body };
+    return { status: context.status, body, retryAfter: context.headers.get("Retry-After") };
   }
   throw new Error("Could not reach the server. Check the phone's connection and try again.");
 };
@@ -173,7 +214,7 @@ export async function requestPhoneUploadTarget(
   sessionToken: string,
   call: PhoneUploadTokenCall = invokePhoneUploadTokenFunction,
 ): Promise<PhoneUploadTarget> {
-  const { status, body } = await call(sessionToken);
+  const { status, body, retryAfter } = await call(sessionToken);
   const b = (body ?? {}) as Record<string, unknown>;
   if (status === 200) {
     if (b.alreadyUploaded === true && typeof b.path === "string") {
@@ -195,6 +236,12 @@ export async function requestPhoneUploadTarget(
       ? (b.status as ProductImageUploadSessionStatus)
       : "EXPIRED";
     throw new PhoneUploadInactiveError(s);
+  }
+  if (status === 429 || b.code === "rate_limited") {
+    const fromBody = typeof b.retry_after_seconds === "number" ? b.retry_after_seconds : NaN;
+    const fromHeader = retryAfter != null && /^\d+$/.test(retryAfter.trim()) ? Number(retryAfter.trim()) : NaN;
+    const seconds = Number.isFinite(fromBody) && fromBody > 0 ? fromBody : Number.isFinite(fromHeader) && fromHeader > 0 ? fromHeader : 10;
+    throw new PhoneUploadRateLimitedError(Math.ceil(seconds), message ?? undefined);
   }
   if (status === 404 || status === 403) {
     throw new PhoneUploadRefusedError(message ?? "Invalid upload link.");
@@ -229,6 +276,12 @@ export interface PhoneUploadDeps {
   publicUrl?: (path: string) => Promise<string>;
   complete?: typeof completeProductImageUploadSession;
   readSession?: (sessionToken: string) => Promise<ProductImageUploadSessionStatusResult>;
+  /** Waits between rate-limited retries (tests replace it). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Called before each automatic wait after a 429 (UI countdown). */
+  onRateLimitWait?: (seconds: number, retry: number) => void;
+  /** The session's expiry, so a wait that outlasts the link is not attempted. */
+  sessionExpiresAt?: string | null;
 }
 
 const defaultUploadToSignedUrl: NonNullable<PhoneUploadDeps["uploadToSignedUrl"]> = async (path, uploadToken, image) => {
@@ -269,10 +322,32 @@ export async function uploadPhoneProductImage(
   const publicUrl = deps.publicUrl ?? defaultPublicUrl;
   const complete = deps.complete ?? completeProductImageUploadSession;
   const readSession = deps.readSession ?? getProductImageUploadSessionByToken;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+  // 081: a 429 is retried automatically after the server's Retry-After, at
+  // most PHONE_UPLOAD_MAX_RATE_LIMIT_RETRIES times per upload and only for
+  // waits up to PHONE_UPLOAD_MAX_AUTO_WAIT_SECONDS that end before the link
+  // expires; otherwise the PhoneUploadRateLimitedError reaches the page.
+  let rateLimitRetries = 0;
+  const requestTargetPolitely = async (): Promise<PhoneUploadTarget> => {
+    for (;;) {
+      try {
+        return await requestTarget(sessionToken);
+      } catch (e) {
+        if (!(e instanceof PhoneUploadRateLimitedError)) throw e;
+        const advice = adviseOnRateLimit(e.retryAfterSeconds, { expiresAt: deps.sessionExpiresAt, retriesSoFar: rateLimitRetries });
+        if (advice.kind !== "wait") throw e;
+        rateLimitRetries += 1;
+        deps.onRateLimitWait?.(advice.seconds, rateLimitRetries);
+        // + up to 1 s jitter so phones that were refused together do not return together
+        await sleep(advice.seconds * 1000 + Math.floor(Math.random() * 1000));
+      }
+    }
+  };
 
   let storagePath = "";
   for (let attempt = 0; ; attempt++) {
-    const target = await requestTarget(sessionToken);
+    const target = await requestTargetPolitely();
     storagePath = target.storagePath;
     if (target.kind === "alreadyUploaded") break;
     const { error } = await uploadToSignedUrl(target.storagePath, target.uploadToken, image);

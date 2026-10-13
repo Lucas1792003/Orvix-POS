@@ -9,7 +9,7 @@ Supabase or to any real server.
 ## Run
 
 ```sh
-./supabase/tests/phase-d/run.sh
+BASELINE_SQL=/path/to/schema.scrubbed.sql ./supabase/tests/phase-d/run.sh
 ```
 
 Requirements: Docker, host `psql` (`brew install libpq`), and the scrubbed
@@ -17,7 +17,7 @@ production schema snapshot. Environment:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `BASELINE_SQL` | `~/shwephala-migration/<ts>/schema.scrubbed.sql` | schema-only dump to restore (later: `supabase/baseline/schema-baseline.sql`) |
+| `BASELINE_SQL` | required, no default | path to the scrubbed schema-only dump to restore, e.g. `<workspace>/<ts>/schema.scrubbed.sql` (later: `supabase/baseline/schema-baseline.sql`) |
 | `HOSTED_GRANTS_TXT` | `hosted-grants.txt` next to `BASELINE_SQL` | expected table-grant list for the `065` parity check |
 | `POS_TEST_IMAGE` | `supabase/postgres:17.6.1.136` | pulled if missing; falls back to `public.ecr.aws/supabase/postgres:17.6.1.159` |
 | `POS_TEST_PORT` | `55432` | bound to 127.0.0.1 only |
@@ -81,6 +81,8 @@ isolation gap recorded by `test.finding*`; tolerated only when
 | `t13_new_org_price_levels` (+ `_b`) | 077 (runs when migrations >= 077): an org with no price level cannot sell (root cause); console-created orgs (service_role) get the 030 default set; re-seeding and a same-id / overlapping concurrent creation (two dblink sessions; dblink is installed in schema `test_dblink`) never duplicate; existing orgs unchanged (count + checksum); checkout works in the new orgs and the existing one; no cross-org price-level reference; console rollback delete works (FK CASCADE). run.sh then **re-applies 077** to the populated database and `_b` proves the one-time backfill seeded only the org with zero levels. |
 | `t14_upload_security` | 078/079 (runs when migrations >= 079): org-prefixed and legacy object paths, cross-org INSERT/UPDATE/DELETE/move refused, owner-less legacy objects (574-style) managed by their org's admin only and still referenced by `products.image_url`, session paths `org/<org>/temp/<id>`, signing refused for expired / cancelled / completed / foreign sessions, attach fix, completion bound to the session's own URL, end-to-end phone flow at the SQL level. |
 | `t15_anon_audit` | the anonymous surface (runs when migrations >= 079): exactly 3 anon functions; anon and a fresh signup account read 0 rows from every public table/view and `storage.objects`, cannot bootstrap, enrol or create orgs; token guessing / hash / session id never resolve; the by-token response carries only the 8 upload fields. |
+| `t16_completion_url` | 080 (runs when migrations >= 080): completion stores a server-derived URL and requires the uploaded object. |
+| `t17_rate_limits` (+ `_b`, and the t17 concurrency step in run.sh) | 081 (runs when migrations >= 081): `claim_phone_upload_token_issue` is service_role-only and SECURITY DEFINER, anon surface still 3 functions, `phone_upload_org_rate` has no API grants; per-session burst (5 / 10 s) with window reset, lifetime cap (20, then refused until expiry), per-org window (60 / 60 s) with reset and isolation, inactive/invalid tokens never counted, refusals write nothing; then parallel psql sessions: 40 claims queued behind a held row lock -> exactly 5, 70 claims over 14 sessions -> exactly 60, 6 creates at 118/120 -> exactly 2; per-user creation limit (120 / rolling hour, PT429). docs/selfhost-migration/phase-f/rate-limiting.md |
 
 ## Adding a test
 

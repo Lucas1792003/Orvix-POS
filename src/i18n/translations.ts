@@ -815,6 +815,38 @@ export const translations: Record<Language, Record<string, Record<string, string
       totalSales: "Total Sales",
     },
 
+    // Pending-queue export (outage recovery; src/components/sync/)
+    queueExport: {
+      button: "Export pending",
+      buttonLong: "Export pending transactions",
+      title: "Export pending transactions",
+      description: "Saves an encrypted copy of everything on this till that has not reached the server yet. Exporting changes nothing: the till keeps its queue and keeps syncing by itself.",
+      loading: "Counting…",
+      summaryTotal: "{n} entries waiting on this till",
+      summaryNone: "Nothing is waiting on this till.",
+      status_pending: "queued",
+      status_syncing: "syncing",
+      status_failed: "failed",
+      status_conflict: "needs action",
+      passphrase: "Passphrase",
+      passphraseConfirm: "Repeat passphrase",
+      passphraseHint: "At least {n} characters. Write it down and give it to the engineer separately: the file cannot be opened without it, and it is not stored anywhere.",
+      errTooShort: "The passphrase must be at least {n} characters.",
+      errMismatch: "The two passphrases do not match.",
+      export: "Encrypt and save",
+      exporting: "Encrypting…",
+      cancel: "Cancel",
+      close: "Close",
+      savedTitle: "Export saved",
+      savedTo: "Saved to: {path}",
+      downloaded: "Downloaded as: {name}",
+      savedNote: "{n} entries exported. Nothing was removed: the queue on this till is unchanged and will sync by itself when the server is back.",
+      canceled: "Export canceled. Nothing was saved.",
+      failed: "Export failed",
+      loginHint: "This till still holds {n} transactions that have not reached the server.",
+      loginLink: "Export them (encrypted)",
+    },
+
     // Profile (business brand)
     profile: {
       title: "Business Profile",
@@ -833,6 +865,27 @@ export const translations: Record<Language, Record<string, Record<string, string
       saving: "Saving…",
       saved: "Profile saved",
       saveFailed: "Could not save profile",
+    },
+
+    // Phone product-photo upload page (QR, anonymous phone)
+    phoneUpload: {
+      title: "Product photo upload",
+      loading: "Checking upload link...",
+      ready: "Choose or take a product photo.",
+      compressing: "Compressing photo...",
+      uploading: "Uploading photo...",
+      complete: "Photo uploaded. You can return to the computer.",
+      expired: "This upload link has expired. Create a new QR code on the computer.",
+      cancelled: "This upload link was cancelled on the computer. Create a new QR code to upload.",
+      failed: "Upload failed.",
+      takePhoto: "Take photo",
+      chooseFromLibrary: "Choose from library",
+      compressed: "Compressed: {size}",
+      invalidLink: "Invalid upload link.",
+      rateLimitedWaiting: "Too many attempts right now. Trying again automatically in {seconds} s...",
+      rateLimitedLater: "Too many upload attempts. Please wait about {minutes} min and try again.",
+      rateLimitedLinkUsedUp: "This upload link has been used too many times. Create a new QR code on the computer.",
+      language: "မြန်မာ",
     },
 
     // Auth
@@ -1720,6 +1773,38 @@ export const translations: Record<Language, Record<string, Record<string, string
       totalSales: "စုစုပေါင်းရောင်းအား",
     },
 
+    // Pending-queue export (outage recovery; src/components/sync/)
+    queueExport: {
+      button: "စောင့်ဆိုင်းနေသည်များ ထုတ်ယူရန်",
+      buttonLong: "ဆာဗာသို့ မရောက်သေးသော အရောင်းများ ထုတ်ယူရန်",
+      title: "ဆာဗာသို့ မရောက်သေးသော အရောင်းများ ထုတ်ယူရန်",
+      description: "ဤစက်တွင် ဆာဗာသို့ မရောက်သေးသမျှကို စာဝှက်ထားသော ဖိုင်အဖြစ် သိမ်းဆည်းသည်။ ထုတ်ယူခြင်းက ဘာမှ မပြောင်းလဲပါ — စက်ထဲရှိ စာရင်းများ ဆက်ရှိနေပြီး ဆာဗာပြန်ရလျှင် အလိုအလျောက် စင့်ခ်လုပ်မည်။",
+      loading: "ရေတွက်နေသည်…",
+      summaryTotal: "ဤစက်တွင် စောင့်ဆိုင်းနေသော စာရင်း {n} ခု",
+      summaryNone: "ဤစက်တွင် စောင့်ဆိုင်းနေသည့် စာရင်း မရှိပါ။",
+      status_pending: "တန်းစီထားသည်",
+      status_syncing: "စင့်ခ်လုပ်နေသည်",
+      status_failed: "မအောင်မြင်",
+      status_conflict: "စစ်ဆေးရန်လိုသည်",
+      passphrase: "စကားဝှက်စာကြောင်း",
+      passphraseConfirm: "စကားဝှက်စာကြောင်း ထပ်ရိုက်ပါ",
+      passphraseHint: "အနည်းဆုံး စာလုံး {n} လုံး။ စာရွက်ပေါ်ချရေးပြီး အင်ဂျင်နီယာထံ သီးခြားပေးပါ — ၎င်းမရှိဘဲ ဖိုင်ကို ဖွင့်၍မရပါ၊ မည်သည့်နေရာတွင်မှ မသိမ်းထားပါ။",
+      errTooShort: "စကားဝှက်စာကြောင်းသည် အနည်းဆုံး စာလုံး {n} လုံး ရှိရမည်။",
+      errMismatch: "စကားဝှက်စာကြောင်း နှစ်ခု မတူပါ။",
+      export: "စာဝှက်ပြီး သိမ်းရန်",
+      exporting: "စာဝှက်နေသည်…",
+      cancel: "မလုပ်တော့ပါ",
+      close: "ပိတ်ရန်",
+      savedTitle: "ထုတ်ယူပြီးပါပြီ",
+      savedTo: "သိမ်းထားသည့်နေရာ: {path}",
+      downloaded: "ဒေါင်းလုဒ်ဖိုင်အမည်: {name}",
+      savedNote: "စာရင်း {n} ခု ထုတ်ယူပြီး။ ဘာမှ မဖျက်ပါ — ဤစက်ရှိ စာရင်းများ မပြောင်းလဲဘဲ ဆာဗာပြန်ရလျှင် အလိုအလျောက် စင့်ခ်လုပ်မည်။",
+      canceled: "ထုတ်ယူခြင်း ပယ်ဖျက်လိုက်သည်။ ဘာမှ မသိမ်းရသေးပါ။",
+      failed: "ထုတ်ယူ၍ မရပါ",
+      loginHint: "ဤစက်တွင် ဆာဗာသို့ မရောက်သေးသော အရောင်း {n} ခု ရှိနေသေးသည်။",
+      loginLink: "စာဝှက်၍ ထုတ်ယူရန်",
+    },
+
     // Profile (business brand)
     profile: {
       title: "လုပ်ငန်း ပရိုဖိုင်",
@@ -1738,6 +1823,27 @@ export const translations: Record<Language, Record<string, Record<string, string
       saving: "သိမ်းနေသည်…",
       saved: "ပရိုဖိုင် သိမ်းပြီး",
       saveFailed: "ပရိုဖိုင် သိမ်း၍ မရပါ",
+    },
+
+    // Phone product-photo upload page (QR, anonymous phone)
+    phoneUpload: {
+      title: "ကုန်ပစ္စည်းဓာတ်ပုံ တင်ရန်",
+      loading: "အပ်လုဒ်လင့်ခ်ကို စစ်ဆေးနေသည်...",
+      ready: "ကုန်ပစ္စည်းဓာတ်ပုံကို ရွေးပါ သို့မဟုတ် ရိုက်ပါ။",
+      compressing: "ဓာတ်ပုံကို ချုံ့နေသည်...",
+      uploading: "ဓာတ်ပုံကို တင်နေသည်...",
+      complete: "ဓာတ်ပုံ တင်ပြီးပါပြီ။ ကွန်ပျူတာသို့ ပြန်သွားနိုင်ပါသည်။",
+      expired: "ဤအပ်လုဒ်လင့်ခ် သက်တမ်းကုန်သွားပါပြီ။ ကွန်ပျူတာတွင် QR ကုဒ်အသစ် ပြုလုပ်ပါ။",
+      cancelled: "ဤအပ်လုဒ်လင့်ခ်ကို ကွန်ပျူတာတွင် ပယ်ဖျက်လိုက်ပါပြီ။ ဓာတ်ပုံတင်ရန် QR ကုဒ်အသစ် ပြုလုပ်ပါ။",
+      failed: "ဓာတ်ပုံတင်ခြင်း မအောင်မြင်ပါ။",
+      takePhoto: "ဓာတ်ပုံရိုက်ရန်",
+      chooseFromLibrary: "ဓာတ်ပုံများထဲမှ ရွေးရန်",
+      compressed: "ချုံ့ပြီး အရွယ်အစား: {size}",
+      invalidLink: "အပ်လုဒ်လင့်ခ် မမှန်ကန်ပါ။",
+      rateLimitedWaiting: "ယခု ကြိုးစားမှု များလွန်းနေပါသည်။ {seconds} စက္ကန့်အကြာတွင် အလိုအလျောက် ထပ်ကြိုးစားပါမည်...",
+      rateLimitedLater: "ဓာတ်ပုံတင်ရန် ကြိုးစားမှု များလွန်းနေပါသည်။ {minutes} မိနစ်ခန့် စောင့်ပြီး ထပ်ကြိုးစားပါ။",
+      rateLimitedLinkUsedUp: "ဤအပ်လုဒ်လင့်ခ်ကို အကြိမ်များစွာ အသုံးပြုပြီးပါပြီ။ ကွန်ပျူတာတွင် QR ကုဒ်အသစ် ပြုလုပ်ပါ။",
+      language: "English",
     },
 
     // Auth
