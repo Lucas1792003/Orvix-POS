@@ -4,6 +4,15 @@
 \set ON_ERROR_STOP on
 
 INSERT INTO organizations (id, name) VALUES ('org-test', 'Test Org');
+-- 077 seeds the default price levels for every new organization. org-test
+-- stands for the production organization, which existed (with its own
+-- levels) BEFORE 077; its levels come from the fixture below, so the
+-- auto-seeded set is removed again. No-op before 077 (no trigger).
+DO $$ BEGIN
+  IF to_regprocedure('public.organizations_seed_price_levels()') IS NOT NULL THEN
+    DELETE FROM price_levels WHERE org_id = 'org-test';
+  END IF;
+END $$;
 
 INSERT INTO shops (id, code, name, address, org_id) VALUES
   ('shop-a', 'SA', 'Shop A', 'A Street', 'org-test'),

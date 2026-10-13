@@ -57,6 +57,15 @@ SELECT test.check('console: its auto-seeded business_profile row went with it (O
 RESET ROLE;
 SELECT test.logout() AS zz \gset
 
+-- Section 2 has each ADMIN create its own RETAIL default level by hand (the
+-- pre-077 state); drop 077's auto-seeded levels for these two orgs (no-op
+-- before 077). t13 covers the 077 behaviour of console-created orgs.
+DO $$ BEGIN
+  IF to_regprocedure('public.organizations_seed_price_levels()') IS NOT NULL THEN
+    DELETE FROM price_levels WHERE org_id IN ('org-alpha', 'org-beta');
+  END IF;
+END $$;
+
 -- If the console path failed (pre-073), seed the ADMINs the way t09 does so the
 -- isolation part below still runs and reports on the rest.
 SELECT test.login(:'AA') AS zz \gset

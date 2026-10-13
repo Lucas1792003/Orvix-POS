@@ -24,7 +24,12 @@ SELECT test.check('authenticated can execute every public function except comple
   = (SELECT array_agg(x ORDER BY x) FROM unnest(
        ARRAY['complete_stock_transfer','idem_begin','idem_finish','prune_idempotency_keys']
        || CASE WHEN to_regprocedure('public.app_require_org(text,text)') IS NOT NULL
-               THEN ARRAY['app_require_org','app_require_org_items'] ELSE '{}'::text[] END) x),
+               THEN ARRAY['app_require_org','app_require_org_items'] ELSE '{}'::text[] END
+       -- 077/078 internal helpers that take a foreign id (service_role only)
+       || CASE WHEN to_regprocedure('public.app_seed_default_price_levels(text)') IS NOT NULL
+               THEN ARRAY['app_seed_default_price_levels'] ELSE '{}'::text[] END
+       || CASE WHEN to_regprocedure('public.app_storage_object_org(text)') IS NOT NULL
+               THEN ARRAY['app_storage_object_org'] ELSE '{}'::text[] END) x),
   (SELECT string_agg(p.proname, ',') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public' AND NOT has_function_privilege('authenticated', p.oid, 'EXECUTE')));
 
@@ -38,7 +43,11 @@ SELECT test.check('public function count = 58 + 3 idem helpers (+1 after 067, +9
   = 61 + CASE WHEN to_regprocedure('public.app_setup_needed()') IS NOT NULL THEN 1 ELSE 0 END
        + CASE WHEN to_regprocedure('public.app_require_org(text,text)') IS NOT NULL THEN 9 ELSE 0 END
        + CASE WHEN to_regprocedure('public.app_storage_owner_in_org(text,uuid)') IS NOT NULL THEN 1 ELSE 0 END
-       + CASE WHEN to_regprocedure('public.bootstrap_first_admin()') IS NOT NULL THEN 1 ELSE 0 END,
+       + CASE WHEN to_regprocedure('public.bootstrap_first_admin()') IS NOT NULL THEN 1 ELSE 0 END
+       -- 077: app_seed_default_price_levels + organizations_seed_price_levels
+       + CASE WHEN to_regprocedure('public.app_seed_default_price_levels(text)') IS NOT NULL THEN 2 ELSE 0 END
+       -- 078: app_storage_object_org / _object_in_my_org / _can_write_path
+       + CASE WHEN to_regprocedure('public.app_storage_object_org(text)') IS NOT NULL THEN 3 ELSE 0 END,
   (SELECT count(*)::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'));
 
 SELECT test.check('no overloaded public functions after 063 (old signatures dropped)',

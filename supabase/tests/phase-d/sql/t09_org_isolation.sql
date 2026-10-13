@@ -22,6 +22,13 @@ SELECT test.logout() AS zz \gset
 -- 0. Seed org B (superuser; triggers fire, RLS bypassed)
 -- ============================================================
 INSERT INTO organizations (id, name) VALUES ('org-two', 'Org Two');
+-- t09 builds org B's catalog (incl. its own RETAIL default level) by hand,
+-- as an org that predates 077; drop 077's auto-seeded levels (no-op before 077).
+DO $$ BEGIN
+  IF to_regprocedure('public.organizations_seed_price_levels()') IS NOT NULL THEN
+    DELETE FROM price_levels WHERE org_id = 'org-two';
+  END IF;
+END $$;
 INSERT INTO shops (id, code, name, address, org_id) VALUES
   ('shop-x', 'SX', 'Shop X', 'X Street', 'org-two'),
   ('shop-y', 'SY', 'Shop Y', 'Y Street', 'org-two');

@@ -702,7 +702,7 @@ describe.skipIf(!LIVE)("Phase D live integration (self-hosted stack)", () => {
     const sessRow = await row("product_image_upload_sessions", { id: c.data.sessionId });
     check("stored hash only", sessRow.token_hash.length === 64 && sessRow.token_hash !== token && !JSON.stringify(sessRow).includes(token), "token_hash is 64 hex (sha256), raw token absent from the row");
     check("expiry ~10 min", Math.abs(new Date(sessRow.expires_at).getTime() - new Date(sessRow.created_at).getTime() - 600_000) < 5_000, `expires_at - created_at = ${(new Date(sessRow.expires_at).getTime() - new Date(sessRow.created_at).getTime()) / 1000}s`);
-    check("scope columns", sessRow.product_id === ids.prod1 && sessRow.shop_id === ids.shop && sessRow.created_by === ids.admin && sessRow.storage_path === `temp/${c.data.sessionId}`, `product_id=${sessRow.product_id} shop_id=${sessRow.shop_id} created_by=${sessRow.created_by} storage_path=${sessRow.storage_path}`);
+    check("scope columns", sessRow.product_id === ids.prod1 && sessRow.shop_id === ids.shop && sessRow.created_by === ids.admin && (sessRow.storage_path === `temp/${c.data.sessionId}` || sessRow.storage_path === `org/${sessRow.storage_path.split("/")[1]}/temp/${c.data.sessionId}`), `product_id=${sessRow.product_id} shop_id=${sessRow.shop_id} created_by=${sessRow.created_by} storage_path=${sessRow.storage_path}`);
 
     const g = await rpc(anon, "get_product_image_upload_session_by_token", { p_token: token });
     check("anon get by token", g.error === null && g.data.sessionId === c.data.sessionId && g.data.status === "PENDING", `keys=${Object.keys(g.data ?? {}).sort().join(",")}`);
@@ -772,12 +772,13 @@ describe.skipIf(!LIVE)("Phase D live integration (self-hosted stack)", () => {
     const anonSessions = await anon.from("product_image_upload_sessions").select("id").limit(1);
     check("anon select sessions -> []", anonSessions.error === null && anonSessions.data?.length === 0, `rows=${anonSessions.data?.length}`);
     // scoping: all QA sessions point at QA product/shop only
-    const qaSessions = await svc.from("product_image_upload_sessions").select("id, product_id, shop_id, created_by").eq("created_by", ids.admin);
+    const qaSessions = await svc.from("product_image_upload_sessions").select("id, product_id, shop_id, created_by, storage_path").eq("created_by", ids.admin);
     check("session scoping", (qaSessions.data ?? []).length >= 4 && qaSessions.data!.every((s) => s.product_id === ids.prod1 && s.shop_id === ids.shop), `${qaSessions.data?.length} sessions, all product_id=${ids.prod1} shop_id=${ids.shop}`);
     // No upload is performed in this suite (the RPC validates the URL string
     // only), so no QA storage object must exist for any QA session path.
     // (PostgREST does not expose the storage schema here, so this goes over SQL.)
-    const qaPaths = (qaSessions.data ?? []).map((s) => `temp/${s.id}`);
+    // the session's own path: temp/<id> before migration 079, org/<org>/temp/<id> after
+    const qaPaths = (qaSessions.data ?? []).map((s) => s.storage_path as string);
     const qaObjs = runSql(cfg, `SELECT count(*) FROM storage.objects WHERE name = ANY(ARRAY[${qaPaths.map((p) => `'${p}'`).join(",")}]::text[]);`).trim();
     check("no QA storage object created", qaObjs === "0", `storage.objects rows for ${qaPaths.length} QA session paths = ${qaObjs}`);
 

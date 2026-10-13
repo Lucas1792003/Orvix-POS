@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // ---------------------------------------------------------------------------
 // Phase G LIVE two-organization security suite — runs against the
-// self-hosted Supabase stack (lucashome, schema 073: org isolation 067-073)
+// self-hosted Supabase stack (lucashome, schema 076: org isolation 067-073,
+// remaining fixes 074-076 - see also phase-g2.live.test.ts)
 // through the public API with the real @supabase/supabase-js client.
 //
 // Skipped unless LIVE_SUPABASE_URL is set. Required env:
@@ -414,7 +415,14 @@ SELECT format('products=%s inventory=%s inv_qty_sum=%s users=%s shops=%s busines
 
     const readTables = ["organizations", "shops", "users", "products", "categories", "brands", "suppliers", "price_levels", "unit_types", "business_profile", "inventory", "sales", "shifts", "purchase_orders", "audit_logs"];
     const probe = async (client: SupabaseClient, who: string) => {
-      // Bootstrap attempt exactly like SetupPage -> bootstrapFirstAdmin() step 4, plus variants.
+      // Since 076 the only client bootstrap path is the bootstrap_first_admin() RPC
+      // (SetupPage -> bootstrapFirstAdmin() step 4); on this populated install it must
+      // refuse. The direct table inserts the pre-076 client used must stay refused too
+      // (organizations_ins WITH CHECK (false); users_ins without the setup branch).
+      const bootRpc = await rpc(client, "bootstrap_first_admin", {});
+      expect(bootRpc.error, `${who}: bootstrap_first_admin must refuse`).not.toBeNull();
+      expect(bootRpc.error.code).toBe("42501");
+      expect(String(bootRpc.error.message)).toMatch(/^SETUP_ALREADY_COMPLETED/);
       const orgId = `qa-org-${who}-${ts}`;
       const authId = (await client.auth.getUser()).data.user!.id;
       const orgIns = await client.from("organizations").insert({ id: orgId, name: `QA ${who} Org ${ts}`, created_at: new Date().toISOString() });
@@ -437,7 +445,7 @@ SELECT format('products=%s inventory=%s inv_qty_sum=%s users=%s shops=%s busines
       }
       const op = await rpc(client, "open_shift", { p_shop_id: A.shop, p_opening_cash_mmk: 0, p_created_at: null, p_expected_actor_id: null, p_idempotency_key: uuid() });
       expect(op.error).not.toBeNull();
-      notes.push(`${who}: org insert -> ${orgIns.error?.code}; users insert as ADMIN(new org)/ADMIN(A)/MANAGER(B)/CASHIER(A) -> ${[asAdminNewOrg, asAdminOrgA, asMgrOrgB, asCashOrgA].map((r) => r.error?.code).join("/")}; DB orgs=${dbOrg} users=${dbUsers}; reads all [] (${reads.join(" ")}); open_shift -> "${short(op.error?.message, 40)}"`);
+      notes.push(`${who}: bootstrap_first_admin -> ${bootRpc.error.code} "${short(bootRpc.error.message, 40)}"; org insert -> ${orgIns.error?.code}; users insert as ADMIN(new org)/ADMIN(A)/MANAGER(B)/CASHIER(A) -> ${[asAdminNewOrg, asAdminOrgA, asMgrOrgB, asCashOrgA].map((r) => r.error?.code).join("/")}; DB orgs=${dbOrg} users=${dbUsers}; reads all [] (${reads.join(" ")}); open_shift -> "${short(op.error?.message, 40)}"`);
     };
 
     // (a) orphan: fresh GoTrue signup, no users row
@@ -1046,6 +1054,7 @@ ROLLBACK;`).trim().split("\n").filter((l) => /^\d+\/\d+$/.test(l))[0];
       app_storage_owner_in_org: { p_owner_id: null, p_owner: null },
       app_require_org: { p_kind: "shop", p_id: B.shop },
       role_default_permissions: { p_role: "ADMIN" },
+      bootstrap_first_admin: {}, // 076: authenticated + service_role only
     };
     const codes: string[] = [];
     for (const [fn, args] of Object.entries(sample)) {

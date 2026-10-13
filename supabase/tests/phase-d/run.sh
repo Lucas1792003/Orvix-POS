@@ -202,6 +202,31 @@ if [ "$((10#$MAX_MIG))" -ge 74 ]; then
 else
   log "skipping t12_remaining_fixes (migrations capped at $MAX_MIG < 074)"
 fi
+# 077: default price levels for every organization (console path, re-run,
+# concurrent creation via dblink, checkout, cross-org). Part A, then 077 is
+# re-applied to the populated database (its one-time backfill must seed only
+# the org that has zero levels), then part B. Gated: a run capped at 076 is
+# unchanged.
+if [ "$((10#$MAX_MIG))" -ge 77 ]; then
+  run_sql_test "$SQL/t13_new_org_price_levels.sql"
+  log "re-applying 077 to the populated database (backfill must touch only the org with zero levels)"
+  if pg_psql -f "$REPO/supabase/migrations/077_new_org_price_levels.sql" > "$WORK/mig3_077.log" 2>&1; then
+    grep -h -E '077 backfill' "$WORK/mig3_077.log" | sed 's/^.*NOTICE: */INFO /'
+  else
+    tail -20 "$WORK/mig3_077.log"; fail "re-apply of 077 on populated data"
+  fi
+  run_sql_test "$SQL/t13_new_org_price_levels_b.sql"
+else
+  log "skipping t13_new_org_price_levels (migrations capped at $MAX_MIG < 077)"
+fi
+# 078/079: org-scoped storage paths, legacy (owner-less) objects, session
+# token lifecycle; then the anonymous-surface audit of the proposed state.
+if [ "$((10#$MAX_MIG))" -ge 79 ]; then
+  run_sql_test "$SQL/t14_upload_security.sql"
+  run_sql_test "$SQL/t15_anon_audit.sql"
+else
+  log "skipping t14_upload_security / t15_anon_audit (migrations capped at $MAX_MIG < 079)"
+fi
 # Concurrent first-time setup (076). MUST RUN LAST: t12_bootstrap_prep
 # empties public.users (TRUNCATE ... CASCADE) to recreate a fresh install in
 # this throwaway database. Two sessions call bootstrap_first_admin(); A holds

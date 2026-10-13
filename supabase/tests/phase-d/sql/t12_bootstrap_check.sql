@@ -38,3 +38,10 @@ SELECT test.check('t12/076 populated: still exactly one organization created and
   (SELECT count(*) FROM organizations)::text = (test.var('t12_boot_orgs_before')::int + 1)::text
   AND (SELECT count(*) FROM users) = 1);
 SELECT test.logout() AS zz \gset
+-- 077 (when applied): the organization created by first-time setup gets the
+-- default price levels too, so the first sale on a fresh install can price.
+SELECT to_regprocedure('public.organizations_seed_price_levels()') IS NOT NULL AS has077 \gset
+\if :has077
+SELECT test.check('t12/077: the organization created by bootstrap_first_admin got the default price levels (Retail default)',
+  test.pl_is_default_set(:'ra'::jsonb->>'orgId'), test.pl_fingerprint(:'ra'::jsonb->>'orgId'));
+\endif

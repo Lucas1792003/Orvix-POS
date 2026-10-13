@@ -175,7 +175,7 @@ SELECT 'INFO sweep covered ' || test.var('t12_sweep_total') || ' key rows over '
 -- ============================================================
 -- 2. Expired phone-upload sessions (075)
 -- ============================================================
-\set url_ok 'https://pos.test/storage/v1/object/public/product-images/temp/t12.webp'
+\set url_base 'https://pos.test/storage/v1/object/public/product-images/'
 SELECT (SELECT prosrc LIKE '%075%' AND prosrc NOT LIKE '%has expired%'
           FROM pg_proc WHERE proname = 'complete_product_image_upload_session') AS has075 \gset
 \if :has075
@@ -186,6 +186,10 @@ SELECT public.create_product_image_upload_session('shop-a', 'prod-1') AS s2 \gse
 SELECT public.create_product_image_upload_session('shop-a', 'prod-1') AS s3 \gset
 SELECT public.create_product_image_upload_session('shop-a', 'prod-1') AS s4 \gset
 SELECT public.attach_product_image_upload_session_token(:'s1'::jsonb->>'sessionId', 'signed-t12-s1') AS zz \gset
+-- the public URL the phone page sends: getPublicUrl(<session storagePath>)
+-- (079 requires it to end with the session's own object path)
+SELECT :'url_base' || (:'s1'::jsonb->>'storagePath') AS url_s1, :'url_base' || (:'s3'::jsonb->>'storagePath') AS url_s3,
+       :'url_base' || (:'s4'::jsonb->>'storagePath') AS url_s4 \gset
 RESET ROLE;
 -- s1 / s2 expire (superuser moves the clock of the row, not of the server)
 UPDATE product_image_upload_sessions SET expires_at = now() - interval '1 minute'
@@ -195,7 +199,7 @@ SELECT test.logout() AS zz \gset
 SET ROLE anon;
 SELECT test.expect_error('t12/075: anon completion of an EXPIRED session is rejected with the common message',
   format($q$SELECT public.complete_product_image_upload_session('%s', '%s', '%s', 1000, 'image/webp')$q$,
-         :'s1'::jsonb->>'token', :'s1'::jsonb->>'storagePath', :'url_ok'),
+         :'s1'::jsonb->>'token', :'s1'::jsonb->>'storagePath', :'url_s1'),
   'Upload link is no longer active');
 RESET ROLE;
 SELECT test.check('t12/075: rejected completion wrote nothing; the row is derivably expired (PENDING, expires_at past, not completed)',
@@ -214,7 +218,7 @@ SELECT test.logout() AS zz \gset
 SET ROLE anon;
 SELECT test.expect_error('t12/075: completion after the session is marked EXPIRED is still rejected (same message)',
   format($q$SELECT public.complete_product_image_upload_session('%s', '%s', '%s', 1000, 'image/webp')$q$,
-         :'s1'::jsonb->>'token', :'s1'::jsonb->>'storagePath', :'url_ok'),
+         :'s1'::jsonb->>'token', :'s1'::jsonb->>'storagePath', :'url_s1'),
   'Upload link is no longer active');
 -- the phone page's first call (by token, anon) also persists the expiry
 SELECT public.get_product_image_upload_session_by_token(:'s2'::jsonb->>'token') AS bt2 \gset
@@ -232,12 +236,12 @@ SELECT test.logout() AS zz \gset
 SET ROLE anon;
 SELECT test.expect_error('t12/075: completion of a CANCELED session is rejected',
   format($q$SELECT public.complete_product_image_upload_session('%s', '%s', '%s', 1000, 'image/webp')$q$,
-         :'s3'::jsonb->>'token', :'s3'::jsonb->>'storagePath', :'url_ok'),
+         :'s3'::jsonb->>'token', :'s3'::jsonb->>'storagePath', :'url_s3'),
   'Upload link is no longer active');
 
 -- valid session completes; completing it again is rejected
 SELECT public.complete_product_image_upload_session(:'s4'::jsonb->>'token', :'s4'::jsonb->>'storagePath',
-  :'url_ok', 1000, 'image/webp') AS c4 \gset
+  :'url_s4', 1000, 'image/webp') AS c4 \gset
 RESET ROLE;
 SELECT test.check('t12/075: a valid (PENDING, unexpired) session still completes',
   :'c4'::jsonb->>'status' = 'COMPLETED'
@@ -246,7 +250,7 @@ SELECT test.check('t12/075: a valid (PENDING, unexpired) session still completes
 SET ROLE anon;
 SELECT test.expect_error('t12/075: completion of an already COMPLETED session is rejected',
   format($q$SELECT public.complete_product_image_upload_session('%s', '%s', '%s', 1000, 'image/webp')$q$,
-         :'s4'::jsonb->>'token', :'s4'::jsonb->>'storagePath', :'url_ok'),
+         :'s4'::jsonb->>'token', :'s4'::jsonb->>'storagePath', :'url_s4'),
   'Upload link is no longer active');
 RESET ROLE;
 SELECT test.check('t12/075: anon still executes complete_product_image_upload_session (064 grant kept)',
