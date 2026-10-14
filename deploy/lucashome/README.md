@@ -29,10 +29,10 @@ so `docker compose …` in `/srv/supabase/stack` always applies the override.
 ## Edge functions
 
 `/srv/supabase/stack/volumes/functions/` contains upstream `main/` and
-`deno.jsonc` plus the four app functions copied from `supabase/functions/` in
+`deno.jsonc` plus the six app functions copied from `supabase/functions/` in
 this repo (`admin-2fa`, `email-sales-report`, `phone-upload-token`,
-`platform-console`; `staff-admin` is prepared in the repo but NOT deployed yet —
-see `docs/selfhost-migration/phase-f/staff-creation.md` §5). `rotate-audit-log` and `weekly-sales-report` were removed
+`platform-console`, `staff-admin` and `phone-upload-page`, the last two deployed
+2026-10-13; `phone-upload-page` also needs the router patch, see `functions-router.sh`). `rotate-audit-log` and `weekly-sales-report` were removed
 2026-10-13 (moved to `~/removed-edge-functions-20261013/` on the server). Upstream `hello/` removed. Re-sync
 with:
 
