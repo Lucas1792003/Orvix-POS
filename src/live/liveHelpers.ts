@@ -60,10 +60,23 @@ export function makeClient(cfg: LiveConfig, key: string): SupabaseClient {
  * key). The self-hosted stack runs with DISABLE_SIGNUP=true (Phase F,
  * docs/selfhost-migration/phase-f/staff-creation.md), so the public sign-up
  * endpoint the suites used before is refused. Returns the auth user id.
+ * Pass `appMetadata` = { created_via: "staff-admin", org_id } for an account
+ * that a test links through create_app_user(): migration 082 links only
+ * accounts carrying that marker (what the staff-admin function sets).
  */
-export async function createAuthUser(cfg: LiveConfig, email: string, password: string): Promise<string> {
+export async function createAuthUser(
+  cfg: LiveConfig,
+  email: string,
+  password: string,
+  appMetadata?: Record<string, unknown>,
+): Promise<string> {
   const admin = makeClient(cfg, cfg.serviceKey);
-  const { data, error } = await admin.auth.admin.createUser({ email, password, email_confirm: true });
+  const { data, error } = await admin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+    ...(appMetadata ? { app_metadata: appMetadata } : {}),
+  });
   if (error) throw new Error(`create auth user ${email} failed: ${error.message}`);
   const id = data.user?.id;
   if (!id) throw new Error(`create auth user ${email} returned no user id`);

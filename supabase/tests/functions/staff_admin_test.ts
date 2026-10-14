@@ -52,7 +52,7 @@ const KEY = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const KEY2 = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 
 // ---------------------------------------------------------------- extra mocks
-interface AuthAccount { id: string; email: string; password: string; email_confirmed: boolean }
+interface AuthAccount { id: string; email: string; password: string; email_confirmed: boolean; app_metadata?: Record<string, unknown> }
 interface Extra {
   accounts: AuthAccount[];
   factors: Record<string, { id: string; factor_type: string; status: string }[]>;
@@ -115,9 +115,13 @@ const install = (world: World): Extra => {
         if (extra.accounts.some((a) => a.email === body.email)) {
           return json({ code: 422, error_code: "email_exists", msg: "A user with this email address has already been registered" }, 422);
         }
-        const acct = { id: `00000000-0000-4000-8000-${String(extra.accounts.length + 1).padStart(12, "0")}`, email: body.email, password: body.password, email_confirmed: body.email_confirm === true };
+        const acct = {
+          id: `00000000-0000-4000-8000-${String(extra.accounts.length + 1).padStart(12, "0")}`, email: body.email, password: body.password,
+          email_confirmed: body.email_confirm === true,
+          app_metadata: { provider: "email", ...(body.app_metadata ?? {}) } as Record<string, unknown>,
+        };
         extra.accounts.push(acct);
-        return json({ id: acct.id, email: acct.email, aud: "authenticated", role: "authenticated", app_metadata: {}, user_metadata: {}, created_at: "2026-10-13T00:00:00Z" }, 200);
+        return json({ id: acct.id, email: acct.email, aud: "authenticated", role: "authenticated", app_metadata: acct.app_metadata, user_metadata: {}, created_at: "2026-10-13T00:00:00Z" }, 200);
       }
       const delMatch = path.match(/^users\/([^/]+)$/);
       if (req.method === "DELETE" && delMatch) {
@@ -150,6 +154,16 @@ const install = (world: World): Extra => {
         if (!shop || shop.org_id !== me.org_id) return json({ code: "P0001", message: "shop not found" }, 400);
         if (me.role !== "ADMIN" && body.p_role === "ADMIN") {
           return json({ code: "P0001", message: "Only an ADMIN can create a user with an elevated role or custom permission overrides." }, 400);
+        }
+        // migration 082: only a staff-admin account created for the caller's org,
+        // with the same email, never linked before
+        const target = extra.accounts.find((a) => a.id === body.p_auth_id);
+        if (
+          !target || target.app_metadata?.created_via !== "staff-admin" || target.app_metadata?.org_id !== me.org_id
+          || target.email !== String(body.p_email ?? "").trim().toLowerCase()
+          || (world.db.tables.users ?? []).some((u) => u.auth_id === body.p_auth_id)
+        ) {
+          return json({ code: "42501", message: "AUTH_ACCOUNT_NOT_LINKABLE: this login account cannot be linked to a staff profile" }, 403);
         }
         const row = {
           id: body.p_id, name: body.p_name, email: body.p_email, role: body.p_role, shop_id: body.p_shop_id,
@@ -297,7 +311,11 @@ test("staff-admin: happy path -> auth user (email_confirm) + users row in the CA
     assertEquals(r.status, 201, r.text);
     const created = ctx.extra.adminCalls.filter((c) => c.method === "POST" && c.path === "users");
     assertEquals(created.length, 1);
-    assertEquals(created[0].body, { email: "new.cashier@example.test", password: PASSWORD, email_confirm: true });
+    assertEquals(created[0].body, {
+      email: "new.cashier@example.test", password: PASSWORD, email_confirm: true,
+      // 082 marker, org from the caller (body orgId ignored)
+      app_metadata: { created_via: "staff-admin", org_id: "org-a" },
+    });
     const rpc = ctx.extra.callerCalls.find((c) => c.fn === "rpc/create_app_user")!;
     assertEquals(rpc.token, T.adminA, "users row written with the caller's JWT, not the service role");
     assertEquals(rpc.body, {
@@ -430,11 +448,55 @@ test("staff-admin: users-row insert fails -> the new auth user is deleted again;
 
 test("staff-admin: unexpected DB error -> generic 500 (no internals), still compensated", async () => {
   await run(async (ctx) => {
-    ctx.extra.failCreateApp = { code: "42501", message: "permission denied for table users at internal host db:5432", status: 403 };
+    ctx.extra.failCreateApp = { code: "XX000", message: "internal error at internal host db:5432", status: 500 };
     const r = await call(ctx, T.adminA, body());
     assertEquals(r.status, 500);
-    assert(!r.text.includes("42501") && !r.text.includes("db:5432"), r.text);
+    assert(!r.text.includes("XX000") && !r.text.includes("db:5432"), r.text);
     assertEquals(ctx.extra.deleted, ["00000000-0000-4000-8000-000000000001"]);
+  });
+});
+
+// ---------------------------------------------------------------- migration 082 link marker
+test("staff-admin (082): createUser carries app_metadata {created_via, org_id} of the CALLER's org for every creator", async () => {
+  await run(async (ctx) => {
+    assertEquals((await call(ctx, T.adminB, body({ shopId: "shop-b1", orgId: "org-a" }))).status, 201);
+    assertEquals((await call(ctx, T.grantedMgr, body({ shopId: "shop-a2", idempotencyKey: KEY2, email: "g@example.test" }))).status, 201);
+    const created = ctx.extra.adminCalls.filter((c) => c.method === "POST" && c.path === "users")
+      .map((c) => (c.body as { app_metadata?: unknown }).app_metadata);
+    assertEquals(created, [
+      { created_via: "staff-admin", org_id: "org-b" },
+      { created_via: "staff-admin", org_id: "org-a" },
+    ]);
+    // the emulated 082 database accepted both links
+    assertEquals(ctx.world.db.tables.users.length, USERS.length + 2);
+  });
+});
+
+test("staff-admin (082): database refuses the link (42501) -> 403 link_refused, generic, auth user deleted again", async () => {
+  await run(async (ctx) => {
+    ctx.extra.failCreateApp = { code: "42501", message: "AUTH_ACCOUNT_NOT_LINKABLE: this login account cannot be linked to a staff profile", status: 403 };
+    const r = await call(ctx, T.adminA, body());
+    assertEquals(r.status, 403, r.text);
+    assertEquals(r.body.code, "link_refused");
+    assert(!r.text.includes("AUTH_ACCOUNT_NOT_LINKABLE") && !r.text.includes("42501"), r.text);
+    assertEquals(ctx.extra.deleted, ["00000000-0000-4000-8000-000000000001"]);
+    assertEquals(ctx.extra.accounts.length, 0);
+    assertEquals(ctx.world.db.tables.users.length, USERS.length);
+    assertNoSecrets(ctx, r.text);
+  });
+});
+
+test("staff-admin (082): an account without the marker is not linkable by the emulated database (mock contract)", async () => {
+  await run(async (ctx) => {
+    // GoTrue drops the marker (as an older staff-admin build would never send
+    // it) -> the 082 rule refuses and the function compensates
+    const realPush = ctx.extra.accounts.push.bind(ctx.extra.accounts);
+    ctx.extra.accounts.push = (...items: AuthAccount[]) => realPush(...items.map((a) => ({ ...a, app_metadata: { provider: "email" } })));
+    const r = await call(ctx, T.adminA, body());
+    assertEquals(r.status, 403, r.text);
+    assertEquals(r.body.code, "link_refused");
+    assertEquals(ctx.extra.deleted, ["00000000-0000-4000-8000-000000000001"]);
+    assertEquals(ctx.world.db.tables.users.length, USERS.length);
   });
 });
 
@@ -509,6 +571,9 @@ test("staff-admin bootstrap: on an empty install creates exactly one confirmed a
     assertEquals(r.status, 201, r.text);
     assertEquals(r.body, { created: true });
     assertEquals(ctx.extra.accounts.map((a) => [a.email, a.email_confirmed]), [["first@example.test", true]]);
+    // no 082 link marker: the bootstrap account is linked only by bootstrap_first_admin() (076)
+    const boot = ctx.extra.adminCalls.find((c) => c.method === "POST" && c.path === "users")!;
+    assertEquals((boot.body as { app_metadata?: unknown }).app_metadata, undefined);
     const dup = await call(ctx, ANON_KEY, { action: "bootstrap_account", email: "first@example.test", password: PASSWORD });
     assertEquals(dup.status, 409);
     for (let i = 0; i < 9; i++) ctx.extra.accounts.push({ id: `x${i}`, email: `x${i}@example.test`, password: "x", email_confirmed: true });

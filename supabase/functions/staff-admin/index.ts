@@ -33,7 +33,9 @@ import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 //   8. Retry: the users id is derived from the idempotency key; a row that
 //      already exists for the same key/org/email is returned as a replay.
 //   9. Email uniqueness (users table, any org) -> 409, one generic message.
-//  10. GoTrue admin API createUser (service role, email_confirm true).
+//  10. GoTrue admin API createUser (service role, email_confirm true) with
+//      app_metadata {created_via: 'staff-admin', org_id: caller org}: the
+//      marker migration 082 requires before create_app_user() links it.
 //  11. create_app_user() RPC with the CALLER's JWT: RLS/guards/020 rules,
 //      org derived server-side (v_user.org_id), USER_CREATED audit row,
 //      idempotency key bound to the caller (074). On failure the auth user
@@ -323,8 +325,16 @@ async function createStaff(
   }
   if ((dup.data ?? []).length > 0) return fail(409, "email_taken", DUPLICATE_EMAIL);
 
-  // 10. the auth account (GoTrue admin API; works with DISABLE_SIGNUP=true)
-  const created = await admin.auth.admin.createUser({ email, password, email_confirm: true });
+  // 10. the auth account (GoTrue admin API; works with DISABLE_SIGNUP=true).
+  // app_metadata is writable only with the service role; migration 082's
+  // create_app_user() links an account only if it carries this marker for
+  // the caller's org, has never signed in and is at most 15 minutes old.
+  const created = await admin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+    app_metadata: { created_via: "staff-admin", org_id: caller.org_id },
+  });
   if (created.error || !created.data.user) {
     const status = (created.error as { status?: number } | null)?.status;
     const errCode = (created.error as { code?: string } | null)?.code;
@@ -359,6 +369,12 @@ async function createStaff(
     console.error("[staff-admin] create_app_user failed", pgCode);
     if (SAFE_DB_CODES.has(pgCode)) {
       return jsonResponse({ error: row.error!.message, code: "rejected", dbCode: pgCode }, 409);
+    }
+    if (pgCode === "42501") {
+      // 082 link / assurance refusal (MFA_REQUIRED, VERIFICATION_REQUIRED,
+      // AUTH_ACCOUNT_NOT_LINKABLE). The checks above normally refuse first;
+      // reaching this means the database disagreed. Generic on purpose.
+      return fail(403, "link_refused", "The server refused to link the new account. Nothing was created.");
     }
     return fail(500, "server_error", "Could not create the staff profile. Nothing was created.");
   }
