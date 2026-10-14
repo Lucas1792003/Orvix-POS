@@ -340,8 +340,11 @@ SELECT format('products=%s inventory=%s inv_qty_sum=%s users=%s shops=%s busines
       if (error) throw new Error(`B shop insert failed: ${error.message}`);
     }
     // B's staff through create_app_user (MANAGER first, then CASHIER).
-    const authBm = await createAuthUser(cfg, B.emails.mgr, password);
-    const authBc = await createAuthUser(cfg, B.emails.cash, password);
+    // 082: staff-admin-marked accounts for org B, and B's ADMIN session must
+    // have entered an emailed code after signing in (no TOTP on QA admins).
+    const authBm = await createAuthUser(cfg, B.emails.mgr, password, { created_via: "staff-admin", org_id: B.orgId });
+    const authBc = await createAuthUser(cfg, B.emails.cash, password, { created_via: "staff-admin", org_id: B.orgId });
+    runSql(cfg, `INSERT INTO admin_login_codes (auth_id, code_hash, expires_at, consumed_at) VALUES ('${B.adminAuth}', repeat('0', 64), now() + interval '10 minutes', now());`);
     ok(await rpc(B.admin, "create_app_user", { p_id: B.mgrId, p_name: "QA B Manager", p_email: B.emails.mgr, p_role: "MANAGER", p_shop_id: B.shop, p_auth_id: authBm, p_granted_permissions: null, p_revoked_permissions: null, p_idempotency_key: uuid() }), "B create manager");
     ok(await rpc(B.admin, "create_app_user", { p_id: B.cashId, p_name: "QA B Cashier", p_email: B.emails.cash, p_role: "CASHIER", p_shop_id: B.shop, p_auth_id: authBc, p_granted_permissions: null, p_revoked_permissions: null, p_idempotency_key: uuid() }), "B create cashier");
     B.mgr = await signedInClient(cfg, B.emails.mgr, password);

@@ -620,7 +620,11 @@ describe.skipIf(!LIVE)("Phase D live integration (self-hosted stack)", () => {
 
   it("11. staff-user creation: admin create_app_user (+replay), cashier denied, p_org_id rejected", async () => {
     const staffEmail = `qa-staff-${ts}@qa.invalid`;
-    const staffAuth = await createAuthUser(cfg, staffEmail, password);
+    // 082: link only a staff-admin-marked account of the caller's org, and only
+    // from an ADMIN session that entered an emailed code after signing in
+    // (the QA admin has no TOTP) - the same state staff-admin leaves.
+    const staffAuth = await createAuthUser(cfg, staffEmail, password, { created_via: "staff-admin", org_id: ids.org });
+    runSql(cfg, `INSERT INTO admin_login_codes (auth_id, code_hash, expires_at, consumed_at) VALUES ('${authIds.admin}', repeat('0', 64), now() + interval '10 minutes', now());`);
     const staffId = `qa-user-staff-${ts}`;
     const ku = uuid();
     const args = { p_id: staffId, p_name: "QA Staff", p_email: staffEmail, p_role: "CASHIER", p_shop_id: ids.shop, p_auth_id: staffAuth, p_granted_permissions: null, p_revoked_permissions: null, p_idempotency_key: ku };

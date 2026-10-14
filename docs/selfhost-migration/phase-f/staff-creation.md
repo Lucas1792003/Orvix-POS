@@ -26,6 +26,14 @@ need is administrative, so the endpoint can be closed.
 
 ## 2. Design
 
+> **Update 2026-10-14:** migration **082** now exists
+> ([migration-082.md](migration-082.md)): `create_app_user()` links only an
+> account staff-admin created for the caller's org (`app_metadata` marker,
+> never signed in, ≤ 15 min old) from a fully verified caller, and direct
+> writes of `users.auth_id` are refused. staff-admin sets the marker at
+> `createUser`; deploy both in the same window (procedure in that doc). The
+> text below describes the function as first written.
+
 New Edge Function **`supabase/functions/staff-admin`**, two actions. No SQL
 change: **no migration 082** — everything it needs already exists
 (`current_app_user()`, `app_has_perm()`, `create_app_user()`,
