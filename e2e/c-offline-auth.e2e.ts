@@ -6,7 +6,7 @@
 import { test, expect } from "@playwright/test";
 import { rmSync } from "node:fs";
 import path from "node:path";
-import { count, inv, keyRows, row, setUserActive, sleep } from "./helpers/db";
+import { closeOpenShifts, count, ensureQaBarcode, inv, keyRows, row, setUserActive, sleep } from "./helpers/db";
 import { RESULTS_DIR, qaPassword, qaState, qaTotpSecret } from "./helpers/env";
 import { record } from "./helpers/evidence";
 import { assertConsistency } from "./helpers/consistency";
@@ -25,8 +25,7 @@ let A: Terminal;
 async function cashierAtPos(t: Terminal): Promise<void> {
   const session = await t.storedSession().catch(() => null);
   if (!session) {
-    await t.login(emails.cashA, pw);
-    await t.waitForRoute("/app/pos");
+    await t.signIn(emails.cashA, pw, "/app/pos");
   }
   await t.waitForApp();
   if (!(await row("shifts", { cashier_id: ids.cashA, ended_at: null }))) await t.openShift(0);
@@ -35,6 +34,11 @@ async function cashierAtPos(t: Terminal): Promise<void> {
 
 test.beforeAll(async () => {
   rmSync(USERDATA, { recursive: true, force: true });
+  // Own preconditions: cashier A active, with a shift this spec opens itself.
+  setUserActive(ids.cashA, true);
+  const closed = await closeOpenShifts([ids.cashA], { email: emails.mgr, password: pw }, "spec C");
+  record("C", "precondition: no open shift for cashier A", "INFO", closed.length ? closed.join("; ") : "none open");
+  record("C", "precondition: QA Product One barcode", "INFO", await ensureQaBarcode(st));
   A = await Terminal.launchElectron(USERDATA);
   await cashierAtPos(A);
 });

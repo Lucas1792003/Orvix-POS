@@ -269,6 +269,31 @@ export class Terminal {
     await this.page.getByRole("button", { name: "Sign in", exact: true }).click();
   }
 
+  /** Setup sign-in (a spec's precondition, not the behaviour under test):
+   *  sign in and wait for `routePrefix`. If the page reports "Failed to
+   *  fetch" — the request never got an HTTP answer (a network blip between
+   *  this Mac and the stack; seen once 2026-10-14 with no matching request
+   *  in the gateway log) — sign in again, at most twice. Any answer from the
+   *  server (wrong password, inactive user, ...) fails immediately. */
+  async signIn(email: string, password: string, routePrefix: string): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+      await this.login(email, password);
+      const alert = this.page.locator('form [role="alert"]');
+      const outcome = await Promise.race([
+        this.waitForRoute(routePrefix, 30_000).then(() => "ok" as const, () => "timeout" as const),
+        alert.waitFor({ state: "visible", timeout: 30_000 }).then(() => "alert" as const, () => "timeout" as const),
+      ]);
+      if (outcome === "ok") return;
+      const text = outcome === "alert" ? (await alert.innerText()).replace(/\s+/g, " ").trim() : "(no alert)";
+      if (outcome === "alert" && /Failed to fetch/i.test(text) && attempt < 3) {
+        this.consoleErrors.push(`${new Date().toISOString()} e2e: sign-in attempt ${attempt} got "${text}", retrying`);
+        await this.page.waitForTimeout(2_000);
+        continue;
+      }
+      throw new Error(`sign-in as ${email} did not reach ${routePrefix}: ${outcome} ${text} (route ${this.currentRoute()})`);
+    }
+  }
+
   /** Read the login page's inline error (role=alert) if any. */
   async loginError(timeout = 10_000): Promise<string | null> {
     const alert = this.page.locator('form [role="alert"]');
@@ -390,23 +415,45 @@ export class Terminal {
   /** The "Expected cash" figure the Shifts page shows for the open shift. */
   async expectedCashShown(): Promise<number> {
     await this.navigate("/app/shifts");
+    return this.readExpectedCash();
+  }
+
+  /** Read the "Expected cash" figure on the current Shifts page (no navigation). */
+  private async readExpectedCash(): Promise<number> {
     const label = this.page.locator("main div", { hasText: /^Expected cash$/ }).first();
     await label.waitFor({ state: "visible" });
     const value = await label.locator("xpath=following-sibling::div[1]").innerText();
     return Number(value.replace(/[^\d]/g, ""));
   }
 
-  /** Close the open shift. Returns the inline error (variance gate) or null on success. */
+  /** Close the open shift. Returns the inline error (variance gate) or null on success.
+   *
+   *  Whether a variance reason is needed is decided from the figures, not
+   *  guessed: the Shifts page renders #own-shift-variance-reason only when
+   *  counted cash != the expected cash it shows. The expected figure is read
+   *  until it is stable (the store may still be merging sales), then:
+   *    - variance != 0 and a reason is given  -> the box must appear; it is filled;
+   *    - variance != 0 and no reason          -> nothing filled (the gate's error is returned);
+   *    - variance == 0                        -> the box must NOT be shown; a reason
+   *      passed by the caller is not applicable and is ignored. */
   async closeShift(closingCash: number, reason?: string): Promise<string | null> {
     await this.navigate("/app/shifts");
     const cash = this.page.locator("#own-shift-closing-cash");
     await cash.waitFor({ state: "visible" });
     await cash.fill(String(closingCash));
     await cash.blur();
-    if (reason !== undefined) {
-      const reasonBox = this.page.locator("#own-shift-variance-reason");
+    let expected = await this.readExpectedCash();
+    for (let stableSince = Date.now(); Date.now() - stableSince < 750;) {
+      await this.page.waitForTimeout(150);
+      const now = await this.readExpectedCash();
+      if (now !== expected) { expected = now; stableSince = Date.now(); }
+    }
+    const reasonBox = this.page.locator("#own-shift-variance-reason");
+    if (closingCash !== expected) {
       await reasonBox.waitFor({ state: "visible" });
-      await reasonBox.fill(reason);
+      if (reason !== undefined) await reasonBox.fill(reason);
+    } else {
+      await reasonBox.waitFor({ state: "hidden" });
     }
     await this.toastsNow();
     await this.page.getByRole("button", { name: "End shift", exact: true }).click();

@@ -17,7 +17,7 @@
 // QA tenant only (terminal = Chromium, QA cashier B, QA shop). Every forged
 // row is removed again inside this spec; the final gate in afterAll must pass.
 import { expect, test } from "@playwright/test";
-import { count, inv, row, rows, runSql } from "./helpers/db";
+import { closeOpenShifts, count, inv, row, rows, runSql } from "./helpers/db";
 import { qaPassword, qaState } from "./helpers/env";
 import { record } from "./helpers/evidence";
 import { assertConsistency } from "./helpers/consistency";
@@ -65,9 +65,11 @@ SELECT 'reverted ' || '${saleId}' || ' sales left=' || count(*) FROM sales WHERE
 COMMIT;`);
 
 test.beforeAll(async () => {
+  // Own preconditions: cashier B starts on a shift this spec opens itself.
+  const closed = await closeOpenShifts([ids.cashB], { email: emails.mgr, password: pw }, "spec E");
+  record("E", "precondition: no open shift for cashier B", "INFO", closed.length ? closed.join("; ") : "none open");
   T = await Terminal.launchBrowser();
-  await T.login(emails.cashB, pw);
-  await T.waitForRoute("/app/pos");
+  await T.signIn(emails.cashB, pw, "/app/pos");
   await T.waitForApp();
   if (!(await row("shifts", { cashier_id: ids.cashB, ended_at: null }))) await T.openShift(0);
   await T.gotoPos();
