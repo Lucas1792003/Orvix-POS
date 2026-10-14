@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useDataStore } from "../stores/dataStore";
 import { newIdempotencyKey } from "../stores/data/idempotentRpc";
-import { STAFF_PASSWORD_MIN, StaffAdminError } from "../lib/staffAdmin";
-import { buildCreateStaffInput } from "../features/admin/staffForm";
+import { STAFF_PASSWORD_MIN } from "../lib/staffAdmin";
+import { buildCreateStaffInput, staffCreateErrorMessage } from "../features/admin/staffForm";
 import type { Role } from "../types";
 import { PageHeader } from "../components/layout/PageHeader";
 import { Card } from "../components/ui/Card";
@@ -175,8 +175,7 @@ export const UsersPage = () => {
       // The server's own refusals (permission, verification, duplicate email,
       // rate limit) are written for the admin; database business-rule errors
       // (they carry a Postgres code) go through the Users form mapping.
-      const message = error instanceof StaffAdminError && !error.code ? error.message : mapUserFormError(error);
-      setFeedback({ type: "error", message });
+      setFeedback({ type: "error", message: staffCreateErrorMessage(error) });
       // Modal stays open on failure so the operator can fix the input
       // (e.g. pick a different shop) and resubmit without re-entering everything.
       return;

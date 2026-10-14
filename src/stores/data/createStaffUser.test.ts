@@ -24,7 +24,12 @@ vi.mock("../../lib/supabase", () => ({
 }));
 
 import { createShopSlice } from "./slices/shopSlice";
-import { StaffAdminError } from "../../lib/staffAdmin";
+import {
+  StaffAdminError,
+  STAFF_ADMIN_MISSING_MESSAGE,
+  STAFF_ADMIN_UNCONFIRMED_MESSAGE,
+  createBootstrapAccount,
+} from "../../lib/staffAdmin";
 import type { DataState } from "./types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -104,6 +109,67 @@ describe("createStaffUser()", () => {
     const err = await store.get().createStaffUser(input).catch((e) => e);
     expect(err.code).toBe("P0001");
     expect(err.message).toMatch(/active manager/);
+  });
+
+  // docs/selfhost-migration/phase-f/electron-compatibility.md: a build talking
+  // to a backend WITHOUT staff-admin (hosted, or a stack before the function
+  // was synced) must fail loudly with a clear message, never half-create.
+  it("hosted without staff-admin (404 NOT_FOUND) -> clear 'not installed' error, nothing created", async () => {
+    invoke.mockResolvedValueOnce(httpError(404, { code: "NOT_FOUND", message: "Requested function was not found" }));
+    const store = makeStore({ users: [] });
+    const err = await store.get().createStaffUser(input).catch((e) => e);
+    expect(err).toBeInstanceOf(StaffAdminError);
+    expect(err.reason).toBe("function_missing");
+    expect(err.status).toBe(404);
+    expect(err.message).toBe(STAFF_ADMIN_MISSING_MESSAGE);
+    expect(err.message).toMatch(/Nothing was created/);
+    expect(err.code).toBeUndefined(); // UsersPage shows err.message as-is (no Postgres mapping)
+    expect(store.get().users).toEqual([]);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(signUp).not.toHaveBeenCalled();
+    expect(setSession).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it("self-hosted edge runtime without the function (500 worker boot error) -> same 'not installed' error", async () => {
+    invoke.mockResolvedValueOnce(httpError(500, {
+      msg: "InvalidWorkerCreation: worker boot error: failed to bootstrap runtime: could not find an appropriate entrypoint",
+    }));
+    const store = makeStore({ users: [] });
+    const err = await store.get().createStaffUser(input).catch((e) => e);
+    expect(err.reason).toBe("function_missing");
+    expect(err.message).toBe(STAFF_ADMIN_MISSING_MESSAGE);
+    expect(store.get().users).toEqual([]);
+  });
+
+  it("a gateway error that staff-admin did not write (502, no JSON) -> 'not confirmed, retry is safe'", async () => {
+    invoke.mockResolvedValueOnce({
+      data: null,
+      error: { message: "Edge Function returned a non-2xx status code", context: new Response("<html>Bad Gateway</html>", { status: 502 }) },
+    });
+    const store = makeStore({ users: [] });
+    const err = await store.get().createStaffUser(input).catch((e) => e);
+    expect(err).toBeInstanceOf(StaffAdminError);
+    expect(err.reason).toBe("unconfirmed");
+    expect(err.status).toBe(502);
+    expect(err.message).toBe(STAFF_ADMIN_UNCONFIRMED_MESSAGE);
+    expect(store.get().users).toEqual([]);
+  });
+
+  it("staff-admin's own 500 (with its error text) is passed through unchanged", async () => {
+    invoke.mockResolvedValueOnce(httpError(500, { error: "Could not create the account. Nothing was created.", code: "internal" }));
+    const store = makeStore({ users: [] });
+    const err = await store.get().createStaffUser(input).catch((e) => e);
+    expect(err.reason).toBe("internal");
+    expect(err.message).toBe("Could not create the account. Nothing was created.");
+  });
+
+  it("first-time setup against a server without staff-admin returns the 'not installed' message", async () => {
+    const call = vi.fn().mockResolvedValue({ status: 404, body: { code: "NOT_FOUND", message: "Requested function was not found" } });
+    const message = await createBootstrapAccount("owner@example.test", "Correct-Horse-9", call);
+    expect(message).toMatch(/staff-admin service is not installed/);
+    expect(message).toMatch(/Nothing was created/);
   });
 
   it("a network failure (no HTTP response) throws a network error", async () => {

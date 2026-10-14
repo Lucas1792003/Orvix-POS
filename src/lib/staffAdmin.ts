@@ -55,10 +55,43 @@ export interface CreateStaffInput {
   idempotencyKey: string;
 }
 
+/** Shown when the server has no staff-admin function at all: the hosted
+ *  project (never deployed there), or a self-hosted stack before the
+ *  function was synced. The function never ran, so nothing was created. */
+export const STAFF_ADMIN_MISSING_MESSAGE =
+  "This server cannot create staff accounts: its staff-admin service is not installed. " +
+  "Nothing was created. Ask the system administrator to update the server.";
+/** Any other answer that did not come from staff-admin itself (gateway
+ *  error, timeout, crashed worker). The account may or may not exist; the
+ *  form keeps its idempotency key, so a retry cannot create a duplicate. */
+export const STAFF_ADMIN_UNCONFIRMED_MESSAGE =
+  "The server did not confirm the new staff account. Check the user list, then try again " +
+  "(a retry will not create a duplicate).";
+
+/** True when the answer is staff-admin's own JSON (`{ error, code }` or `{ user }`). */
+const isStaffAdminBody = (body: Record<string, unknown> | null): boolean =>
+  !!body && (typeof body.error === "string" || (typeof body.user === "object" && body.user !== null));
+
+/** Error for a response that did not come from staff-admin itself.
+ *  Hosted Supabase answers an unknown function with 404 `{code:"NOT_FOUND"}`;
+ *  the self-hosted edge runtime's main router with 500 `{msg:"…worker boot
+ *  error…"}` (no entrypoint for the name). Both mean "function missing". */
+function foreignResponseError(status: number, body: Record<string, unknown> | null): StaffAdminError {
+  const msg = typeof body?.msg === "string" ? body.msg : "";
+  const missing =
+    status === 404 ||
+    body?.code === "NOT_FOUND" ||
+    /InvalidWorkerCreation|worker boot error|could not find an appropriate entrypoint/i.test(msg);
+  return missing
+    ? new StaffAdminError(STAFF_ADMIN_MISSING_MESSAGE, status, "function_missing")
+    : new StaffAdminError(STAFF_ADMIN_UNCONFIRMED_MESSAGE, status, "unconfirmed");
+}
+
 export async function createStaffAccount(input: CreateStaffInput, call: StaffAdminCall = invokeStaffAdmin): Promise<User> {
   const { status, body } = await call({ action: "create_staff", ...input });
   const user = body?.user as User | undefined;
   if ((status === 200 || status === 201) && user && typeof user.id === "string") return user;
+  if (!isStaffAdminBody(body)) throw foreignResponseError(status, body);
   const message = typeof body?.error === "string" ? body.error : "Could not create the staff account.";
   throw new StaffAdminError(
     message,
@@ -79,7 +112,11 @@ export async function createBootstrapAccount(
   try {
     const { status, body } = await call({ action: "bootstrap_account", email, password });
     if (status === 200 || status === 201) return null;
-    return typeof body?.error === "string" ? body.error : "Could not create the administrator account.";
+    if (typeof body?.error === "string") return body.error;
+    const err = foreignResponseError(status, body);
+    return err.reason === "function_missing"
+      ? "This server cannot run first-time setup: its staff-admin service is not installed. Nothing was created."
+      : "Could not create the administrator account.";
   } catch (err) {
     return err instanceof Error ? err.message : String(err);
   }

@@ -2,7 +2,19 @@
 // the page module so it can be unit-tested without a DOM. The server
 // re-validates everything (supabase/functions/staff-admin).
 import type { Role } from "../../types";
-import { STAFF_PASSWORD_MAX, STAFF_PASSWORD_MIN, type CreateStaffInput } from "../../lib/staffAdmin";
+import { STAFF_PASSWORD_MAX, STAFF_PASSWORD_MIN, StaffAdminError, type CreateStaffInput } from "../../lib/staffAdmin";
+import { mapUserFormError } from "./userFormErrors";
+
+/** Message the Users form shows when creating a staff member failed. The
+ *  server's own refusals and the "service not installed / not confirmed"
+ *  errors (lib/staffAdmin.ts) are written for the admin and shown as-is;
+ *  database business-rule errors (they carry a Postgres code) go through the
+ *  Users form mapping. */
+export function staffCreateErrorMessage(error: unknown): string {
+  return error instanceof StaffAdminError && !error.code
+    ? error.message
+    : mapUserFormError(error);
+}
 
 export interface NewStaffForm {
   name: string;

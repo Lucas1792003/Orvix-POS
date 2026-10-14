@@ -8,7 +8,7 @@ Code under test:
 
 Both were checked out as detached worktrees **outside** the repo (session scratchpad) and removed at the end.
 
-Related: [canary checklist](../next-phase/electron-1.0.16-canary.md) · [08 cutover/rollback](../08-cutover-rollback.md) · [idempotency contract](../phase-d/idempotency-contract.md) · [offline authorisation](../phase-d/offline-authorization.md) · [deployment automation audit](deployment-automation-audit.md) · [release checklist](../next-phase/release-checklist.md).
+Related: [schema 081 / staff-admin / sign-up-off update of this matrix](../phase-f/electron-compatibility.md) · [canary checklist](../next-phase/electron-1.0.16-canary.md) · [08 cutover/rollback](../08-cutover-rollback.md) · [idempotency contract](../phase-d/idempotency-contract.md) · [offline authorisation](../phase-d/offline-authorization.md) · [deployment automation audit](deployment-automation-audit.md) · [release checklist](../next-phase/release-checklist.md).
 
 ## Summary
 
