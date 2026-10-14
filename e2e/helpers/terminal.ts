@@ -142,7 +142,16 @@ export class Terminal {
     // the Electron binary into plain Node and makes it reject Chromium's
     // --remote-debugging-port. Never inherit it.
     delete env.ELECTRON_RUN_AS_NODE;
-    const app = await electron.launch({ args: ["."], cwd: PROJECT_ROOT, env });
+    // Keep the renderer running at full speed when the window is hidden or
+    // occluded (e.g. the Mac's display sleeps mid-run): Chromium otherwise
+    // stops animation frames for it and Playwright's actionability checks
+    // ("stable") never complete — seen 2026-10-14, a click hanging until the
+    // test timeout right after "Display is turned off". Playwright passes
+    // these to its own Chromium by default, but not to Electron.
+    const app = await electron.launch({
+      args: ["--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows", "--disable-background-timer-throttling", "."],
+      cwd: PROJECT_ROOT, env,
+    });
     const context = app.context();
     await context.addInitScript(LANG_INIT);
     await context.addInitScript(SHOP_WRITE_SPY);
