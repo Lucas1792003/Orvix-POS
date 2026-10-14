@@ -190,7 +190,7 @@ Security notes:
   point for the e2e race check. It grants nothing beyond what the page's own
   address bar already holds.
 
-## 6. Deploy steps (coordinator; owner approval required; nothing done)
+## 6. Deploy steps (coordinator; owner approval required; steps 1–3 applied 2026-10-13)
 
 Order: **server first, then tills.** An old till's QR is already unusable
 (`file://`), so deploying the server side changes nothing for existing
@@ -205,23 +205,28 @@ builds.
    `lucario`, mode 644 like the siblings. No env to add:
    `SUPABASE_ANON_KEY` is already in the functions container (checked by
    name).
-2. **Router allow-list** (upstream file, kept in `volumes/functions/main/`):
+2. **Router allow-list** (upstream file, kept in `volumes/functions/main/`).
+   Applied by hand on 2026-10-13 (backup `main/index.ts.pre-phone-page`).
+   From 2026-10-14 the procedure is `deploy/lucashome/functions-router.sh`
+   (pinned hashes, idempotent; see step 6). Copy the script and the patch to
+   the same directory on the server, then:
    ```sh
-   ssh lucashome 'cd /srv/supabase/stack/volumes/functions && \
-     sha256sum main/index.ts && \
-     cp -p main/index.ts main/index.ts.pre-phone-page && \
-     patch --dry-run -p1 < ~/functions-main-public-page.patch && \
-     patch -p1 < ~/functions-main-public-page.patch'
+   mac$ scp deploy/lucashome/functions-router.sh deploy/lucashome/functions-main-public-page.patch lucashome:~/functions-router/
+   ls$  ~/functions-router/functions-router.sh status   # upstream | patched | unknown (exit 1)
+   ls$  ~/functions-router/functions-router.sh apply    # upstream -> timestamped backup, patch --dry-run, patch, sha check
    ```
-   First copy the patch to `~/` with `scp`. The expected pre-patch sha256 is
-   `9b7978abd7fd4af39e4f407f8a956137aa99e6ffaeb2190a5e29c8e1787d2da6`
-   (2026-10-13). If it differs, stop and re-derive the patch.
+   Pinned sha256: upstream `self-hosted/v0.8.2` (commit `564eab8a`)
+   `9b7978abd7fd4af39e4f407f8a956137aa99e6ffaeb2190a5e29c8e1787d2da6`;
+   after the patch `d2901ffa9711a82117b0edde7b98cbd999ea5d61fa4536c74b307bb37cd111bc`.
+   `apply` refuses any other file (step 6). `status` needs no copy:
+   `ssh lucashome 'bash -s -- status' < deploy/lucashome/functions-router.sh`.
 
    Then `cd /srv/supabase/stack && docker compose restart functions`. The
    main service is loaded at start. All functions are unavailable for a few
    seconds: `admin-2fa`, `phone-upload-token`, the report cron, and the
    platform console.
-3. **Smoke checks** (no data written; `$O` is the tailnet origin):
+3. **Smoke checks** (no data written; `$O` is the tailnet origin). The
+   scripted form is `functions-router.sh verify` (step 6); the manual form:
    ```sh
    curl -sI "$O/functions/v1/phone-upload-page"   # 200, content-type: text/html; charset=utf-8, content-security-policy: default-src 'none'; …
    curl -s  "$O/functions/v1/phone-upload-page" | grep -c '<script nonce='   # 1
@@ -241,16 +246,68 @@ builds.
    (`PAGE_MODE` in `e2e/d-phone-upload.e2e.ts`) to `deployed`.
 5. **Rollback**:
    ```sh
-   cp -p main/index.ts.pre-phone-page main/index.ts
+   ~/functions-router/functions-router.sh revert   # newest backup with the upstream sha; refuses an unknown router
    docker compose restart functions
    rm -r volumes/functions/phone-upload-page
    ```
    Tills built with this change then show a QR whose page answers 401 or
    500. Upload from those tills stops working; nothing else is affected.
-6. **Upstream upgrades:** an upgrade of the self-hosted stack that replaces
-   `volumes/functions/main/index.ts` drops the allow-list. Re-apply the
-   patch, then repeat smoke step 3. Add this to the upgrade checklist.
-   `volumes/functions` is already in the backup bundle.
+6. **Upstream upgrades (2026-10-14).** Upstream `update.sh` treats
+   `volumes/functions/main/index.ts` as a vendor file and **3-way merges** it
+   (its `.gitignore` ignores `volumes/functions/**` except this file). After
+   an upgrade the router is therefore one of: the new upstream file (allow-list
+   dropped), a clean merge (allow-list kept, unknown hash), or a file with
+   conflict markers (the functions container will not start). The checklist
+   after **any** stack upgrade (also in `deploy/lucashome/README.md`):
+   ```sh
+   ls$ ~/functions-router/functions-router.sh status    # must say patched; exit 1 = unknown
+   ls$ ~/functions-router/functions-router.sh apply     # only when status says upstream
+   ls$ cd /srv/supabase/stack && docker compose restart functions
+   ls$ ~/functions-router/functions-router.sh verify    # loopback gateway; exit 1 on any failed probe
+   ```
+   `verify` lists the function directories at run time (all except `main/`)
+   and checks: the page answers GET/HEAD 200 `text/html` with
+   `default-src 'none'`; POST and sub-paths of the page get the gate's 401;
+   **every** other function gets 401 (with `sb-error-code`) for GET and POST
+   without `Authorization`; OPTIONS still skips the gate; and path tricks
+   (`/../`, `%2F..%2F`, `%2e%2e`, `//`, upper case) are blocked. Through the
+   gateway, Envoy answers some tricks first (empty-body 400 for `%2F`, `//`
+   merged to the page itself). With `SUPABASE_ANON_KEY` set it also checks
+   that `phone-upload-token` returns the generic 404 for a bad token. The key
+   goes to curl via `-K <(…)`, so it is never on a command line.
+
+   When `status` says **unknown**, `apply` refuses and prints the re-derive
+   steps: take the new pristine upstream file, re-apply the two hunks, regenerate
+   the patch, update `UPSTREAM_REF/UPSTREAM_SHA/PATCHED_SHA`, then run
+   `deploy/lucashome/tests/functions-router-test.sh` with
+   `UPSTREAM_ROUTER=<new file>`. Until then the page answers 401. This is
+   fail-closed: upload from the phone stops, and nothing else changes.
+
+   **Mechanism chosen: patch the upstream file and pin both hashes.** The
+   alternative was a full patched copy (`deploy/lucashome/functions-main/index.ts`)
+   bind-mounted read-only over `main/index.ts` from the compose override. That
+   survives an upgrade mechanically, but it fails *silently and open*:
+   `update.sh` would keep updating the host file underneath the mount. The
+   stack would run our old router, missing any upstream fix to JWT
+   verification, until someone noticed the drift. The patch approach fails
+   *visibly and closed*: the page 401s and `status` exits 1. It also adds no
+   compose deviation and no nested single-file bind mount (a file mount keeps
+   the old inode when the host file is replaced, which needs a container
+   recreate, not a restart). It keeps the reviewed diff at 2 hunks. The cost
+   is one manual step per upgrade that touches the router, and the checklist
+   above covers it. `volumes/functions` is already in the backup bundle.
+
+   Tests (local only): `deploy/lucashome/tests/functions-router-test.sh`.
+   Part A covers the files: patch → pinned hash, idempotent `apply`,
+   timestamped backup, refusal on a changed, merged or conflicted upstream,
+   `revert`, and the legacy backup name. Part B runs the patched router in
+   `supabase/edge-runtime:v1.76.2` with `VERIFY_JWT=true`, a throwaway HS256
+   secret, an empty JWKS and **every** repo function mounted. It runs
+   `verify` plus 18 extra path tricks straight at the router, so every trick
+   meets the strict JWT gate. Controls: a valid dummy JWT passes the gate,
+   and the unpatched router 401s the page. Result 2026-10-14: 63/63. Live
+   (read-only) the same day: `status` = patched; `verify` through the tailnet
+   origin with the anon-key probe passed 45/45.
 
 ### Release note
 
@@ -284,4 +341,6 @@ build without this change produce an unusable `file://` QR. The web build
 | `src/lib/phoneUploadPageClient.test.ts` | page logic (fake DOM) + wording parity |
 | `supabase/tests/functions/phone_upload_page_test.ts` | hermetic Deno tests: HTML, CSP, keys, methods, paths, no reflection |
 | `deploy/lucashome/functions-main-public-page.patch` | router allow-list |
+| `deploy/lucashome/functions-router.sh` | `status` / `apply` / `revert` / `verify` with pinned upstream + patched sha256 (§6 step 6) |
+| `deploy/lucashome/tests/functions-router-test.sh` | local file + edge-runtime tests for the script and the patch |
 | `e2e/d-phone-upload.e2e.ts`, `e2e/helpers/edgeRuntime.ts` | QR asserted to encode the configured https page; `E2E_PHONE_PAGE=local|deployed` |
