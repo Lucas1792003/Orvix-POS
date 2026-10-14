@@ -302,6 +302,14 @@ if [ "$((10#$MAX_MIG))" -ge 82 ]; then
 else
   log "skipping t18_auth_link (migrations capped at $MAX_MIG < 082)"
 fi
+# Old client (v1.0.15) payloads against 081: keyed RPCs without a key,
+# direct table writes without org_id, the pre-079 phone-upload flow.
+# docs/selfhost-migration/phase-f/electron-compatibility.md
+if [ "$((10#$MAX_MIG))" -ge 81 ]; then
+  run_sql_test "$SQL/t19_old_client_compat.sql"
+else
+  log "skipping t19_old_client_compat (migrations capped at $MAX_MIG < 081)"
+fi
 # Concurrent first-time setup (076). MUST RUN LAST: t12_bootstrap_prep
 # empties public.users (TRUNCATE ... CASCADE) to recreate a fresh install in
 # this throwaway database. Two sessions call bootstrap_first_admin(); A holds
