@@ -218,6 +218,9 @@ test("A4 inventory adjust (manager) -> movement row; Realtime refresh on termina
   await ensureB();
   const qB0 = await inv(ids.shop, ids.prod2);
   await expect.poll(() => B.posStockText("QA Product Two")).toBe(`${qB0} in stock`);
+  // Relative: other specs (B) may already have made manager adjustments on prod2.
+  const auditMatch = { entity_id: ids.prod2, action_type: "STOCK_ADJUSTMENT", actor_id: ids.mgr };
+  const audit0 = await count("audit_logs", auditMatch);
 
   await A.logout();
   await A.signIn(emails.mgr, pw, "/app");
@@ -239,14 +242,14 @@ test("A4 inventory adjust (manager) -> movement row; Realtime refresh on termina
   expect(move).toBeTruthy();
   expect(move).toMatchObject({ type: "ADJUSTMENT", qty_change: 5, qty_before: qB0, qty_after: qB0 + 5, created_by: ids.mgr });
   expect(await inv(ids.shop, ids.prod2)).toBe(qB0 + 5);
-  expect(await count("audit_logs", { entity_id: ids.prod2, action_type: "STOCK_ADJUSTMENT", actor_id: ids.mgr })).toBe(1);
+  expect(await count("audit_logs", auditMatch)).toBe(audit0 + 1);
 
   await expect.poll(() => B.posStockText("QA Product Two"), { timeout: 20_000 }).toBe(`${qB0 + 5} in stock`);
   const latency = Date.now() - t0;
   const marker = await B.page.evaluate(() => (window as any).__e2eMarker);
   expect(marker).toBe("no-reload");
   record("A", "inventory adjust -> movement; Realtime refresh on other terminal", "PASS",
-    `manager adjusted prod2 +5 via UI: movement ${move.id} (${move.qty_before}->${move.qty_after}), audit STOCK_ADJUSTMENT=1, inventory ${qB0}->${qB0 + 5}; terminal B (cashier B, Chromium, no reload — marker kept) showed "${qB0 + 5} in stock" ${latency} ms after save`);
+    `manager adjusted prod2 +5 via UI: movement ${move.id} (${move.qty_before}->${move.qty_after}), audit STOCK_ADJUSTMENT +1 (${audit0}->${audit0 + 1}), inventory ${qB0}->${qB0 + 5}; terminal B (cashier B, Chromium, no reload — marker kept) showed "${qB0 + 5} in stock" ${latency} ms after save`);
 });
 
 test("A5 purchase order: create -> self-approval blocked -> approve -> receive -> supplier payment", async () => {
