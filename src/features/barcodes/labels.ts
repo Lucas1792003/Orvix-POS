@@ -1,4 +1,5 @@
 import type { Product, ProductBarcode, ProductUnit } from "../../types";
+import { findUnitBarcode } from "../catalog/productBarcodeForm";
 
 export interface PrintableBarcode {
   /** The scannable string to encode + show under the bars. */
@@ -28,11 +29,11 @@ export const getPrintableBarcodeValue = (
   barcodes: ProductBarcode[],
   unit?: Pick<ProductUnit, "id" | "isDefault">
 ): PrintableBarcode | null => {
-  const own = barcodes.find((b) => {
-    if (b.productId !== product.id || !b.value) return false;
-    if (!unit) return true;
-    return unit.isDefault ? !b.productUnitId : b.productUnitId === unit.id;
-  });
+  // A default-unit barcode may be stored with the default unit's id or with
+  // no unit (findUnitBarcode accepts both, exact id first).
+  const own = unit
+    ? findUnitBarcode(barcodes, product.id, unit)
+    : barcodes.find((b) => b.productId === product.id && !!b.value);
   if (own) return { value: own.value, source: "barcode" };
   if ((!unit || unit.isDefault) && product.sku) return { value: product.sku, source: "sku" };
   return null;

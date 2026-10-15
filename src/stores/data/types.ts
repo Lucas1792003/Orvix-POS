@@ -29,6 +29,7 @@ import type {
   UnitType,
   User,
 } from "../../types";
+import type { BarcodeSavePlan } from "../../features/catalog/productBarcodeForm";
 
 // ============================================
 // Input Types for Actions
@@ -173,7 +174,9 @@ export interface ProductState {
   /** Many-to-many supplier⇄product links (which products each supplier sells). */
   supplierProducts: SupplierProduct[];
   addProduct: (product: Product, barcodes: ProductBarcode[]) => Promise<void>;
-  updateProduct: (product: Product, barcodes: ProductBarcode[]) => Promise<void>;
+  /** Omit `barcodes` to leave the product's barcodes untouched (product
+   *  form); pass the full list to replace them (CSV import). */
+  updateProduct: (product: Product, barcodes?: ProductBarcode[]) => Promise<void>;
   /**
    * Hard delete a product. Removes the row from `products` and any
    * inventory rows for it (the `inventory.product_id` FK has no CASCADE).
@@ -182,12 +185,13 @@ export interface ProductState {
    */
   deleteProduct: (productId: string) => Promise<void>;
   /**
-   * Async barcode reconcile that throws on DB failure (incl. the unique
-   * `product_barcodes_unique_normalized_value` index). Used by the
-   * product form to surface duplicate-barcode errors inline instead of
-   * the fire-and-forget toast `addProduct`/`updateProduct` emit.
+   * Apply the product form's barcode diff (planProductBarcodeSave): delete
+   * only the named rows of this product, then insert the new ones. Throws
+   * on DB failure (incl. the unique `product_barcodes_unique_normalized_value`
+   * index) so the form can surface duplicate-barcode errors inline. Never
+   * touches rows the plan does not name.
    */
-  replaceProductBarcodes: (productId: string, barcodes: ProductBarcode[]) => Promise<void>;
+  applyProductBarcodeChanges: (productId: string, plan: BarcodeSavePlan) => Promise<void>;
   replaceProductUnits: (productId: string, units: ProductUnit[]) => Promise<void>;
   /**
    * Reconcile the supplier links for a product (delete-then-insert). Throws on

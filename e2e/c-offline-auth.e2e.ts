@@ -6,7 +6,7 @@
 import { test, expect } from "@playwright/test";
 import { rmSync } from "node:fs";
 import path from "node:path";
-import { closeOpenShifts, count, ensureQaBarcode, inv, keyRows, row, setUserActive, sleep } from "./helpers/db";
+import { closeOpenShifts, count, assertQaBarcode, inv, keyRows, row, setUserActive, sleep } from "./helpers/db";
 import { RESULTS_DIR, qaPassword, qaState, qaTotpSecret } from "./helpers/env";
 import { record } from "./helpers/evidence";
 import { assertConsistency } from "./helpers/consistency";
@@ -38,7 +38,7 @@ test.beforeAll(async () => {
   setUserActive(ids.cashA, true);
   const closed = await closeOpenShifts([ids.cashA], { email: emails.mgr, password: pw }, "spec C");
   record("C", "precondition: no open shift for cashier A", "INFO", closed.length ? closed.join("; ") : "none open");
-  record("C", "precondition: QA Product One barcode", "INFO", await ensureQaBarcode(st));
+  record("C", "precondition: QA Product One barcode", "INFO", await assertQaBarcode(st));
   A = await Terminal.launchElectron(USERDATA);
   await cashierAtPos(A);
 });

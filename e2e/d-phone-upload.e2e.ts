@@ -45,7 +45,7 @@ import path from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QRCodeSVG } from "qrcode.react";
-import { ensureQaBarcode, runSql, sleep, svc } from "./helpers/db";
+import { assertQaBarcode, runSql, sleep, svc } from "./helpers/db";
 import { startLocalFunctions, type LocalFunctionName, type LocalFunctions } from "./helpers/edgeRuntime";
 import { DEV_SERVER_URL, liveCfg, qaPassword, qaState, qaTotpSecret, RESULTS_DIR } from "./helpers/env";
 import { record } from "./helpers/evidence";
@@ -274,11 +274,13 @@ async function desktopShowsImage(s: Sess): Promise<string> {
   try {
     await expect(A.page.getByText("Upload received")).toBeVisible({ timeout: 20_000 });
   } catch (e) {
-    // The modal stops polling for good after ONE failed status request
-    // (phase FAILED -> "Upload failed / expired"); say which case this was.
+    // Status polls now retry transient failures ("reconnecting...") until the
+    // session expires (app-bugfixes.md bug 2); report what the desktop showed
+    // and what its polls got, so a stall is explained.
     const status = await A.page.locator("div", { hasText: /^Status$/ }).locator("xpath=following-sibling::div[1]").first().innerText({ timeout: 2_000 }).catch(() => "?");
     const statusReqs = A.requestsMatching(/get_product_image_upload_session_status/, s.shownAt).map((r) => r.status ?? "no-response");
-    const diag = `desktop status "${status}"; server row ${sessionRow(s.sessionId)}; status polls since QR: ${statusReqs.length} [${[...new Set(statusReqs)].join(",")}]; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
+    const reconnecting = await A.page.getByText(/reconnecting/i).isVisible().catch(() => false);
+    const diag = `desktop status "${status}"${reconnecting ? " (reconnecting shown)" : ""}; server row ${sessionRow(s.sessionId)}; status polls since QR: ${statusReqs.length} [${[...new Set(statusReqs)].join(",")}]; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
     record("phone-upload", "desktop did not show the upload", "INFO", diag);
     throw new Error(`${(e as Error).message.split("\n")[0]} — ${diag}`);
   }
@@ -295,15 +297,25 @@ async function desktopShowsImage(s: Sess): Promise<string> {
  *  exactly the server-derived URL. Returns to the edit page for the next case. */
 async function saveProductAndCheckImageUrl(s: Sess): Promise<string> {
   const expected = publicUrl(s.storagePath);
+  // The seeded barcode is bound to the default unit by id; the form shows it
+  // in the default unit's barcode field and the save must leave the row alone
+  // (app-bugfixes.md bug 1: the save used to delete it).
+  await expect.poll(() => barcodeFieldShows(st.barcodeValue), { timeout: 10_000 }).toBe(true);
+  await assertQaBarcode(st);
   await A.page.getByRole("button", { name: "Update Product", exact: true }).click();
   await expect.poll(() => A.currentRoute(), { timeout: 30_000 }).toBe("/app/admin/products");
   await expect.poll(productImageUrl, { timeout: 20_000 }).toBe(expected);
   const ok = productImageUrl() === expected && expected.startsWith(`${trustedBase}/storage/v1/object/public/${BUCKET}/org/`);
+  const barcode = await assertQaBarcode(st);
   await A.navigate(`/app/admin/products/${ids.prod1}/edit`);
   await A.page.getByRole("button", { name: "Use phone camera" }).waitFor({ state: "visible", timeout: 30_000 });
   await expect(A.page.getByAltText("Product preview")).toHaveAttribute("src", expected);
-  return `products.image_url == app_config origin + /storage/v1/object/public/${BUCKET}/<session path>: ${ok}`;
+  return `products.image_url == app_config origin + /storage/v1/object/public/${BUCKET}/<session path>: ${ok}; seeded unit-linked barcode after the save: ${barcode}`;
 }
+
+/** Does any input on the product form hold this barcode value? */
+const barcodeFieldShows = (value: string) =>
+  A.page.evaluate((v) => [...document.querySelectorAll("input")].some((i) => i.value === v), value);
 
 /** DB + storage after a successful flow: one object, COMPLETED once, size = completion bytes, public GET serves it. */
 async function assertCompletedOnce(s: Sess): Promise<string> {
@@ -395,9 +407,6 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   try {
-    // Saving QA Product One through the form drops its seeded barcode (see
-    // ensureQaBarcode); leave the shared fixture as this spec found it.
-    record("phone-upload", "QA Product One barcode after the product saves", "INFO", await ensureQaBarcode(st));
     const names = sql1(`SELECT name FROM storage.objects WHERE bucket_id = '${BUCKET}' AND name LIKE 'org/${ids.org}/%';`).split("\n").filter(Boolean);
     const unexpected = names.filter((n) => !QA_OBJECT.test(n));
     if (unexpected.length) throw new Error(`refusing to delete unexpected names: ${unexpected.join(",")}`);
