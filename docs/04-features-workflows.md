@@ -572,8 +572,11 @@ superseded by this two-step flow.)
   `checkBarcodeAddable` (in-form duplicate → cross-product duplicate)
   and either rejects (modal stays open, inline error) or appends to
   the target unit barcode field and toasts `Barcode added`. On save the
-  page calls `replaceProductBarcodes(productId, rows)` to reconcile
-  barcode rows with their `product_unit_id`; the write still throws on the
+  page writes only what changed (`planProductBarcodeSave` →
+  `applyProductBarcodeChanges`, `src/features/catalog/productBarcodeForm.ts`):
+  the row behind an edited or cleared field is replaced or deleted; rows the
+  user did not edit (including extra barcodes the form does not show) are
+  never deleted or rewritten. The write still throws on the
   DB unique index
   `product_barcodes_unique_normalized_value` (migration 023) and shows
   `A barcode with this value is already linked to another product.`
@@ -589,8 +592,11 @@ superseded by this two-step flow.)
   the form), an optional `purchase_price_mmk`
   (nullable, ≥ 0; used for per-unit cost / supplier debt as soon as the
   unit-aware purchase flow ships), default/active flags, and an optional
-  barcode. Default-unit barcodes have `product_unit_id = null`; non-default
-  barcodes store the unit id. The default unit must always have
+  barcode. The form writes new default-unit barcodes with
+  `product_unit_id = null`; a default-unit barcode stored with the default
+  unit's id (seed data, older imports) is equally valid and is shown, scanned
+  and printed as the default unit's barcode. Non-default barcodes store the
+  unit id. The default unit must always have
   `base_quantity = 1` — that's what makes it the "smallest" stock unit
   every other tier converts to. `validateProductUnits` enforces this on
   the form. Migration `027` is what split prices into two columns and

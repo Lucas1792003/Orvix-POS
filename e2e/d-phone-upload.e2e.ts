@@ -268,6 +268,26 @@ async function phonePicks(P: Terminal): Promise<number> {
   return at;
 }
 
+/** The phone reports the upload done; otherwise say what the phone, the
+ *  session row and the desktop (modal status, its create / cancel / status
+ *  requests since the QR) show. Seen 2026-10-15 in D300: the phone was told
+ *  "cancelled on the computer" at +300 s. */
+async function phoneShowsDone(P: Terminal, s: Sess, timeout: number): Promise<void> {
+  try {
+    await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout });
+  } catch (e) {
+    const phone = await P.page.getByRole("status").first().innerText({ timeout: 2_000 }).catch(() => "?");
+    const status = await A.page.locator("div", { hasText: /^Status$/ }).locator("xpath=following-sibling::div[1]").first().innerText({ timeout: 2_000 }).catch(() => "<no modal>");
+    const rel = (pattern: RegExp) => A.requestsMatching(pattern, s.shownAt - 15_000)
+      .map((r) => `${r.method}@${Math.round((r.at - s.shownAt) / 1000)}s:${r.status ?? "no-response"}`);
+    const polls = rel(/get_product_image_upload_session_status/);
+    const shot = await A.screenshot(`d-phone-not-done-desktop-${s.sessionId.slice(-6)}`).catch(() => "?");
+    const diag = `phone "${phone}"; server row ${sessionRow(s.sessionId).split("|")[0]}; desktop status "${status}"; route=${A.currentRoute()}; create: [${rel(/create_product_image_upload_session/).join(",")}]; cancel: [${rel(/cancel_product_image_upload_session/).join(",")}]; status polls: ${polls.length} last [${polls.slice(-3).join(",")}]; desktop screenshot ${path.basename(shot)}; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
+    record("phone-upload", "phone did not finish", "INFO", diag);
+    throw new Error(`${(e as Error).message.split("\n")[0]} — ${diag}`);
+  }
+}
+
 /** Desktop shows the image (modal preview AND, after "Use this image", the form thumbnail). */
 async function desktopShowsImage(s: Sess): Promise<string> {
   const url = publicUrl(s.storagePath);
@@ -442,7 +462,7 @@ for (const delayS of [30, 65, 120, 300]) {
       const openedAfter = Date.now() - s.shownAt;
       await sleep(Math.max(0, s.shownAt + delayS * 1000 - Date.now()));
       const pickedAt = await phonePicks(P);
-      await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 60_000 });
+      await phoneShowsDone(P, s, 60_000);
       const size = await desktopShowsImage(s);
       const db = await assertCompletedOnce(s);
       const img = await saveProductAndCheckImageUrl(s);
@@ -468,7 +488,7 @@ test("D-stale: a token used 66 s after issue is refused by storage; the phone tr
   try {
     await phoneOpens(P, s);
     await phonePicks(P);
-    await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 150_000 });
+    await phoneShowsDone(P, s, 150_000);
     const size = await desktopShowsImage(s);
     const db = await assertCompletedOnce(s);
     const img = await saveProductAndCheckImageUrl(s);
@@ -499,7 +519,7 @@ test("D-double-tap: two picks in a row -> one token, one PUT, one completion, on
     // second tap + a second picker result while the first is in flight
     await P.page.getByRole("button", { name: "Choose from library" }).tap({ force: true }).catch(() => undefined);
     await phonePicks(P);
-    await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 60_000 });
+    await phoneShowsDone(P, s, 60_000);
     await sleep(3_000); // let any (wrong) second attempt surface
     await desktopShowsImage(s);
     const db = await assertCompletedOnce(s);
@@ -559,7 +579,7 @@ test("D-retry: the upload response is lost after storage stored it -> phone retr
   try {
     await phoneOpens(P, s);
     await phonePicks(P);
-    await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 60_000 });
+    await phoneShowsDone(P, s, 60_000);
     await desktopShowsImage(s);
     const db = await assertCompletedOnce(s);
     const img = await saveProductAndCheckImageUrl(s);
@@ -670,7 +690,7 @@ test("D-ratelimit-wait [081]: the phone hits the session burst limit (429) -> sh
     expect(await burnTokens(s, 5)).toEqual([200, 200, 200, 200, 200]);
     await phonePicks(P);
     await expect(P.page.getByText(PHONE_WAITING)).toBeVisible({ timeout: 20_000 });
-    await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 60_000 });
+    await phoneShowsDone(P, s, 60_000);
     await desktopShowsImage(s);
     const db = await assertCompletedOnce(s);
     const img = await saveProductAndCheckImageUrl(s);
