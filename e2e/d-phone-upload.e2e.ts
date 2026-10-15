@@ -271,7 +271,17 @@ async function phonePicks(P: Terminal): Promise<number> {
 /** Desktop shows the image (modal preview AND, after "Use this image", the form thumbnail). */
 async function desktopShowsImage(s: Sess): Promise<string> {
   const url = publicUrl(s.storagePath);
-  await expect(A.page.getByText("Upload received")).toBeVisible({ timeout: 20_000 });
+  try {
+    await expect(A.page.getByText("Upload received")).toBeVisible({ timeout: 20_000 });
+  } catch (e) {
+    // The modal stops polling for good after ONE failed status request
+    // (phase FAILED -> "Upload failed / expired"); say which case this was.
+    const status = await A.page.locator("div", { hasText: /^Status$/ }).locator("xpath=following-sibling::div[1]").first().innerText({ timeout: 2_000 }).catch(() => "?");
+    const statusReqs = A.requestsMatching(/get_product_image_upload_session_status/, s.shownAt).map((r) => r.status ?? "no-response");
+    const diag = `desktop status "${status}"; server row ${sessionRow(s.sessionId)}; status polls since QR: ${statusReqs.length} [${[...new Set(statusReqs)].join(",")}]; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
+    record("phone-upload", "desktop did not show the upload", "INFO", diag);
+    throw new Error(`${(e as Error).message.split("\n")[0]} — ${diag}`);
+  }
   const preview = A.page.getByAltText("Uploaded product preview");
   await expect(preview).toHaveAttribute("src", url);
   await expect.poll(() => preview.evaluate((e: HTMLImageElement) => (e.complete ? e.naturalWidth : 0)), { timeout: 15_000 }).toBeGreaterThan(0);
