@@ -45,7 +45,7 @@ import path from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QRCodeSVG } from "qrcode.react";
-import { runSql, sleep, svc } from "./helpers/db";
+import { ensureQaBarcode, runSql, sleep, svc } from "./helpers/db";
 import { startLocalFunctions, type LocalFunctionName, type LocalFunctions } from "./helpers/edgeRuntime";
 import { DEV_SERVER_URL, liveCfg, qaPassword, qaState, qaTotpSecret, RESULTS_DIR } from "./helpers/env";
 import { record } from "./helpers/evidence";
@@ -113,7 +113,21 @@ const productImageUrl = () => sql1(`SELECT COALESCE(image_url, '<null>') FROM pr
 /** Desktop: open the QR modal; the session comes from the create RPC's response (kept in memory, never logged). */
 async function openQr(): Promise<Sess> {
   const created = A.page.waitForResponse((r) => r.url().endsWith("/rest/v1/rpc/create_product_image_upload_session") && r.request().method() === "POST");
-  await A.page.getByRole("button", { name: "Use phone camera" }).click();
+  created.catch(() => undefined); // awaited below; never an unhandled rejection
+  const button = A.page.getByRole("button", { name: "Use phone camera" });
+  try {
+    await button.click({ timeout: 30_000 });
+  } catch (e) {
+    // Diagnostics for a desktop that stopped responding (seen once 2026-10-14:
+    // click never actionable, then app.close() hung past the teardown timeout).
+    const responsive = await Promise.race([
+      A.page.evaluate(() => document.readyState).then((s) => `yes (${s})`, (err) => `error ${String(err).slice(0, 80)}`),
+      new Promise<string>((r) => setTimeout(() => r("NO (evaluate did not return in 5 s)"), 5_000)),
+    ]);
+    const diag = `route=${A.currentRoute()}; button visible=${await button.isVisible().catch(() => "?")} enabled=${await button.isEnabled({ timeout: 2_000 }).catch(() => "?")}; renderer responsive=${responsive}; console: ${A.consoleErrors.slice(-5).join(" || ")}`;
+    record("phone-upload", "desktop could not open the QR", "INFO", diag);
+    throw new Error(`could not open the QR modal: ${(e as Error).message.split("\n")[0]}; ${diag}`);
+  }
   const res = await created;
   expect(res.status()).toBe(200);
   const j = await res.json();
@@ -257,7 +271,17 @@ async function phonePicks(P: Terminal): Promise<number> {
 /** Desktop shows the image (modal preview AND, after "Use this image", the form thumbnail). */
 async function desktopShowsImage(s: Sess): Promise<string> {
   const url = publicUrl(s.storagePath);
-  await expect(A.page.getByText("Upload received")).toBeVisible({ timeout: 20_000 });
+  try {
+    await expect(A.page.getByText("Upload received")).toBeVisible({ timeout: 20_000 });
+  } catch (e) {
+    // The modal stops polling for good after ONE failed status request
+    // (phase FAILED -> "Upload failed / expired"); say which case this was.
+    const status = await A.page.locator("div", { hasText: /^Status$/ }).locator("xpath=following-sibling::div[1]").first().innerText({ timeout: 2_000 }).catch(() => "?");
+    const statusReqs = A.requestsMatching(/get_product_image_upload_session_status/, s.shownAt).map((r) => r.status ?? "no-response");
+    const diag = `desktop status "${status}"; server row ${sessionRow(s.sessionId)}; status polls since QR: ${statusReqs.length} [${[...new Set(statusReqs)].join(",")}]; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
+    record("phone-upload", "desktop did not show the upload", "INFO", diag);
+    throw new Error(`${(e as Error).message.split("\n")[0]} — ${diag}`);
+  }
   const preview = A.page.getByAltText("Uploaded product preview");
   await expect(preview).toHaveAttribute("src", url);
   await expect.poll(() => preview.evaluate((e: HTMLImageElement) => (e.complete ? e.naturalWidth : 0)), { timeout: 15_000 }).toBeGreaterThan(0);
@@ -371,6 +395,9 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   try {
+    // Saving QA Product One through the form drops its seeded barcode (see
+    // ensureQaBarcode); leave the shared fixture as this spec found it.
+    record("phone-upload", "QA Product One barcode after the product saves", "INFO", await ensureQaBarcode(st));
     const names = sql1(`SELECT name FROM storage.objects WHERE bucket_id = '${BUCKET}' AND name LIKE 'org/${ids.org}/%';`).split("\n").filter(Boolean);
     const unexpected = names.filter((n) => !QA_OBJECT.test(n));
     if (unexpected.length) throw new Error(`refusing to delete unexpected names: ${unexpected.join(",")}`);
