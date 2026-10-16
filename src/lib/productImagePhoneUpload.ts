@@ -479,26 +479,57 @@ export async function getProductImageUploadSessionByToken(
   return data as ProductImageUploadSessionStatusResult;
 }
 
-export async function completeProductImageUploadSession(input: {
-  token: string;
-  storagePath: string;
-  publicUrl: string;
-  bytes: number;
-  mimeType: string;
-}): Promise<ProductImageUploadSessionStatusResult> {
+/** Raw completion call: HTTP status + JSON body (null when unreadable). */
+export type PhoneUploadCompleteCall = (sessionToken: string) => Promise<{ status: number; body: unknown }>;
+
+/** Default transport: phone-upload-token {action:"complete"} with the anon key only. */
+const invokePhoneUploadComplete: PhoneUploadCompleteCall = async (sessionToken) => {
+  const { supabase } = await import("./supabase");
+  const { data, error } = await supabase.functions.invoke(PHONE_UPLOAD_TOKEN_FUNCTION, {
+    body: { token: sessionToken, action: "complete" },
+  });
+  if (!error) return { status: 200, body: data };
+  const context = (error as { context?: unknown }).context;
+  if (context instanceof Response) {
+    return { status: context.status, body: await context.json().catch(() => null) };
+  }
+  throw new Error("Could not reach the server. Check the phone's connection and try again.");
+};
+
+/**
+ * Phone (anonymous): complete the session. From migration 083 (G5) this goes
+ * through the phone-upload-token Edge Function, which reads the stored object
+ * back, checks its bytes (JPEG/WebP magic number, <= 100 KB, no HTML/SVG
+ * markup), deletes a refused object, and only then runs
+ * complete_product_image_upload_session with the service role (anon can no
+ * longer call that RPC). The URL stored for the desktop is derived
+ * server-side (080); `publicUrl` is only checked locally, as before.
+ */
+export async function completeProductImageUploadSession(
+  input: {
+    token: string;
+    storagePath: string;
+    publicUrl: string;
+    bytes: number;
+    mimeType: string;
+  },
+  call: PhoneUploadCompleteCall = invokePhoneUploadComplete,
+): Promise<ProductImageUploadSessionStatusResult> {
   assertCompressedPhoneUpload(input.bytes, input.publicUrl);
 
-  const { supabase } = await import("./supabase");
-  const { data, error } = await supabase.rpc("complete_product_image_upload_session", {
-    p_token: input.token,
-    p_storage_path: input.storagePath,
-    p_public_url: input.publicUrl,
-    p_bytes: input.bytes,
-    p_mime_type: input.mimeType,
-  });
-  if (error) throw new Error(error.message);
-  if (!data) throw new Error("Upload session completion returned no data.");
-  return data as ProductImageUploadSessionStatusResult;
+  const { status, body } = await call(input.token);
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (status === 200 && b.status === "COMPLETED" && b.storagePath === input.storagePath) {
+    return body as ProductImageUploadSessionStatusResult;
+  }
+  if (status === 410 || b.code === "inactive") {
+    const s = STATUSES.includes(b.status as ProductImageUploadSessionStatus)
+      ? (b.status as ProductImageUploadSessionStatus)
+      : "EXPIRED";
+    throw new PhoneUploadInactiveError(s);
+  }
+  const message = typeof b.error === "string" && b.error ? b.error : null;
+  throw new Error(message ?? `Upload could not be completed (HTTP ${status}).`);
 }
 
 export async function cancelProductImageUploadSession(sessionId: string): Promise<void> {

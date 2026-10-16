@@ -79,11 +79,12 @@ function setup(opts: {
       if (opts.session === "error") return reply({ status: 400, body: { message: "Invalid upload link" } });
       return reply({ status: 200, body: opts.session ?? { sessionId: "pimg-1", storagePath: PATH, status: "PENDING", expiresAt: inMinutes(9) } });
     }
-    if (u.pathname === "/functions/v1/phone-upload-token") return reply(queues.fn.shift());
-    if (u.pathname.startsWith("/storage/v1/object/upload/sign/")) return reply(queues.put.shift() ?? { status: 200, body: { Key: `product-images/${PATH}` } });
-    if (u.pathname === "/rest/v1/rpc/complete_product_image_upload_session") {
+    // 083 (G5): completion = the same function with action "complete" (byte check server-side)
+    if (u.pathname === "/functions/v1/phone-upload-token" && (body as { action?: string } | null)?.action === "complete") {
       return reply(queues.complete.shift() ?? { status: 200, body: { sessionId: "pimg-1", storagePath: PATH, status: "COMPLETED", expiresAt: inMinutes(9), publicUrl: `${ORIGIN}/storage/v1/object/public/product-images/${PATH}` } });
     }
+    if (u.pathname === "/functions/v1/phone-upload-token") return reply(queues.fn.shift());
+    if (u.pathname.startsWith("/storage/v1/object/upload/sign/")) return reply(queues.put.shift() ?? { status: 200, body: { Key: `product-images/${PATH}` } });
     throw new Error(`unexpected request ${url}`);
   };
 
@@ -104,9 +105,10 @@ function setup(opts: {
     compress: async () => IMAGE,
     random: () => 0,
   });
-  const fnCalls = () => log.filter((l) => l.url.endsWith("/functions/v1/phone-upload-token"));
+  const isComplete = (l: Logged) => (l.body as { action?: string } | null)?.action === "complete";
+  const fnCalls = () => log.filter((l) => l.url.endsWith("/functions/v1/phone-upload-token") && !isComplete(l));
   const puts = () => log.filter((l) => l.method === "PUT");
-  const completes = () => log.filter((l) => l.url.endsWith("/complete_product_image_upload_session"));
+  const completes = () => log.filter((l) => l.url.endsWith("/functions/v1/phone-upload-token") && isComplete(l));
   const pick = () => api.handleFile(new File(["x"], "p.png", { type: "image/png" }));
   return { api, els, log, sleeps, timers, storage, win, fnCalls, puts, completes, pick };
 }
@@ -219,16 +221,37 @@ describe("phone-upload-page client: upload", () => {
     expect(form.get("cacheControl")).toBe("31536000");
     expect(form.get("")).toBeInstanceOf(Blob);
 
+    // 083 (G5): completion through the validating function, never the RPC
     const [done] = p.completes();
-    expect(done.body).toEqual({
-      p_token: QR,
-      p_storage_path: PATH,
-      p_public_url: `${ORIGIN}/storage/v1/object/public/product-images/${PATH}`,
-      p_bytes: 2048,
-      p_mime_type: "image/webp",
-    });
+    expect(done.method).toBe("POST");
+    expect(done.body).toEqual({ token: QR, action: "complete" });
+    expect(done.headers).toMatchObject({ apikey: ANON, Authorization: `Bearer ${ANON}` });
+    expect(p.log.some((l) => l.url.includes("complete_product_image_upload_session"))).toBe(false);
     // only the anon key, only the session token from the fragment
     for (const l of p.log) expect(JSON.stringify(l.headers)).not.toMatch(/service/i);
+  });
+
+  it("083: the server refuses the stored file (422 invalid_image): its message is shown, nothing completed", async () => {
+    const p = setup({
+      fn: [tokenOk()],
+      complete: [{ status: 422, body: { error: "The uploaded file is not a valid JPEG or WebP photo under 100 KB. Please choose another photo.", code: "invalid_image" } }],
+    });
+    await p.api.ready;
+    await p.pick();
+    expect(p.completes()).toHaveLength(1);
+    expect(p.els.error.textContent).toBe("The uploaded file is not a valid JPEG or WebP photo under 100 KB. Please choose another photo.");
+    expect(p.els.done.hidden).toBe(true);
+  });
+
+  it("083: completion answers 410 COMPLETED (a concurrent attempt won): re-read -> success for the same path", async () => {
+    const p = setup({
+      fn: [tokenOk()],
+      complete: [{ status: 410, body: { error: "x", code: "inactive", status: "COMPLETED" } }],
+      reread: { sessionId: "pimg-1", storagePath: PATH, status: "COMPLETED", expiresAt: inMinutes(5) },
+    });
+    await p.api.ready;
+    await p.pick();
+    expect(p.els.status.textContent).toMatch(/Photo uploaded/);
   });
 
   it("double tap: a second pick while the first is in flight does nothing", async () => {

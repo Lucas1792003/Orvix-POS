@@ -33,7 +33,9 @@
 //             pre-deployment mode; needs Docker).
 // Everything else (session RPCs, storage upload, completion, the desktop's
 // status poll) is the real stack. The D-ratelimit-* cases (migration 081)
-// run only when the stack's schema is >= 081 and are skipped otherwise. Real timing. Since 080 every successful
+// run only when the stack's schema is >= 081 and are skipped otherwise; the
+// D-g5-* cases (migration 083: bucket limits, completion through the
+// validating function) only when it is >= 083. Real timing. Since 080 every successful
 // case also saves the product and checks that products.image_url is the
 // SERVER-DERIVED URL (public.app_config origin + /storage/v1/object/public/
 // product-images/<session path>). QA data only; every QA storage object is
@@ -197,7 +199,7 @@ async function launchPhone(opts: { holdFirstPutMs?: number; dropFirstUploadRespo
   const P = await Terminal.launchPhone();
   const fnCalls: FnCall[] = [];
   const puts: Put[] = [];
-  const completes: { at: number; status: number }[] = [];
+  const completes: { at: number; status: number; text?: string }[] = [];
   let dropped = false;
   let held = false;
   if (PAGE_MODE === "local") {
@@ -211,12 +213,18 @@ async function launchPhone(opts: { holdFirstPutMs?: number; dropFirstUploadRespo
       await route.fulfill({ response: r });
     });
   }
+  // 083 (G5): the page completes through the same function ({action:"complete"});
+  // those calls go to the `completes` ledger, token requests to `fnCalls`.
+  const isCompletion = (postData: string | null) => {
+    try { return (JSON.parse(postData ?? "null") as { action?: string } | null)?.action === "complete"; } catch { return false; }
+  };
   if (FN_MODE === "local") {
     await P.context.route(`${cfg.url}${FN_PATH}`, async (route: Route) => {
       const r = await route.fetch({ url: local!.urlFor("phone-upload-token") });
       if (route.request().method() === "OPTIONS") return route.fulfill({ response: r });
       const text = await r.text();
-      fnCalls.push(fnCall(r.status(), text));
+      if (isCompletion(route.request().postData())) completes.push({ at: Date.now(), status: r.status(), text });
+      else fnCalls.push(fnCall(r.status(), text));
       await route.fulfill({ response: r, body: text });
     });
   } else {
@@ -225,7 +233,9 @@ async function launchPhone(opts: { holdFirstPutMs?: number; dropFirstUploadRespo
     P.context.on("response", (res) => {
       if (res.url() !== `${cfg.url}${FN_PATH}` || res.request().method() !== "POST") return;
       const status = res.status();
-      void res.text().then((text) => fnCalls.push(fnCall(status, text)), () => fnCalls.push(fnCall(status, "")));
+      const completion = isCompletion(res.request().postData());
+      const push = (text: string) => (completion ? completes.push({ at: Date.now(), status, text }) : fnCalls.push(fnCall(status, text)));
+      void res.text().then(push, () => push(""));
     });
   }
   await P.context.route(`${cfg.url}/storage/v1/object/upload/sign/**`, async (route: Route) => {
@@ -243,6 +253,7 @@ async function launchPhone(opts: { holdFirstPutMs?: number; dropFirstUploadRespo
     puts.push({ at: Date.now(), status: r.status(), body });
     return route.fulfill({ response: r, body });
   });
+  // a page from before the 083 function deploy still calls the RPC directly
   await P.context.route(`${cfg.url}/rest/v1/rpc/complete_product_image_upload_session`, async (route: Route) => {
     const r = await route.fetch();
     completes.push({ at: Date.now(), status: r.status() });
@@ -744,5 +755,100 @@ test("D-ratelimit-used-up [081]: the session reached its lifetime cap -> 429 unt
     record("phone-upload", "D-ratelimit-used-up [081]", "PASS", `[${MODES}] counter at 20 -> function 429 retry_after=${JSON.parse(fnCalls[0].text).retry_after_seconds} s (until expiry), no automatic retry; phone: "${PHONE_LINK_USED_UP}"; PUTs=0, completes=0, objects=0; desktop closed (cancelled)`);
   } finally {
     await P.close();
+  }
+});
+
+// --------------------------------------------------------------------------
+// 083 / G5 (docs/selfhost-migration/phase-f/migration-083-g5.md). Run ONLY
+// when the stack's schema is >= 083 (bucket limits applied, completion RPC
+// service_role-only) - which also implies the validating phone-upload-token
+// and the new page are deployed (deploy order: functions first). QA session
+// objects only; a refused object is deleted by the function itself.
+const G5_REFUSED = "The uploaded file is not a valid JPEG or WebP photo under 100 KB. Please choose another photo.";
+
+/** The phone page's own upload code with an arbitrary blob (as the D-race case). */
+const pageUpload = (P: Terminal, b64: string, type: string) =>
+  P.page.evaluate(async ([data, t]) => {
+    const page = (window as any).shwePhaLaPhoneUpload;
+    const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    try {
+      const r = await page.uploadImage({ blob: new Blob([bytes], { type: t }), bytes: bytes.length, mimeType: t });
+      return `ok:${r.status}`;
+    } catch (e) {
+      return `rejected:${String((e as Error)?.message)}`;
+    }
+  }, [b64, type] as const);
+
+test("D-g5-bucket [083]: product-images allows only JPEG/PNG/WebP up to 5 MiB; anon cannot call the completion RPC", async () => {
+  test.skip(schemaVersion < "083", `schema ${schemaVersion} < 083: G5 limits not deployed`);
+  const bucket = sql1(`SELECT public || '|' || file_size_limit || '|' || allowed_mime_types::text FROM storage.buckets WHERE id = '${BUCKET}';`);
+  expect(bucket).toBe("true|5242880|{image/jpeg,image/png,image/webp}");
+  const s = await openQr();
+  try {
+    const r = await fetch(`${cfg.url}/rest/v1/rpc/complete_product_image_upload_session`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cfg.anonKey}`, apikey: cfg.anonKey, "content-type": "application/json" },
+      body: JSON.stringify({ p_token: s.token, p_storage_path: s.storagePath, p_public_url: publicUrl(s.storagePath), p_bytes: 100, p_mime_type: "image/jpeg" }),
+    });
+    const text = await r.text();
+    expect(r.status).toBeGreaterThanOrEqual(400);
+    expect(text).toMatch(/permission denied/i);
+    expect(sessionRow(s.sessionId).split("|")[0]).toBe("PENDING");
+    record("phone-upload", "D-g5-bucket [083]", "PASS", `bucket public|limit|types = ${bucket}; anon POST rpc/complete_product_image_upload_session -> ${r.status} permission denied; QA session still PENDING`);
+  } finally {
+    await A.page.getByRole("button", { name: "Close", exact: true }).click();
+  }
+});
+
+test("D-g5-html-as-jpeg [083]: HTML bytes declared image/jpeg are stored by the bucket, refused at completion (422) and DELETED; the phone then uploads a real photo", async () => {
+  test.skip(schemaVersion < "083", `schema ${schemaVersion} < 083: G5 limits not deployed`);
+  test.setTimeout(180_000);
+  const s = await openQr();
+  const { P, fnCalls, puts, completes } = await launchPhone();
+  try {
+    await phoneOpens(P, s);
+    const html = Buffer.from("<!doctype html><html><body><script>document.title='qa-g5'</script></body></html>").toString("base64");
+    const polyglot = Buffer.concat([Buffer.from("ffd8ffe0", "hex"), Buffer.from("<html><script>document.title='qa-g5'</script></html>"), Buffer.from("ffd9", "hex")]).toString("base64");
+    for (const [label, b64] of [["html", html], ["polyglot", polyglot]] as const) {
+      const out = await pageUpload(P, b64, "image/jpeg");
+      expect(out, label).toBe(`rejected:${G5_REFUSED}`);
+      expect(objectsUnder(s), `${label}: the function deleted the refused object`).toBe(0);
+      expect(sessionRow(s.sessionId).split("|")[0], label).toBe("PENDING");
+    }
+    expect(puts.map((p) => p.status)).toEqual([200, 200]);
+    expect(completes.map((c) => c.status)).toEqual([422, 422]);
+    expect(completes.every((c) => (c.text ?? "").includes('"invalid_image"'))).toBe(true);
+    // the same QR still works with a real photo through the UI
+    await phonePicks(P);
+    await phoneShowsDone(P, s, 60_000);
+    await desktopShowsImage(s);
+    const db = await assertCompletedOnce(s);
+    const img = await saveProductAndCheckImageUrl(s);
+    expect(completes.map((c) => c.status)).toEqual([422, 422, 200]);
+    record("phone-upload", "D-g5-html-as-jpeg [083]", "PASS", `[${MODES}] HTML and JPEG-header+HTML declared image/jpeg: PUT 200 (bucket checks the declared type) -> complete 422 invalid_image, object deleted, session PENDING; then a real photo: tokens=${fnCalls.length}, complete 200; ${db}; ${img}`);
+  } finally {
+    await P.close();
+  }
+});
+
+test("D-g5-declared-types [083]: text/html, image/svg+xml and application/octet-stream uploads are refused by storage; nothing stored, nothing completed", async () => {
+  test.skip(schemaVersion < "083", `schema ${schemaVersion} < 083: G5 limits not deployed`);
+  test.setTimeout(120_000);
+  const s = await openQr();
+  const { P, puts, completes } = await launchPhone();
+  try {
+    await phoneOpens(P, s);
+    const body = Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'><script>1</script></svg>").toString("base64");
+    const outs: string[] = [];
+    for (const type of ["text/html", "image/svg+xml", "application/octet-stream"]) outs.push(await pageUpload(P, body, type));
+    for (const o of outs) expect(o).toMatch(/^rejected:Image upload failed/);
+    expect(puts.every((p) => p.status >= 400)).toBe(true);
+    expect(completes).toHaveLength(0);
+    expect(objectsUnder(s)).toBe(0);
+    expect(sessionRow(s.sessionId).split("|")[0]).toBe("PENDING");
+    record("phone-upload", "D-g5-declared-types [083]", "PASS", `[${MODES}] PUTs=${puts.map((p) => `${p.status} "${p.body.replace(/\s+/g, " ").slice(0, 60)}"`).join(", ")}; completes=0; objects=0; session PENDING`);
+  } finally {
+    await P.close();
+    await A.page.getByRole("button", { name: "Close", exact: true }).click().catch(() => undefined);
   }
 });

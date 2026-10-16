@@ -17,6 +17,8 @@
 \set MX  'a0000000-0000-4000-8000-000000000012'
 \set PUB 'https://pos.test/storage/v1/object/public/product-images/'
 SELECT test.logout() AS zz \gset
+-- 083: completion is service_role-only (phone -> phone-upload-token function)
+SELECT test.completer() AS completer \gset
 
 -- INSERT probe with rollback, as the CURRENT role (what canUpload does)
 CREATE OR REPLACE FUNCTION test.can_insert_object(p_name text, p_owner uuid) RETURNS boolean
@@ -232,7 +234,7 @@ RESET ROLE;
 -- the phone's uploadToSignedUrl: storage superuser, owner = the desktop user from the token
 INSERT INTO storage.objects (bucket_id, name, owner, owner_id)
 VALUES ('product-images', :'bt1'::jsonb->>'storagePath', :'AA', :'AA');
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.expect_error('t14/079: completion with a URL of another host / object is rejected',
   format($q$SELECT public.complete_product_image_upload_session(%L, %L, %L, 4000, 'image/webp')$q$,
          :'ok1'::jsonb->>'token', :'bt1'::jsonb->>'storagePath',
@@ -292,7 +294,7 @@ SELECT test.check('t14/079: by-token hands out no upload token for an expired or
 -- write the object (stateless JWT) - but the session never completes
 INSERT INTO storage.objects (bucket_id, name, owner, owner_id)
 VALUES ('product-images', :'exp1'::jsonb->>'storagePath', :'AA', :'AA');
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.expect_error('t14/079: completion after expiry is refused even though the object was written',
   format($q$SELECT public.complete_product_image_upload_session(%L, %L, %L, 4000, 'image/webp')$q$,
          :'exp1'::jsonb->>'token', :'exp1'::jsonb->>'storagePath', :'PUB' || (:'exp1'::jsonb->>'storagePath')),

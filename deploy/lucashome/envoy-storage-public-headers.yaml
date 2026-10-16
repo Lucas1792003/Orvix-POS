@@ -1,0 +1,92 @@
+# OPTIONAL serving-side hardening for public product images (G5, migration
+# 083). PREPARED, NOT APPLIED. Separate from 083 and from the function deploy;
+# design, test evidence and the apply / rollback procedure:
+#   docs/selfhost-migration/phase-f/migration-083-g5.md §5 and §7 step 6
+# Local proof (Envoy v1.39.1, this exact snippet):
+#   deploy/lucashome/tests/envoy-storage-headers-test.sh
+#
+# What it does, ONLY for GET/HEAD /storage/v1/object/public/... (the route the
+# app and 080's trusted URL use); every other storage route is unchanged:
+#   * X-Content-Type-Options: nosniff - the browser never sniffs a body into
+#     another type (an HTML body declared image/jpeg stays an image);
+#   * Content-Security-Policy: default-src 'none'; sandbox - if a public object
+#     is ever opened as a document, it runs no script, loads nothing, and gets
+#     an opaque origin (no access to the API origin's storage / cookies);
+#   * Content-Disposition: inline for a 2xx image/jpeg|png|webp response;
+#     for any OTHER 2xx type: attachment + Content-Type application/octet-stream
+#     (a non-image can only be downloaded, never rendered on this origin).
+# <img> rendering is unaffected by all three (CSP / sandbox apply to documents,
+# nosniff only blocks type confusion, inline is the default).
+#
+# Two edits to volumes/api/envoy/lds.template.yaml (listener "supabase"):
+#
+# --- EDIT 1: in http_filters, add this entry immediately BEFORE
+#     "- name: envoy.filters.http.router". It has no default code, so it does
+#     nothing on any route without the per-route config of EDIT 2. Its name is
+#     unique on purpose: the upstream Lua filters are all called
+#     envoy.filters.http.lua, and per-route config is looked up by name.
+- name: phf.storage_public_headers
+  typed_config:
+    '@type': type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+
+# --- EDIT 2: in the route list, add this route immediately BEFORE the
+#     existing "- match: prefix: /storage/v1/" route (first match wins). Same
+#     cluster, timeout, X-Forwarded-Prefix, basic_auth disabled and RBAC
+#     allow-all as that route (public URLs carry no apikey), restricted to
+#     the public object prefix, plus the headers.
+- name: storage-v1-object-public
+  match:
+    prefix: /storage/v1/object/public/
+  route:
+    cluster: storage
+    prefix_rewrite: /object/public/
+    timeout: 30s
+  request_headers_to_add:
+    - header:
+        key: X-Forwarded-Prefix
+        value: /storage/v1
+      append_action: ADD_IF_ABSENT
+  response_headers_to_add:
+    - header:
+        key: X-Content-Type-Options
+        value: nosniff
+      append_action: OVERWRITE_IF_EXISTS_OR_ADD
+    - header:
+        key: Content-Security-Policy
+        value: "default-src 'none'; sandbox"
+      append_action: OVERWRITE_IF_EXISTS_OR_ADD
+  typed_per_filter_config:
+    envoy.filters.http.basic_auth:
+      '@type': >-
+        type.googleapis.com/envoy.config.route.v3.FilterConfig
+      disabled: true
+    envoy.filters.http.rbac:
+      '@type': >-
+        type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+      rbac:
+        rules:
+          action: ALLOW
+          policies:
+            allow_all:
+              permissions:
+                - any: true
+              principals:
+                - any: true
+    phf.storage_public_headers:
+      '@type': type.googleapis.com/envoy.extensions.filters.http.lua.v3.LuaPerRoute
+      source_code:
+        inline_string: |
+          -- G5: inline only for the three image types; anything else is a download
+          function envoy_on_response(response_handle)
+            local h = response_handle:headers()
+            local status = tonumber(h:get(":status") or "0") or 0
+            if status < 200 or status >= 300 then return end
+            local ct = string.lower(h:get("content-type") or "")
+            ct = string.match(ct, "^%s*([^;%s]+)") or ""
+            if ct == "image/jpeg" or ct == "image/png" or ct == "image/webp" then
+              h:replace("content-disposition", "inline")
+            else
+              h:replace("content-disposition", "attachment")
+              h:replace("content-type", "application/octet-stream")
+            end
+          end

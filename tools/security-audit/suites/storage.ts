@@ -2,7 +2,7 @@
 // move or sign org B's objects (org/<B>/..., legacy temp/ and products/ paths,
 // brand logo). Public-bucket reads are documented as public by design.
 import type { World, Org } from "./seed";
-import { capture, check, http, record, sql, q, SERVICE } from "./lib";
+import { capture, check, gap, http, record, sql, q, MAX_MIG, SERVICE } from "./lib";
 
 const jpeg = () => Buffer.concat([Buffer.from("ffd8ffe000104a464946", "hex"), Buffer.from(Array(48).fill(1)), Buffer.from("ffd9", "hex")]);
 
@@ -91,4 +91,108 @@ export async function storageSuite(w: World) {
   // no OTHER bucket exists that is private and leaks
   const buckets = sql(`SELECT string_agg(id || ':' || public::text, ',') FROM storage.buckets`);
   record("storage", `buckets present: ${buckets}`, "INFO", []);
+
+  await uploadLimits(w);
+}
+
+// ---------------------------------------------------------------- G5 / 083
+// Staff (desktop) uploads go straight to storage-api with the user's JWT.
+// 083 sets allowed_mime_types {jpeg,png,webp} + file_size_limit 5 MiB on the
+// bucket; storage-api enforces both against the DECLARED type and the byte
+// count. Before 083 (081/082 = production) these are GAPs (finding G5).
+export const fixtures = {
+  jpeg: (n = 2000) => Buffer.concat([Buffer.from("ffd8ffe000104a46494600", "hex"), Buffer.alloc(n, 0x11), Buffer.from("ffd9", "hex")]),
+  png: () => Buffer.concat([Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"), Buffer.alloc(64, 0x22)]),
+  webp: (n = 1500) => {
+    const head = Buffer.alloc(20);
+    head.write("RIFF", 0); head.writeUInt32LE(n + 12, 4); head.write("WEBP", 8); head.write("VP8 ", 12); head.writeUInt32LE(n, 16);
+    return Buffer.concat([head, Buffer.alloc(n, 0x33)]);
+  },
+  html: () => Buffer.from("<!doctype html><html><body><script>document.title='g5'</script></body></html>"),
+  svg: () => Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" onload="document.title=1"><script>1</script></svg>'),
+  polyglot: () => Buffer.concat([Buffer.from("ffd8ffe0", "hex"), Buffer.from("<html><body><script>document.title='g5'</script></body></html>"), Buffer.from("ffd9", "hex")]),
+};
+const enc = (p: string) => p.split("/").map(encodeURIComponent).join("/");
+/** Remove a test object through storage-api (storage.objects refuses direct DELETE). */
+export async function removeObject(name: string) {
+  const r = await http("DELETE", `/storage/v1/object/product-images/${enc(name)}`, { token: SERVICE, apikey: SERVICE });
+  if (r.status >= 300 && r.status !== 400 && r.status !== 404) throw new Error(`cleanup of a test object failed: ${r.status}`);
+}
+const rowCount = (name: string) => sql(`SELECT count(*) FROM storage.objects WHERE bucket_id='product-images' AND name=${q(name)}`);
+
+async function uploadLimits(w: World) {
+  const admin = w.adminA2, A = w.A;
+  const G5 = MAX_MIG >= 83;
+  const bucket = sql(`SELECT coalesce(file_size_limit::text,'NULL') || '|' || coalesce(allowed_mime_types::text,'NULL') || '|' || public::text FROM storage.buckets WHERE id='product-images'`);
+  gap("storage", "G5: product-images has allowed_mime_types {image/jpeg,image/png,image/webp} and file_size_limit 5242880, still public",
+    bucket === "5242880|{image/jpeg,image/png,image/webp}|true", ["storage-policy:product_images_insert"], "medium", `bucket ${bucket}`);
+
+  const base = `org/${A.id}/products/${A.products[0]}/g5-${A.can}`;
+  const put = (name: string, body: Buffer, type: string, multipart = false) => {
+    if (!multipart) return http("POST", `/storage/v1/object/product-images/${enc(name)}`, { token: admin, raw: body, headers: { "Content-Type": type, "x-upsert": "true" } });
+    const form = new FormData();
+    form.append("cacheControl", "3600");
+    form.append("", new Blob([body], { type }), name.split("/").pop());
+    return http("POST", `/storage/v1/object/product-images/${enc(name)}`, { token: admin, raw: form, headers: { "x-upsert": "true" } });
+  };
+
+  // allowed: JPEG / PNG / WebP within the limit, raw and multipart (supabase-js sends either)
+  for (const [label, body, type, multipart] of [
+    ["JPEG raw", fixtures.jpeg(), "image/jpeg", false], ["PNG raw", fixtures.png(), "image/png", false],
+    ["WebP raw", fixtures.webp(), "image/webp", false], ["WebP multipart", fixtures.webp(), "image/webp", true],
+  ] as const) {
+    const name = `${base}-ok-${label.replace(/\W+/g, "-")}`;
+    const r = await put(name, body, type, multipart);
+    capture(`storage g5 ${label}`, r.text);
+    check("storage", `G5 desktop: staff upload of a ${label} image within the limit is accepted`, r.status < 300 && rowCount(name) === "1",
+      ["storage-policy:product_images_insert"], `status ${r.status} ${r.text.slice(0, 120)}`);
+    await removeObject(name);
+  }
+
+  // refused: active / unknown types, oversize - nothing stored
+  const big = Buffer.concat([fixtures.jpeg(0), Buffer.alloc(5242881, 0x44)]);
+  for (const [label, body, type, multipart] of [
+    ["text/html", fixtures.html(), "text/html", false],
+    ["text/html (multipart part type)", fixtures.html(), "text/html", true],
+    ["image/svg+xml", fixtures.svg(), "image/svg+xml", false],
+    ["application/octet-stream", fixtures.jpeg(), "application/octet-stream", false],
+    ["text/html with charset", fixtures.html(), "text/html; charset=utf-8", false],
+    ["over 5 MiB (declared image/jpeg)", big, "image/jpeg", false],
+  ] as const) {
+    const name = `${base}-bad-${label.replace(/\W+/g, "-")}`;
+    const r = await put(name, body, type, multipart);
+    capture(`storage g5 ${label}`, r.text);
+    const stored = rowCount(name) !== "0";
+    if (stored) await removeObject(name);
+    gap("storage", `G5 desktop: staff upload declared ${label} is refused by storage-api, nothing stored`, r.status >= 400 && !stored,
+      ["storage-policy:product_images_insert"], "medium", `status ${r.status}, stored ${stored}`);
+  }
+
+  // NOT refusable by the bucket: HTML bytes DECLARED image/jpeg (a ".jpg" with HTML,
+  // or a JPEG-header polyglot). storage-api checks only the declared type. The
+  // desktop path has no server-side byte check (doc §3.3: follow-up). What
+  // matters for the browser is what is SERVED: Content-Type image/jpeg (+ the
+  // optional gateway nosniff/CSP rule) - recorded below.
+  for (const [label, body] of [[".jpg name with HTML content", fixtures.html()], ["JPEG-header + HTML polyglot", fixtures.polyglot()]] as const) {
+    const name = `${base}-poly-${label.replace(/\W+/g, "-")}.jpg`;
+    const r = await put(name, body, "image/jpeg");
+    const stored = rowCount(name) === "1";
+    const pub = await http("GET", `/storage/v1/object/public/product-images/${enc(name)}`, { token: null });
+    const ct = pub.headers.get("content-type") ?? "";
+    gap("storage", `G5 desktop: ${label} declared image/jpeg is not stored (needs a server-side byte check on the desktop path)`, !stored,
+      ["storage-policy:product_images_insert"], "low",
+      `stored ${stored} (status ${r.status}); served as Content-Type ${ct}, X-Content-Type-Options ${pub.headers.get("x-content-type-options") ?? "-"}, CSP ${pub.headers.get("content-security-policy") ?? "-"}`);
+    check("storage", `G5 serving: ${label} is served with its declared image type, never as HTML`, !stored || /^image\/jpeg/i.test(ct),
+      ["storage-policy:product_images_read"], `content-type ${ct}`);
+    if (stored) await removeObject(name);
+  }
+
+  // serving headers of an existing (seeded) object: what the browser gets today
+  const pub = await http("GET", `/storage/v1/object/public/product-images/${enc(A.objects.orgProduct)}`, { token: null });
+  const h = (k: string) => pub.headers.get(k) ?? "-";
+  record("storage", `G5 serving headers (storage-api direct, no gateway rule): status ${pub.status}; content-type ${h("content-type")}; x-content-type-options ${h("x-content-type-options")}; content-disposition ${h("content-disposition")}; content-security-policy ${h("content-security-policy")}; cache-control ${h("cache-control")}`,
+    "INFO", ["storage-policy:product_images_read"]);
+  check("storage", "G5: an existing image reference still resolves after the limits (public URL 200, image type)", pub.status === 200 && /^image\//.test(h("content-type")),
+    ["storage-policy:product_images_read"], `status ${pub.status} ${h("content-type")}`);
+  if (!G5) record("storage", "G5 assertions above are GAPs below migration 083 (production 081/082 has NULL limits)", "INFO", []);
 }

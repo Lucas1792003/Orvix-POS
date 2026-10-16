@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { checkUploadedImage, MAX_COMPLETION_BYTES, normaliseContentType } from "./imageCheck.ts";
 
 // phone-upload-token: just-in-time signed upload token for the QR phone
 // upload (docs/selfhost-migration/phase-g/phone-upload-jit.md).
@@ -33,6 +34,19 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 // (it would carry the INTERNAL storage host on lucashome), never a key.
 // Refusals are generic: 404 invalid link, 410 inactive (+ the session status
 // the phone is already allowed to read through _by_token), 403 refused.
+//
+// Completion (G5, migration 083, docs/selfhost-migration/phase-f/migration-083-g5.md):
+// body { token, action: "complete" }. Same session / organization / path
+// checks as above (no rate-limit claim: completing does not issue a token).
+// The object is read back with the service role and its BYTES are checked
+// (imageCheck.ts: declared type jpeg/webp, <= 100 KB, magic number, container
+// sanity, no HTML/SVG markup). A failing object is DELETED and the session
+// stays PENDING (422 invalid_image; the phone may upload another photo). A
+// passing object is completed through complete_product_image_upload_session
+// called with the service role: from 083 on, anon/authenticated can no
+// longer call that RPC, so every completion passes this check.
+// Response (200): the RPC's own answer (sessionId, storagePath, publicUrl,
+// bytes, mimeType, expiresAt, status) - what the phone received before.
 //
 // Rate limits (migration 081, docs/selfhost-migration/phase-f/rate-limiting.md):
 // before storage is touched, the issue is claimed atomically in the database
@@ -127,9 +141,15 @@ Deno.serve(async (request) => {
   }
 
   let token: unknown;
+  let action: unknown;
   try {
-    token = ((await request.json()) as { token?: unknown })?.token;
+    const parsed = (await request.json()) as { token?: unknown; action?: unknown } | null;
+    token = parsed?.token;
+    action = parsed?.action;
   } catch {
+    return jsonResponse({ error: "Invalid request body.", code: "bad_request" }, 400);
+  }
+  if (action !== undefined && action !== "complete") {
     return jsonResponse({ error: "Invalid request body.", code: "bad_request" }, 400);
   }
   if (typeof token !== "string" || token.length < MIN_TOKEN_LENGTH || token.length > MAX_TOKEN_LENGTH) {
@@ -195,6 +215,10 @@ Deno.serve(async (request) => {
     if (!owned || owned.org_id !== orgId) return refused();
   }
 
+  if (action === "complete") {
+    return await completeUpload(supabase, supabaseUrl, serviceRoleKey, token, expectedPath);
+  }
+
   // ---- rate limit: claim this issue atomically in the database (081) ----
   // Fail closed: any failure to get a clear "allowed" means no token.
   const { data: claim, error: claimError } = await supabase.rpc("claim_phone_upload_token_issue", { p_token: token });
@@ -252,3 +276,100 @@ Deno.serve(async (request) => {
 
   return jsonResponse({ token: uploadToken, path: expectedPath, expiresAt: tokenExpiresAt(uploadToken) });
 });
+
+const invalidImage = () =>
+  jsonResponse(
+    { error: "The uploaded file is not a valid JPEG or WebP photo under 100 KB. Please choose another photo.", code: "invalid_image" },
+    422,
+  );
+
+/** Read at most `limit` + 1 bytes of a response body (the caller rejects anything longer). */
+const readCapped = async (res: Response, limit: number): Promise<Uint8Array> => {
+  const reader = res.body?.getReader();
+  if (!reader) return new Uint8Array(0);
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    total += value.length;
+    if (total > limit) {
+      await reader.cancel();
+      break;
+    }
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+};
+
+/**
+ * G5 / 083: validate the stored object's bytes, then complete the session
+ * with the service role. `path` is the server-derived session path.
+ */
+async function completeUpload(
+  supabase: ReturnType<typeof createClient>,
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  token: string,
+  path: string,
+): Promise<Response> {
+  const storageHeaders = { apikey: serviceRoleKey, Authorization: `Bearer ${serviceRoleKey}` };
+  const objectUrl = `${supabaseUrl}/storage/v1/object/${BUCKET}/${encodePath(path)}`;
+
+  const got = await fetch(objectUrl, { method: "GET", headers: storageHeaders });
+  if (got.status === 400 || got.status === 404) {
+    await got.body?.cancel();
+    return jsonResponse({ error: "The photo has not been uploaded yet.", code: "not_uploaded" }, 409);
+  }
+  if (!got.ok) {
+    console.error("[phone-upload-token] object read failed", got.status);
+    await got.body?.cancel();
+    return unavailable();
+  }
+  const declared = normaliseContentType(got.headers.get("content-type"));
+  const bytes = await readCapped(got, MAX_COMPLETION_BYTES);
+  const verdict = checkUploadedImage(bytes, declared);
+  if (!verdict.ok) {
+    // Never leave a refused object on the public origin. The phone's signed
+    // URL has upsert false, so the freed path takes another attempt.
+    const del = await fetch(objectUrl, { method: "DELETE", headers: storageHeaders });
+    await del.body?.cancel();
+    console.log("[phone-upload-token] refused uploaded object", verdict.reason, del.status);
+    if (!del.ok && del.status !== 400 && del.status !== 404) {
+      console.error("[phone-upload-token] could not delete the refused object", del.status);
+    }
+    return invalidImage();
+  }
+
+  const publicBase = (Deno.env.get("SUPABASE_PUBLIC_URL") ?? supabaseUrl).replace(/\/$/, "");
+  const { data, error } = await supabase.rpc("complete_product_image_upload_session", {
+    p_token: token,
+    p_storage_path: path,
+    // 080: only the PATH of this URL is checked; the stored URL is derived server-side
+    p_public_url: `${publicBase}/storage/v1/object/public/${BUCKET}/${path}`,
+    p_bytes: bytes.length,
+    p_mime_type: verdict.type,
+  });
+  if (error) {
+    const message = typeof error.message === "string" ? error.message : "";
+    if (/no longer active/i.test(message)) {
+      const { data: current } = await supabase.rpc("get_product_image_upload_session_by_token", { p_token: token });
+      const status = (current as { status?: string } | null)?.status;
+      return inactive(status && status !== "PENDING" ? status : "EXPIRED");
+    }
+    if (error.code === "P0001" && message) {
+      // the 080 RPC's own generic refusals (not found / type / size / not configured)
+      return jsonResponse({ error: message, code: "completion_refused" }, 422);
+    }
+    console.error("[phone-upload-token] completion failed", error.code ?? "", message);
+    return unavailable();
+  }
+  if (!data || typeof data !== "object") return unavailable();
+  return jsonResponse(data as Record<string, unknown>);
+}

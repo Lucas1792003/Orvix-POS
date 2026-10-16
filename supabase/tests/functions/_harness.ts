@@ -322,10 +322,19 @@ export class MockPostgrest {
  *  whose payload records the path, so tests can check what was signed. */
 export class MockStorage {
   objects = new Set<string>(); // "<bucket>/<path>"
+  /** Stored bytes + storage-api content type (G5/083: GET + DELETE by the completion step). */
+  contents = new Map<string, { bytes: Uint8Array; type: string }>();
+  deleted: string[] = [];
   calls: LoggedCall[] = [];
   signed: { bucket: string; path: string; upsert: boolean; token: string }[] = [];
   lifetimeSeconds = 60;
   failSign: number | null = null;
+  failGet: number | null = null;
+  failDelete: number | null = null;
+  put(key: string, bytes: Uint8Array, type: string) {
+    this.objects.add(key);
+    this.contents.set(key, { bytes, type });
+  }
   handle(call: LoggedCall): Response {
     this.calls.push(call);
     assert(call.headers["apikey"] === SERVICE_ROLE_KEY, "storage call without the service-role apikey header");
@@ -335,6 +344,34 @@ export class MockStorage {
       const exists = this.objects.has(rest);
       call.status = exists ? 200 : 400;
       return new Response(null, { status: call.status });
+    }
+    if (call.method === "GET") {
+      if (this.failGet) {
+        call.status = this.failGet;
+        return json({ statusCode: String(this.failGet), error: "Error", message: "simulated storage failure" }, this.failGet);
+      }
+      const c = this.contents.get(rest);
+      if (!this.objects.has(rest) || !c) {
+        call.status = 400;
+        return json({ statusCode: "404", error: "not_found", message: "Object not found" }, 400);
+      }
+      call.status = 200;
+      return new Response(c.bytes.slice(), { status: 200, headers: { "Content-Type": c.type, "Content-Length": String(c.bytes.length) } });
+    }
+    if (call.method === "DELETE") {
+      if (this.failDelete) {
+        call.status = this.failDelete;
+        return json({ statusCode: String(this.failDelete), error: "Error", message: "simulated storage failure" }, this.failDelete);
+      }
+      if (!this.objects.has(rest)) {
+        call.status = 400;
+        return json({ statusCode: "404", error: "not_found", message: "Object not found" }, 400);
+      }
+      this.objects.delete(rest);
+      this.contents.delete(rest);
+      this.deleted.push(rest);
+      call.status = 200;
+      return json({ message: "Successfully deleted" }, 200);
     }
     if (call.method === "POST" && rest.startsWith("upload/sign/")) {
       const full = rest.slice("upload/sign/".length);
