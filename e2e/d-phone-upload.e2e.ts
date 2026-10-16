@@ -282,8 +282,9 @@ async function phonePicks(P: Terminal): Promise<number> {
 
 /** The phone reports the upload done; otherwise say what the phone, the
  *  session row and the desktop (modal status, its create / cancel / status
- *  requests since the QR) show. Seen 2026-10-15 in D300: the phone was told
- *  "cancelled on the computer" at +300 s. */
+ *  requests since the QR, and every "[phone-upload]" close request with its
+ *  trigger) show. Seen 2026-10-15 in D300: the phone was told "cancelled on
+ *  the computer" at +300 s (app-bugfixes.md, "D300 analysis"). */
 async function phoneShowsDone(P: Terminal, s: Sess, timeout: number): Promise<void> {
   try {
     await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout });
@@ -294,7 +295,9 @@ async function phoneShowsDone(P: Terminal, s: Sess, timeout: number): Promise<vo
       .map((r) => `${r.method}@${Math.round((r.at - s.shownAt) / 1000)}s:${r.status ?? "no-response"}`);
     const polls = rel(/get_product_image_upload_session_status/);
     const shot = await A.screenshot(`d-phone-not-done-desktop-${s.sessionId.slice(-6)}`).catch(() => "?");
-    const diag = `phone "${phone}"; server row ${sessionRow(s.sessionId).split("|")[0]}; desktop status "${status}"; route=${A.currentRoute()}; create: [${rel(/create_product_image_upload_session/).join(",")}]; cancel: [${rel(/cancel_product_image_upload_session/).join(",")}]; status polls: ${polls.length} last [${polls.slice(-3).join(",")}]; desktop screenshot ${path.basename(shot)}; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
+    const confirmShown = await A.page.getByText("Stop this phone upload?").isVisible().catch(() => false);
+    const markers = A.phoneUploadMarkersSince(s.shownAt - 15_000);
+    const diag = `phone "${phone}"; server row ${sessionRow(s.sessionId).split("|")[0]}; desktop status "${status}"${confirmShown ? " (stop-upload confirmation shown)" : ""}; desktop close requests: [${markers.join(" || ") || "none"}]; route=${A.currentRoute()}; create: [${rel(/create_product_image_upload_session/).join(",")}]; cancel: [${rel(/cancel_product_image_upload_session/).join(",")}]; status polls: ${polls.length} last [${polls.slice(-3).join(",")}]; desktop screenshot ${path.basename(shot)}; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
     record("phone-upload", "phone did not finish", "INFO", diag);
     throw new Error(`${(e as Error).message.split("\n")[0]} — ${diag}`);
   }
@@ -312,7 +315,7 @@ async function desktopShowsImage(s: Sess): Promise<string> {
     const status = await A.page.locator("div", { hasText: /^Status$/ }).locator("xpath=following-sibling::div[1]").first().innerText({ timeout: 2_000 }).catch(() => "?");
     const statusReqs = A.requestsMatching(/get_product_image_upload_session_status/, s.shownAt).map((r) => r.status ?? "no-response");
     const reconnecting = await A.page.getByText(/reconnecting/i).isVisible().catch(() => false);
-    const diag = `desktop status "${status}"${reconnecting ? " (reconnecting shown)" : ""}; server row ${sessionRow(s.sessionId)}; status polls since QR: ${statusReqs.length} [${[...new Set(statusReqs)].join(",")}]; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
+    const diag = `desktop status "${status}"${reconnecting ? " (reconnecting shown)" : ""}; desktop close requests: [${A.phoneUploadMarkersSince(s.shownAt - 15_000).join(" || ") || "none"}]; server row ${sessionRow(s.sessionId)}; status polls since QR: ${statusReqs.length} [${[...new Set(statusReqs)].join(",")}]; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
     record("phone-upload", "desktop did not show the upload", "INFO", diag);
     throw new Error(`${(e as Error).message.split("\n")[0]} — ${diag}`);
   }
@@ -486,6 +489,11 @@ for (const delayS of [30, 65, 120, 300]) {
       const tokenAgeAtPut = puts[0].at - fnCalls[0].at;
       const line = `| ${delayS} s | phone opened +${secs(openedAfter)} s | file picked +${secs(pickedAt - s.shownAt)} s | token issued +${secs(tokenAt)} s | PUT 200 +${secs(puts[0].at - s.shownAt)} s (token age ${tokenAgeAtPut} ms) | complete 200 | COMPLETED | desktop image ${size} |`;
       timings.push(line);
+      // Any close request on the desktop during the wait (e.g. an Escape or
+      // backdrop click that only raised the stop-upload confirmation) is
+      // kept as evidence even though the case passed.
+      const closeRequests = A.phoneUploadMarkersSince(s.shownAt - 15_000);
+      if (closeRequests.length) record("phone-upload", `D${delayS} desktop close requests`, "INFO", closeRequests.join(" || "));
       record("phone-upload", `D${delayS} upload at +${delayS} s`, "PASS", `[${MODES}] ${line} ${db}; ${img}; function answer keys {${fnCalls[0].keys}} path=session path, no ids`);
     } finally {
       await P.close();
@@ -669,6 +677,9 @@ test("D-cancelled: desktop closes the QR (cancel) -> phone refused with a clear 
     await A.page.getByRole("button", { name: "Close", exact: true }).click();
     expect((await cancelled).status()).toBeLessThan(300);
     await expect(A.page.getByText("Upload from phone")).toBeHidden();
+    // the desktop names the trigger of its cancel (lib/phoneUploadClose.ts)
+    const closeRequests = A.phoneUploadMarkersSince(s.shownAt - 15_000);
+    expect(closeRequests.some((m) => m.startsWith("trigger=close-button decision=cancel+close")), closeRequests.join(" || ")).toBe(true);
     expect(sessionRow(s.sessionId).split("|")[0]).toBe("CANCELED");
     await phonePicks(P);
     await expect(P.page.getByText(PHONE_CANCELLED)).toBeVisible({ timeout: 30_000 });
@@ -679,7 +690,7 @@ test("D-cancelled: desktop closes the QR (cancel) -> phone refused with a clear 
     expect(sessionRow(s.sessionId).split("|")[0]).toBe("CANCELED");
     expect(objectsUnder(s)).toBe(0);
     expect(productImageUrl()).toBe(imageBefore);
-    record("phone-upload", "D-cancelled session refused", "PASS", `[${MODES}] products.image_url unchanged; desktop Close -> cancel RPC, modal gone; phone: "${PHONE_CANCELLED}"; function 410 inactive/CANCELED, no token; PUTs=0, completes=0; row CANCELED; objects=0`);
+    record("phone-upload", "D-cancelled session refused", "PASS", `[${MODES}] products.image_url unchanged; desktop Close -> cancel RPC (marker trigger=close-button), modal gone; phone: "${PHONE_CANCELLED}"; function 410 inactive/CANCELED, no token; PUTs=0, completes=0; row CANCELED; objects=0`);
   } finally {
     await P.close();
   }

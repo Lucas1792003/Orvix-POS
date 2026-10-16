@@ -11,6 +11,12 @@ import {
   type ProductImageUploadSessionStatus,
 } from "../../lib/productImagePhoneUpload";
 import { startUploadStatusPolling, type ReconnectingInfo } from "../../lib/uploadStatusPoller";
+import {
+  decidePhoneUploadClose,
+  formatPhoneUploadCloseMarker,
+  type PhoneUploadCloseContext,
+  type PhoneUploadCloseTrigger,
+} from "../../lib/phoneUploadClose";
 
 interface ProductImagePhoneUploadModalProps {
   open: boolean;
@@ -53,6 +59,10 @@ export const ProductImagePhoneUploadModal = ({
   const [reloadNonce, setReloadNonce] = useState(0);
   // Set while status checks are failing and being retried.
   const [reconnecting, setReconnecting] = useState<ReconnectingInfo | null>(null);
+  // Escape / backdrop while PENDING ask first (lib/phoneUploadClose.ts).
+  const [confirmStop, setConfirmStop] = useState(false);
+  // When the current QR was shown (diagnostics only).
+  const shownAtRef = useRef<number | null>(null);
 
   const statusTone = useMemo(() => {
     if (phase === "COMPLETED") return "text-emerald-700";
@@ -70,11 +80,14 @@ export const ProductImagePhoneUploadModal = ({
     setUploadedBytes(undefined);
     setUploadedUrl(undefined);
     setSecondsLeft(0);
+    setConfirmStop(false);
+    shownAtRef.current = null;
 
     createPhoneProductImageUploadSession({ productId, shopId })
       .then((nextSession) => {
         if (!active) return;
         setSession(nextSession);
+        shownAtRef.current = Date.now();
         setPhase("PENDING");
         setSecondsLeft(getSecondsLeft(nextSession.expiresAt));
       })
@@ -138,12 +151,53 @@ export const ProductImagePhoneUploadModal = ({
     };
   }, [open, session]);
 
-  const handleClose = () => {
-    if (session && phase === "PENDING") {
+  const pendingSession = Boolean(session) && phase === "PENDING";
+  const closeContext = (
+    trigger: PhoneUploadCloseContext["trigger"],
+    decision: PhoneUploadCloseContext["decision"],
+    trusted?: boolean,
+  ): PhoneUploadCloseContext => ({
+    trigger,
+    decision,
+    sessionId: session?.sessionId,
+    phase,
+    shownForS: shownAtRef.current === null ? undefined : Math.round((Date.now() - shownAtRef.current) / 1000),
+    secondsLeft: session ? getSecondsLeft(session.expiresAt) : undefined,
+    trusted,
+    visibility: typeof document === "undefined" ? undefined : document.visibilityState,
+    hasFocus: typeof document === "undefined" ? undefined : document.hasFocus(),
+  });
+
+  // The ONLY place the session is cancelled: an explicit close (footer
+  // button, header X, "Stop upload"). Escape / backdrop while PENDING only
+  // ask; unmounting never cancels (lib/phoneUploadClose.ts).
+  const requestClose = (trigger: PhoneUploadCloseTrigger, trusted?: boolean) => {
+    const decision = decidePhoneUploadClose(trigger, { pendingSession });
+    if (pendingSession) console.warn(formatPhoneUploadCloseMarker(closeContext(trigger, decision, trusted)));
+    if (decision.action === "confirm") {
+      setConfirmStop(true);
+      return;
+    }
+    if (decision.cancel && session) {
       void cancelProductImageUploadSession(session.sessionId).catch(() => undefined);
     }
+    setConfirmStop(false);
     onClose();
   };
+
+  // Diagnostics: say so when the modal disappears without a close request
+  // while a session is PENDING (no cancel; the server expires the session).
+  const unmountInfoRef = useRef<() => PhoneUploadCloseContext | null>(() => null);
+  useEffect(() => {
+    unmountInfoRef.current = () => (open && pendingSession ? closeContext("unmount", { action: "none" }) : null);
+  });
+  useEffect(
+    () => () => {
+      const info = unmountInfoRef.current();
+      if (info) console.warn(formatPhoneUploadCloseMarker(info));
+    },
+    [],
+  );
 
   // Start over with a fresh QR / upload session (after a completed upload
   // the user wants a different photo, or after a failed / expired one).
@@ -161,7 +215,7 @@ export const ProductImagePhoneUploadModal = ({
   return (
     <Modal
       open={open}
-      onClose={handleClose}
+      onClose={(reason, detail) => requestClose(reason, detail.trusted)}
       title="Upload from phone"
       description="Scan with your phone to take or choose a product photo."
       footer={
@@ -175,7 +229,7 @@ export const ProductImagePhoneUploadModal = ({
               {phase === "COMPLETED" ? "Reupload" : "Try again"}
             </Button>
           )}
-          <Button type="button" onClick={handleClose} variant={phase === "COMPLETED" ? "primary" : "secondary"}>
+          <Button type="button" onClick={(e) => requestClose("close-button", e.isTrusted)} variant={phase === "COMPLETED" ? "primary" : "secondary"}>
             {phase === "COMPLETED" ? "Use this image" : "Close"}
           </Button>
         </>
@@ -237,6 +291,25 @@ export const ProductImagePhoneUploadModal = ({
             <div role="status" className="flex items-center gap-2 text-xs text-slate-500">
               <span className="material-symbols-rounded animate-spin text-sm">progress_activity</span>
               Connection problem, reconnecting... The phone upload is not affected.
+            </div>
+          )}
+
+          {phase === "PENDING" && confirmStop && (
+            <div
+              role="alertdialog"
+              aria-label="Stop this phone upload?"
+              className="space-y-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800"
+            >
+              <div className="font-semibold">Stop this phone upload?</div>
+              <p>The QR code will stop working on the phone.</p>
+              <div className="flex flex-wrap gap-2">
+                <Button type="button" size="sm" variant="primary" autoFocus onClick={() => setConfirmStop(false)}>
+                  Keep waiting
+                </Button>
+                <Button type="button" size="sm" variant="danger" onClick={(e) => requestClose("confirm-stop", e.isTrusted)}>
+                  Stop upload
+                </Button>
+              </div>
             </div>
           )}
 

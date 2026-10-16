@@ -75,6 +75,11 @@ export class Terminal {
   readonly hostedRequests: string[] = [];
   /** console.error / console.warn lines from the renderer (diagnostics). */
   readonly consoleErrors: string[] = [];
+  /** "[phone-upload]" console markers from the desktop QR modal (any level):
+   *  every close request while a session is PENDING names its trigger
+   *  (close-button / x-button / confirm-stop / escape / backdrop / unmount),
+   *  the decision, isTrusted, visibility and focus (lib/phoneUploadClose.ts). */
+  readonly phoneUploadMarkers: { at: number; text: string }[] = [];
   /** Realtime WebSocket frames received by the page (text, with timestamp). */
   readonly wsFrames: { at: number; text: string }[] = [];
   readonly wsEvents: string[] = [];
@@ -107,6 +112,7 @@ export class Terminal {
       ws.on("close", () => this.wsEvents.push(`${Date.now()} close`));
       ws.on("socketerror", (e) => this.wsEvents.push(`${Date.now()} error ${e}`));
     });
+    page.on("console", (m) => { if (m.text().startsWith("[phone-upload]")) this.phoneUploadMarkers.push({ at: Date.now(), text: m.text().slice(0, 400) }); });
     page.on("console", (m) => { if (m.type() === "error" || m.type() === "warning") this.consoleErrors.push(`${new Date().toISOString()} ${m.type()}: ${m.text().slice(0, 300)}`); });
     // Hard guard: the hosted project must never be touched. Any request to
     // a *.supabase.co host (any scheme — Realtime's wss:// included) is
@@ -808,6 +814,11 @@ export class Terminal {
     mkdirSync(path.dirname(file), { recursive: true });
     await this.page.screenshot({ path: file, fullPage: false });
     return file;
+  }
+
+  /** Desktop QR modal close markers since `since` (ms epoch). */
+  phoneUploadMarkersSince(since = 0): string[] {
+    return this.phoneUploadMarkers.filter((m) => m.at >= since).map((m) => m.text.replace(/^\[phone-upload\] close requested /, ""));
   }
 
   requestsMatching(pattern: RegExp, since = 0): RequestLogEntry[] {
