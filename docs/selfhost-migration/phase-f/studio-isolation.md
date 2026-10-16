@@ -1,10 +1,13 @@
 # Phase F: isolating Supabase Studio from the shared API origin
 
-Status: **deploy-ready, NOT applied** (2026-10-16). Nothing was changed on
-the server; read-only checks only. The change is now a controlled, reversible
-script (`studio-isolation.sh` status / stage / validate / apply / revert,
-§7), like the G5 header rule. Applying needs the owner's approval. Closes
-checklist item A6d once applied and verified.
+Status: **deploy-ready, rehearsed on the server, NOT applied** (2026-10-16).
+The rehearsal staged the change into temporary files and ran a temporary
+test gateway on `127.0.0.1:18002`. Every check passed, and the revert of the
+staged copy is byte-identical to the live template. The live gateway, Studio
+and the stack files were not touched (§7.2). The change is a controlled,
+reversible script (`studio-isolation.sh` status / stage / validate / apply /
+revert, §7), like the G5 header rule. Applying needs the owner's approval
+(final runbook §7.3). Closes checklist item A6d once applied and verified.
 
 Related: [`production-readiness-checklist.md`](production-readiness-checklist.md)
 A6d / C4, [`remote-access-architecture.md`](remote-access-architecture.md) §5.3
@@ -246,9 +249,12 @@ the cached basic-auth credentials; they no longer open anything anyway).
 Outside shop hours: recreating `api-gw` drops API connections for a few
 seconds; tills retry from the outbox. Recreating the gateway also resets its
 access log: run `verify-till-readiness.sh reduce >> …` first
-([till-readiness-084.md](till-readiness-084.md) §3.3), and consider applying
-the prepared access-log field (`envoy_access_log_client_info.py`, same
-stage / validate / install pattern) in the same window, so the log resets once.
+([till-readiness-084.md](till-readiness-084.md) §3.3). Consider applying the
+minimal access-log format in the same window
+([gateway-logging-review.md](gateway-logging-review.md) §6). It replaces
+the earlier `envoy_access_log_client_info.py` field and fixes the live
+query-string finding L1. It goes into the live template **before**
+`stage`, so the log resets only once. §7.3 has the full order.
 
 ```
 mac$ scp -r deploy/lucashome/studio-isolation lucashome:~/
@@ -319,6 +325,96 @@ is restored to a public origin. If an upgrade changed the upstream block,
 | Public image | one product's public image URL from the DB (path never printed) → 200, `image/*`; when the template carries the G5 rule: `nosniff` + CSP `sandbox` | unchanged |
 | Signed URL | service key read by exact name from `.env`, sent with `curl -K -` (never printed); sign that object for 60 s → download 200 | unchanged |
 | Studio on loopback (skipped with `--gateway-only`) | `docker port supabase-studio` = `127.0.0.1:54323`; listener bound to 127.0.0.1 only; Studio answers there | new |
+
+### 7.2 Server rehearsal (2026-10-16 ≈ 10:30 UTC, evidence)
+
+This was a controlled rehearsal on `lucashome` against the **current**
+server files. The tooling was copied to a temporary `~/phf-si-rehearsal/`
+(`studio_isolation.py`, `upstream-studio-routes.yaml`, `studio-isolation.sh`;
+sha prefixes `0bc22e37`, `2ff007ad`, `0ea90cba`, equal to the repo). The
+directory was removed afterwards. Nothing in `/srv/supabase/stack` was
+written. The only container started was the temporary gateway below. The
+output showed only status codes, non-secret header values, states and sha
+prefixes. The anon and service keys were read by exact name from `.env` and
+passed to curl on stdin (`-K -`), and never printed.
+
+| Step | Result |
+|---|---|
+| Preflight | live template `a635a7aa`, override `f3d56b05` (= repo); port 18002 free; no `phf-*` container; `supabase-envoy` up 4 h healthy (`127.0.0.1:8000`), `supabase-studio` up 4 days healthy (`3000/tcp`, not published) |
+| Stage | `studio_isolation.py apply` live → `stage/`: `lds: upstream (route block lines 566-695)` → `isolated`, 130 lines replaced by 30, staged sha **`948476f9`**; override `upstream` → `isolated` (+4 lines, staged sha `35fc5129`). Diff: lds −112/+12 lines, override −0/+4. Access-log line untouched. Secret-looking values: none (the only regex hit is a docs path in an override comment) |
+| Compose (staged override) | `docker compose config` → studio ports `[(127.0.0.1, 54323, 3000)]`, api-gw `[(127.0.0.1, 8000)]` |
+| Test gateway | `docker compose run --rm --no-deps -d --name phf-gw-test2 -p 127.0.0.1:18002:8000 -v ~/phf-si-rehearsal/stage/lds.template.yaml:/etc/envoy/lds.template.yaml:ro api-gw`: answered after 2 s. Rendered config inside: 0 `cluster: studio`, 1 `phf-not-found`. Envoy only starts with a valid config, so this also validates the staged template |
+| Studio / pg-meta paths (14) | live `401` + Basic challenge (`/api/mcp`, `/mcp` `403`; `/pg/…` `401` without challenge) → test **`404`, no challenge** for all 14 (`/`, `/project/default`, `…/editor`, `/api/platform/profile`, pg-meta query GET + POST, `/api/mcp`, `/mcp`, `/pg/`, `/pg/tables`, `/favicon.ico`, `/_next/…`, `/nonexistent`, `..` from `/rest/v1/`) |
+| POS API, no credentials (16) | **identical** live vs test: auth health/settings 401, `/rest/v1/` and a table 401, graphql 401, storage version 200 (GET + HEAD), bucket list 400, sign without auth 400, phone page 200, phone-upload-token GET/POST 401, staff-admin 401, realtime tenants 403, websocket 401, CORS preflight 200 |
+| POS API, anon key (6) | **identical**: auth health/settings 200, `products` / `business_profile` select 200, bucket list 200, realtime tenants 403 |
+| Phone page | live and test `200 text/html; charset=utf-8` |
+| Public image | live and test `200 image/*`, `nosniff`, `default-src 'none'; sandbox`, `inline`, `max-age=31536000` (G5 rule intact) |
+| Signed URL (60 s) | live and test: issued, download `200 image/*` |
+| `studio-isolation.sh verify --gateway-only` | test gateway: **25 passed, 0 failed**. Same verify against the live gateway: 11 passed, 14 failed, exactly the 14 Studio lines (0 other failures), i.e. the checks bite |
+| Teardown | `phf-gw-test2` removed, port 18002 not listening |
+| Revert on the staged copy | `studio_isolation.py revert stage/…` → `lds: revert -> upstream: 30 lines replaced by 130`; **byte-identical to the live template (`a635a7aa`)** and to the live override (`f3d56b05`) |
+| Live untouched | template `a635a7aa`, override `f3d56b05`; `supabase-envoy` and `supabase-studio`: same container id and start time as before; live `/` still `401` + Basic |
+
+Probe summary: 22 API probes the same on both gateways, 14 Studio paths
+isolated, 0 unexpected. The server rehearsal did not run
+`studio-isolation.sh validate` itself, because that uses the name
+`phf-gw-test` on port 18001. The rehearsal did the same steps by hand with
+`phf-gw-test2` on 18002.
+
+### 7.3 Final apply / revert runbook
+
+**What the real apply changes beyond the rehearsal:** the two live files,
+plus two container recreates.
+
+| Change | Effect | Downtime |
+|---|---|---|
+| `docker-compose.override.yml`: `studio:` gets `ports: ["127.0.0.1:54323:3000/tcp"]` | `docker compose up -d studio` **recreates `supabase-studio`** with the loopback port (a published port can only change on a new container) | **Studio only**: from stop until healthy (health check every 5 s; expect ≈ 20–30 s). API, phone page and storage are not affected. `api-gw` has no `restart: true` on its `depends_on`, so it is not restarted |
+| `lds.template.yaml`: Studio routes → `phf-not-found` | `docker compose up -d --force-recreate api-gw` (single-file bind mount: the new inode needs a new container). Compose first waits for Studio to be healthy (`depends_on: condition: service_healthy`) | **API: a few seconds** (the test gateway answered 2 s after start). Tills retry from the outbox. The gateway access log starts empty |
+
+Window: outside shop hours, owner approval. Exact commands:
+
+```
+mac$ scp -r deploy/lucashome/studio-isolation lucashome:~/
+mac$ scp deploy/lucashome/envoy_access_log_minimal.py lucashome:~/studio-isolation/            # optional, gateway-logging-review.md §6
+ls$  ~/till-readiness/verify-till-readiness.sh reduce >> /srv/supabase/backups/logs/till-access-$(date -u +%Y%m%d).tsv   # keep the till history first
+#    optional, same window: minimal access-log format into the live template (no recreate yet), gateway-logging-review.md §6
+ls$  cd ~/studio-isolation
+ls$  ./studio-isolation.sh status     # lds: upstream; override: upstream; live probe / -> 401|challenge=1
+ls$  ./studio-isolation.sh stage      # stage/lds.template.yaml (sha 948476f9 if the template is still a635a7aa), stage/docker-compose.override.yml
+ls$  ./studio-isolation.sh validate   # envoy --mode validate + temporary phf-gw-test on 127.0.0.1:18001 + verify; must end "0 failed"
+ls$  ./studio-isolation.sh apply --yes
+#    = backups *.pre-studio-isolation.<UTC> of both files; install; docker compose config --quiet;
+#      docker compose up -d studio; docker compose up -d --force-recreate api-gw; wait for /storage/v1/version 200;
+#      status (lds: isolated, override: isolated); full verify incl. Studio on 127.0.0.1:54323 -> must end "0 failed"
+ls$  ss -ltnH | awk '{print $4}' | grep ':54323$'          # only 127.0.0.1:54323
+```
+
+Then from the Mac (§6): every Studio path on the tailnet origin `404 0`,
+`functions-router.sh verify` `0 failed`, one desktop-app login, a product
+list, one phone upload by QR, and the Studio admin access:
+
+```
+mac$ ssh -N -L 127.0.0.1:54323:127.0.0.1:54323 lucashome     # foreground; Ctrl-C when done
+mac$ open http://127.0.0.1:54323                              # Studio (no password: loopback + SSH is the guard)
+mac$ curl -m 5 -s -o /dev/null -w '%{http_code}\n' http://<host>.<tailnet-name>.ts.net:54323/   # 000: not reachable from the tailnet
+```
+
+**Revert** (allowed only while no public origin exists, §9):
+
+```
+ls$  cd ~/studio-isolation && ./studio-isolation.sh revert --yes
+#    = backups *.pre-studio-revert.<UTC>; studio_isolation.py revert on both files (other gateway rules kept);
+#      docker compose config --quiet; up -d studio (recreated without the port: Studio down ≈ 20–30 s);
+#      up -d --force-recreate api-gw (API: a few seconds); check / -> 401 Basic
+ls$  sha256sum /srv/supabase/stack/volumes/api/envoy/lds.template.yaml | cut -c1-8   # a635a7aa when no other rule was applied meanwhile
+```
+
+The rehearsal showed `revert(stage(live))` = live, byte for byte, for both
+files.
+
+Afterwards in the repo: copy the server override back, update
+`deploy/lucashome/README.md` (deployed state), checklist A6d → DONE with the
+`apply` / `verify` output.
 
 ## 8. Local test evidence
 
@@ -415,6 +511,6 @@ no Tailscale Funnel, and no other public route to `127.0.0.1:8000` until:**
 
 ## 11. Items needing owner approval
 
-1. Apply §7 (`studio-isolation.sh stage` → `validate` → `apply --yes`), outside shop hours; optionally the prepared access-log field ([till-readiness-084.md](till-readiness-084.md) §3.3) in the same gateway recreate.
+1. Apply §7.3 (`studio-isolation.sh stage` → `validate` → `apply --yes`), outside shop hours (rehearsed §7.2). Recommended in the same gateway recreate: the minimal access-log format ([gateway-logging-review.md](gateway-logging-review.md) §6, fixes live finding L1; supersedes the x-client-info-only field of [till-readiness-084.md](till-readiness-084.md) §3.3).
 2. Optional (d): Studio stopped by default, started on demand.
 3. Record gate S in the remote-access plan and the checklist.
