@@ -20,6 +20,10 @@ export const backendHost = backend.host;
 
 export const supabase = createClient(backend.url, backend.anonKey);
 
+/** Backend REST origin + public anon key, for the few calls that need the raw
+ *  HTTP response (status code, Retry-After) that supabase-js does not expose. */
+export const backendRest = { url: backend.url, anonKey: backend.anonKey } as const;
+
 // Fire-and-forget write — shows a friendly error toast + console log on failure.
 // Prefer dbExec for new code; this remains for legacy callers.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

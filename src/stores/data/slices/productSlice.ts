@@ -5,6 +5,7 @@ import { supabase, dbExec } from "../../../lib/supabase";
 import { findProductForScan } from "../../../features/pos/barcodeLookup";
 import { mapBarcodeWriteError, normalizeBarcodeValue } from "../../../lib/barcodeValidation";
 import { sanitizeProductUnits } from "../../../features/catalog/productUnits";
+import type { BarcodeSavePlan } from "../../../features/catalog/productBarcodeForm";
 import { callRpc, newIdempotencyKey, ONLINE_ONLY_RETRIES } from "../idempotentRpc";
 
 export const createProductSlice: StateCreator<DataState, [], [], ProductState> = (set, get) => ({
@@ -47,7 +48,7 @@ export const createProductSlice: StateCreator<DataState, [], [], ProductState> =
     }));
   },
 
-  updateProduct: async (product: Product, barcodes: ProductBarcode[]) => {
+  updateProduct: async (product: Product, barcodes?: ProductBarcode[]) => {
     await dbExec(supabase.from("products").update({
       sku: product.sku,
       alias_code: product.aliasCode ?? null,
@@ -63,6 +64,16 @@ export const createProductSlice: StateCreator<DataState, [], [], ProductState> =
       purchase_type: product.purchaseType ?? null,
       expiry_date: product.expiryDate, image_url: product.imageUrl, is_active: product.isActive,
     }).eq("id", product.id), "updateProduct");
+    // Only a caller that passes the product's full barcode list (CSV import)
+    // replaces the barcodes. The product form saves barcodes separately as a
+    // diff (applyProductBarcodeChanges); deleting here dropped every barcode
+    // the form does not show.
+    if (!barcodes) {
+      set((state) => ({
+        products: state.products.map((item) => (item.id === product.id ? product : item)),
+      }));
+      return;
+    }
     await dbExec(supabase.from("product_barcodes").delete().eq("product_id", product.id), "updateProduct delete barcodes");
     if (barcodes.length > 0) {
       await dbExec(supabase.from("product_barcodes").insert(
@@ -105,27 +116,34 @@ export const createProductSlice: StateCreator<DataState, [], [], ProductState> =
     }));
   },
 
-  replaceProductBarcodes: async (productId: string, barcodes: ProductBarcode[]) => {
-    // Normalize values once so DB rows match what the form validated.
-    const normalized = barcodes
-      .map((b) => ({ ...b, value: normalizeBarcodeValue(b.value) }))
+  applyProductBarcodeChanges: async (productId: string, plan: BarcodeSavePlan) => {
+    const inserts = plan.inserts
+      .map((b) => ({ ...b, productId, value: normalizeBarcodeValue(b.value) }))
       .filter((b) => b.value.length > 0);
+    const deleteIds = [...new Set(plan.deleteIds)];
 
-    // Delete-then-insert: simplest reconcile that always converges to the
-    // user's chosen list. The product_barcodes table has no FKs pointing
-    // INTO it, so dropped rows are safe to recreate.
-    const { error: delError } = await supabase
-      .from("product_barcodes")
-      .delete()
-      .eq("product_id", productId);
-    if (delError) {
-      console.error("[DB] replaceProductBarcodes delete failed:", delError);
-      throw new Error(mapBarcodeWriteError(delError));
+    // Deletes first so a value moved between units of this product does not
+    // collide with product_barcodes_unique_normalized_value. Scoped to the
+    // product as well as the ids, so a stale id can never hit another product.
+    // Rows not named in the plan are never touched.
+    if (deleteIds.length > 0) {
+      const { error: delError } = await supabase
+        .from("product_barcodes")
+        .delete()
+        .in("id", deleteIds)
+        .eq("product_id", productId);
+      if (delError) {
+        console.error("[DB] applyProductBarcodeChanges delete failed:", delError);
+        throw new Error(mapBarcodeWriteError(delError));
+      }
+      set((state) => ({
+        barcodes: state.barcodes.filter((item) => !(item.productId === productId && deleteIds.includes(item.id))),
+      }));
     }
 
-    if (normalized.length > 0) {
+    if (inserts.length > 0) {
       const { error: insError } = await supabase.from("product_barcodes").insert(
-        normalized.map((b) => ({
+        inserts.map((b) => ({
           id: b.id,
           product_id: productId,
           product_unit_id: b.productUnitId ?? null,
@@ -134,16 +152,11 @@ export const createProductSlice: StateCreator<DataState, [], [], ProductState> =
         }))
       );
       if (insError) {
-        console.error("[DB] replaceProductBarcodes insert failed:", insError);
+        console.error("[DB] applyProductBarcodeChanges insert failed:", insError);
         throw new Error(mapBarcodeWriteError(insError));
       }
+      set((state) => ({ barcodes: state.barcodes.concat(inserts) }));
     }
-
-    set((state) => ({
-      barcodes: state.barcodes
-        .filter((item) => item.productId !== productId)
-        .concat(normalized.map((b) => ({ ...b, productId }))),
-    }));
   },
 
   replaceProductUnits: async (productId: string, units: ProductUnit[]) => {

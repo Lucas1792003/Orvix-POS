@@ -6,6 +6,7 @@ import {
   resolvePhoneUploadPage,
   type PhoneUploadPage,
 } from "./phoneUploadOrigin";
+import { parseRetryAfter, UploadStatusRequestError } from "./uploadStatusPoller";
 
 export { PRODUCT_IMAGE_PHONE_UPLOAD_ROUTE };
 
@@ -411,16 +412,59 @@ export async function uploadPhoneProductImage(
   }
 }
 
+export const UPLOAD_STATUS_REQUEST_TIMEOUT_MS = 15_000;
+
+/**
+ * Desktop poll. Plain fetch to the same PostgREST endpoint supabase.rpc
+ * uses, because the poller needs what supabase-js drops: the HTTP status and
+ * the Retry-After header. Every failure is an UploadStatusRequestError
+ * (httpStatus 0 = no response / timed out) so uploadStatusPoller can tell a
+ * transient failure from a permanent one.
+ */
 export async function getProductImageUploadSessionStatus(
   sessionId: string,
+  opts: { timeoutMs?: number; fetchImpl?: typeof fetch } = {},
 ): Promise<ProductImageUploadSessionStatusResult> {
-  const { supabase } = await import("./supabase");
-  const { data, error } = await supabase.rpc("get_product_image_upload_session_status", {
-    p_session_id: sessionId,
-  });
-  if (error) throw new Error(error.message);
-  if (!data) throw new Error("Upload session was not found.");
-  return data as ProductImageUploadSessionStatusResult;
+  const { supabase, backendRest } = await import("./supabase");
+  const { data: auth } = await supabase.auth.getSession();
+  const bearer = auth.session?.access_token ?? backendRest.anonKey;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? UPLOAD_STATUS_REQUEST_TIMEOUT_MS);
+  let res: Response;
+  let text: string;
+  try {
+    res = await (opts.fetchImpl ?? fetch)(`${backendRest.url}/rest/v1/rpc/get_product_image_upload_session_status`, {
+      method: "POST",
+      headers: { apikey: backendRest.anonKey, Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ p_session_id: sessionId }),
+      signal: controller.signal,
+    });
+    text = await res.text();
+  } catch {
+    throw new UploadStatusRequestError(
+      controller.signal.aborted ? "The upload status check timed out." : "Could not reach the server to check the upload.",
+      0,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+  let body: Record<string, unknown> | null;
+  try {
+    body = text ? (JSON.parse(text) as Record<string, unknown> | null) : null;
+  } catch {
+    // A proxy error page or a truncated answer: no usable response.
+    if (res.ok) throw new UploadStatusRequestError("The server sent an unreadable upload status.", 0);
+    body = null;
+  }
+  if (!res.ok) {
+    const message = typeof body?.message === "string" && body.message ? body.message : `Upload status check failed (HTTP ${res.status}).`;
+    throw new UploadStatusRequestError(message, res.status, {
+      code: typeof body?.code === "string" ? body.code : undefined,
+      retryAfterSeconds: parseRetryAfter(res.headers.get("Retry-After")),
+    });
+  }
+  if (!body) throw new UploadStatusRequestError("Upload session was not found.", 404);
+  return body as unknown as ProductImageUploadSessionStatusResult;
 }
 
 export async function getProductImageUploadSessionByToken(

@@ -27,7 +27,7 @@ import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
-import { closeOpenShifts, count, ensureQaBarcode, inv, keyRows, rows } from "./helpers/db";
+import { closeOpenShifts, count, assertQaBarcode, inv, keyRows, rows } from "./helpers/db";
 import { PROJECT_ROOT, RESULTS_DIR, liveCfg, qaPassword, qaState } from "./helpers/env";
 import { record } from "./helpers/evidence";
 import { assertConsistency } from "./helpers/consistency";
@@ -103,7 +103,7 @@ test.beforeAll(async () => {
   // no open shift (an earlier spec may have left one) before the till loads.
   const closed = await closeOpenShifts([ids.cashA], { email: emails.mgr, password: pw }, "spec F");
   record("F", "precondition: no open shift for cashier A", "INFO", closed.length ? closed.join("; ") : "none open");
-  record("F", "precondition: QA Product One barcode", "INFO", await ensureQaBarcode(st));
+  record("F", "precondition: QA Product One barcode", "INFO", await assertQaBarcode(st));
   A = await Terminal.launchElectron(USERDATA);
   await A.signIn(emails.cashA, pw, "/app/pos");
   await A.waitForApp();

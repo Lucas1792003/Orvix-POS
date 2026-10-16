@@ -174,25 +174,19 @@ export async function ensureStockAtLeast(
   return min - current;
 }
 
-/** Spec precondition: QA Product One's seeded barcode (seed_extra.sql) is
- *  present, exactly as seeded. Spec D saves QA Product One through the
- *  product form, which rewrites the product's barcodes from what the form
- *  shows — and the form only shows a default-unit barcode stored with
- *  product_unit_id NULL, so the seeded row (bound to the default unit's id)
- *  is dropped by that save. Every spec that scans the barcode re-establishes
- *  it (service role, before its till loads) instead of relying on D not
- *  having run yet. Returns "present" or "restored". */
-export async function ensureQaBarcode(st: { ts: string; barcodeValue: string; ids: { org: string; prod1: string; unit1: string; barcode1: string } }): Promise<string> {
-  const existing = await rows("product_barcodes", { value: st.barcodeValue });
-  if (existing.some((b: any) => b.product_id === st.ids.prod1)) return "present";
-  if (existing.length) throw new Error(`barcode ${st.barcodeValue} is owned by another product: ${existing.map((b: any) => b.product_id).join(",")}`);
-  const { error } = await svc().from("product_barcodes").insert({
-    id: st.ids.barcode1, product_id: st.ids.prod1, product_unit_id: st.ids.unit1,
-    value: st.barcodeValue, type: "CODE128", org_id: st.ids.org,
-  });
-  if (error) throw new Error(`restoring the QA barcode failed: ${error.message}`);
-  if (!(await row("product_barcodes", { id: st.ids.barcode1 }))) throw new Error("QA barcode not present after restore");
-  return "restored";
+/** Spec precondition / postcondition: QA Product One's seeded barcode
+ *  (seed_extra.sql) is present exactly as seeded — same row id, value, type
+ *  and product_unit_id (bound to the default unit's id). Until the product
+ *  form fix (docs/selfhost-migration/phase-f/app-bugfixes.md, bug 1) spec D's
+ *  product saves deleted this row and every scanning spec restored it; the
+ *  form no longer touches barcodes the user did not edit, so this only
+ *  checks and never restores — a missing barcode is a regression. */
+export async function assertQaBarcode(st: { barcodeValue: string; ids: { prod1: string; unit1: string; barcode1: string } }): Promise<string> {
+  const b = await row("product_barcodes", { id: st.ids.barcode1 });
+  const shape = b ? `${b.product_id}|${b.product_unit_id}|${b.value}|${b.type}` : "<missing>";
+  const want = `${st.ids.prod1}|${st.ids.unit1}|${st.barcodeValue}|CODE128`;
+  if (shape !== want) throw new Error(`QA Product One's seeded barcode is not as seeded: ${shape} (want ${want})`);
+  return "present, as seeded";
 }
 
 export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

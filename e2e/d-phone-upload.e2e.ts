@@ -45,7 +45,7 @@ import path from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QRCodeSVG } from "qrcode.react";
-import { ensureQaBarcode, runSql, sleep, svc } from "./helpers/db";
+import { assertQaBarcode, runSql, sleep, svc } from "./helpers/db";
 import { startLocalFunctions, type LocalFunctionName, type LocalFunctions } from "./helpers/edgeRuntime";
 import { DEV_SERVER_URL, liveCfg, qaPassword, qaState, qaTotpSecret, RESULTS_DIR } from "./helpers/env";
 import { record } from "./helpers/evidence";
@@ -268,17 +268,39 @@ async function phonePicks(P: Terminal): Promise<number> {
   return at;
 }
 
+/** The phone reports the upload done; otherwise say what the phone, the
+ *  session row and the desktop (modal status, its create / cancel / status
+ *  requests since the QR) show. Seen 2026-10-15 in D300: the phone was told
+ *  "cancelled on the computer" at +300 s. */
+async function phoneShowsDone(P: Terminal, s: Sess, timeout: number): Promise<void> {
+  try {
+    await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout });
+  } catch (e) {
+    const phone = await P.page.getByRole("status").first().innerText({ timeout: 2_000 }).catch(() => "?");
+    const status = await A.page.locator("div", { hasText: /^Status$/ }).locator("xpath=following-sibling::div[1]").first().innerText({ timeout: 2_000 }).catch(() => "<no modal>");
+    const rel = (pattern: RegExp) => A.requestsMatching(pattern, s.shownAt - 15_000)
+      .map((r) => `${r.method}@${Math.round((r.at - s.shownAt) / 1000)}s:${r.status ?? "no-response"}`);
+    const polls = rel(/get_product_image_upload_session_status/);
+    const shot = await A.screenshot(`d-phone-not-done-desktop-${s.sessionId.slice(-6)}`).catch(() => "?");
+    const diag = `phone "${phone}"; server row ${sessionRow(s.sessionId).split("|")[0]}; desktop status "${status}"; route=${A.currentRoute()}; create: [${rel(/create_product_image_upload_session/).join(",")}]; cancel: [${rel(/cancel_product_image_upload_session/).join(",")}]; status polls: ${polls.length} last [${polls.slice(-3).join(",")}]; desktop screenshot ${path.basename(shot)}; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
+    record("phone-upload", "phone did not finish", "INFO", diag);
+    throw new Error(`${(e as Error).message.split("\n")[0]} — ${diag}`);
+  }
+}
+
 /** Desktop shows the image (modal preview AND, after "Use this image", the form thumbnail). */
 async function desktopShowsImage(s: Sess): Promise<string> {
   const url = publicUrl(s.storagePath);
   try {
     await expect(A.page.getByText("Upload received")).toBeVisible({ timeout: 20_000 });
   } catch (e) {
-    // The modal stops polling for good after ONE failed status request
-    // (phase FAILED -> "Upload failed / expired"); say which case this was.
+    // Status polls now retry transient failures ("reconnecting...") until the
+    // session expires (app-bugfixes.md bug 2); report what the desktop showed
+    // and what its polls got, so a stall is explained.
     const status = await A.page.locator("div", { hasText: /^Status$/ }).locator("xpath=following-sibling::div[1]").first().innerText({ timeout: 2_000 }).catch(() => "?");
     const statusReqs = A.requestsMatching(/get_product_image_upload_session_status/, s.shownAt).map((r) => r.status ?? "no-response");
-    const diag = `desktop status "${status}"; server row ${sessionRow(s.sessionId)}; status polls since QR: ${statusReqs.length} [${[...new Set(statusReqs)].join(",")}]; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
+    const reconnecting = await A.page.getByText(/reconnecting/i).isVisible().catch(() => false);
+    const diag = `desktop status "${status}"${reconnecting ? " (reconnecting shown)" : ""}; server row ${sessionRow(s.sessionId)}; status polls since QR: ${statusReqs.length} [${[...new Set(statusReqs)].join(",")}]; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
     record("phone-upload", "desktop did not show the upload", "INFO", diag);
     throw new Error(`${(e as Error).message.split("\n")[0]} — ${diag}`);
   }
@@ -295,15 +317,25 @@ async function desktopShowsImage(s: Sess): Promise<string> {
  *  exactly the server-derived URL. Returns to the edit page for the next case. */
 async function saveProductAndCheckImageUrl(s: Sess): Promise<string> {
   const expected = publicUrl(s.storagePath);
+  // The seeded barcode is bound to the default unit by id; the form shows it
+  // in the default unit's barcode field and the save must leave the row alone
+  // (app-bugfixes.md bug 1: the save used to delete it).
+  await expect.poll(() => barcodeFieldShows(st.barcodeValue), { timeout: 10_000 }).toBe(true);
+  await assertQaBarcode(st);
   await A.page.getByRole("button", { name: "Update Product", exact: true }).click();
   await expect.poll(() => A.currentRoute(), { timeout: 30_000 }).toBe("/app/admin/products");
   await expect.poll(productImageUrl, { timeout: 20_000 }).toBe(expected);
   const ok = productImageUrl() === expected && expected.startsWith(`${trustedBase}/storage/v1/object/public/${BUCKET}/org/`);
+  const barcode = await assertQaBarcode(st);
   await A.navigate(`/app/admin/products/${ids.prod1}/edit`);
   await A.page.getByRole("button", { name: "Use phone camera" }).waitFor({ state: "visible", timeout: 30_000 });
   await expect(A.page.getByAltText("Product preview")).toHaveAttribute("src", expected);
-  return `products.image_url == app_config origin + /storage/v1/object/public/${BUCKET}/<session path>: ${ok}`;
+  return `products.image_url == app_config origin + /storage/v1/object/public/${BUCKET}/<session path>: ${ok}; seeded unit-linked barcode after the save: ${barcode}`;
 }
+
+/** Does any input on the product form hold this barcode value? */
+const barcodeFieldShows = (value: string) =>
+  A.page.evaluate((v) => [...document.querySelectorAll("input")].some((i) => i.value === v), value);
 
 /** DB + storage after a successful flow: one object, COMPLETED once, size = completion bytes, public GET serves it. */
 async function assertCompletedOnce(s: Sess): Promise<string> {
@@ -395,9 +427,6 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   try {
-    // Saving QA Product One through the form drops its seeded barcode (see
-    // ensureQaBarcode); leave the shared fixture as this spec found it.
-    record("phone-upload", "QA Product One barcode after the product saves", "INFO", await ensureQaBarcode(st));
     const names = sql1(`SELECT name FROM storage.objects WHERE bucket_id = '${BUCKET}' AND name LIKE 'org/${ids.org}/%';`).split("\n").filter(Boolean);
     const unexpected = names.filter((n) => !QA_OBJECT.test(n));
     if (unexpected.length) throw new Error(`refusing to delete unexpected names: ${unexpected.join(",")}`);
@@ -433,7 +462,7 @@ for (const delayS of [30, 65, 120, 300]) {
       const openedAfter = Date.now() - s.shownAt;
       await sleep(Math.max(0, s.shownAt + delayS * 1000 - Date.now()));
       const pickedAt = await phonePicks(P);
-      await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 60_000 });
+      await phoneShowsDone(P, s, 60_000);
       const size = await desktopShowsImage(s);
       const db = await assertCompletedOnce(s);
       const img = await saveProductAndCheckImageUrl(s);
@@ -459,7 +488,7 @@ test("D-stale: a token used 66 s after issue is refused by storage; the phone tr
   try {
     await phoneOpens(P, s);
     await phonePicks(P);
-    await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 150_000 });
+    await phoneShowsDone(P, s, 150_000);
     const size = await desktopShowsImage(s);
     const db = await assertCompletedOnce(s);
     const img = await saveProductAndCheckImageUrl(s);
@@ -490,7 +519,7 @@ test("D-double-tap: two picks in a row -> one token, one PUT, one completion, on
     // second tap + a second picker result while the first is in flight
     await P.page.getByRole("button", { name: "Choose from library" }).tap({ force: true }).catch(() => undefined);
     await phonePicks(P);
-    await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 60_000 });
+    await phoneShowsDone(P, s, 60_000);
     await sleep(3_000); // let any (wrong) second attempt surface
     await desktopShowsImage(s);
     const db = await assertCompletedOnce(s);
@@ -530,12 +559,25 @@ test("D-race: two concurrent uploads of the same session (real client code) -> o
     // token) varies: seen as 200 + 400 "409 Duplicate" (local function run)
     // and as 200 + 200 within 4 ms (deployed run, 2026-10-13) - the second
     // write landing on the same single object row. Recorded, not hidden.
-    const put200 = puts.filter((p) => p.status === 200).length;
-    expect(put200).toBeGreaterThanOrEqual(1);
-    expect(put200 + puts.filter((p) => /Duplicate|409/.test(p.body)).length).toBe(2);
-    expect(objectsUnder(s)).toBe(1);
+    const putDesc = `PUTs=${puts.map((p) => `${p.status}@${p.at - puts[0].at}ms "${p.body.replace(/\s+/g, " ").slice(0, 90)}"`).join(", ")}; function answers=${fnCalls.map((c) => `${c.kind}@${c.at - (puts[0]?.at ?? c.at)}ms`).join(",")}`;
+    record("phone-upload", "D-race PUTs", "INFO", putDesc);
+    expect(objectsUnder(s), putDesc).toBe(1);
     const objRow = sql1(`SELECT COALESCE(metadata->>'size','-') || ' B, version ' || COALESCE(version,'-') || ', created ' || created_at || ', updated ' || updated_at FROM storage.objects WHERE bucket_id = '${BUCKET}' AND name = '${s.storagePath}';`);
-    expect(completes.filter((c) => c.status === 200)).toHaveLength(1);
+    expect(completes.filter((c) => c.status === 200), putDesc).toHaveLength(1);
+    // PUT pattern: each upload call PUTs once, plus at most ONE retry with a
+    // fresh token after a transport failure / expired token (client.js
+    // attempt(1), the D-stale / D-retry path). Reverse-order run 2026-10-15
+    // saw 3 PUTs (all 200 or duplicate) with every invariant above intact:
+    // one call's response did not reach the page and it retried. Exactly 2
+    // PUTs was stricter than the client's contract.
+    const put200 = puts.filter((p) => p.status === 200).length;
+    expect(put200, putDesc).toBeGreaterThanOrEqual(1);
+    expect(puts.length, putDesc).toBeGreaterThanOrEqual(2);
+    expect(puts.length, putDesc).toBeLessThanOrEqual(4);
+    const unexplained = puts.filter((p) => p.status !== 200 && !/Duplicate|409|already exists/.test(p.body) && !/InvalidJWT|exp|jwt|signature|token/i.test(p.body));
+    expect(unexplained, putDesc).toEqual([]);
+    // every PUT carried a token the function issued just before it
+    expect(puts.length, putDesc).toBeLessThanOrEqual(fnCalls.filter((c) => c.kind === "token").length);
     record("phone-upload", "D-race (2 concurrent uploads)", "PASS",
       `[${MODES}] both calls -> ${results.join(" / ")}; function answers=${fnCalls.map((c) => c.kind).join(",")}; PUTs=${puts.map((p) => `${p.status}${p.status !== 200 ? ` "${p.body.replace(/\s+/g, " ").slice(0, 70)}"` : ""}`).join(", ")}; completes=${completes.map((c) => c.status).join(",")}; object row: ${objRow}; ${db}; ${img}`);
   } finally {
@@ -550,7 +592,7 @@ test("D-retry: the upload response is lost after storage stored it -> phone retr
   try {
     await phoneOpens(P, s);
     await phonePicks(P);
-    await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 60_000 });
+    await phoneShowsDone(P, s, 60_000);
     await desktopShowsImage(s);
     const db = await assertCompletedOnce(s);
     const img = await saveProductAndCheckImageUrl(s);
@@ -661,7 +703,7 @@ test("D-ratelimit-wait [081]: the phone hits the session burst limit (429) -> sh
     expect(await burnTokens(s, 5)).toEqual([200, 200, 200, 200, 200]);
     await phonePicks(P);
     await expect(P.page.getByText(PHONE_WAITING)).toBeVisible({ timeout: 20_000 });
-    await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout: 60_000 });
+    await phoneShowsDone(P, s, 60_000);
     await desktopShowsImage(s);
     const db = await assertCompletedOnce(s);
     const img = await saveProductAndCheckImageUrl(s);

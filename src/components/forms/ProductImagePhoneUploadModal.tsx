@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { Button } from "../ui/Button";
 import { Modal } from "../ui/Modal";
@@ -10,6 +10,7 @@ import {
   type ProductImageUploadQrSession,
   type ProductImageUploadSessionStatus,
 } from "../../lib/productImagePhoneUpload";
+import { startUploadStatusPolling, type ReconnectingInfo } from "../../lib/uploadStatusPoller";
 
 interface ProductImagePhoneUploadModalProps {
   open: boolean;
@@ -50,6 +51,8 @@ export const ProductImagePhoneUploadModal = ({
   const [secondsLeft, setSecondsLeft] = useState(0);
   // Bumped by the Reupload button to start a fresh upload session (new QR).
   const [reloadNonce, setReloadNonce] = useState(0);
+  // Set while status checks are failing and being retried.
+  const [reconnecting, setReconnecting] = useState<ReconnectingInfo | null>(null);
 
   const statusTone = useMemo(() => {
     if (phase === "COMPLETED") return "text-emerald-700";
@@ -95,36 +98,45 @@ export const ProductImagePhoneUploadModal = ({
   }, [open, phase, session]);
 
   // No token refresh here: the phone obtains its signed upload token just in
-  // time from the phone-upload-token Edge Function. The desktop only polls.
+  // time from the phone-upload-token Edge Function. The desktop only polls —
+  // resiliently (lib/uploadStatusPoller.ts): a failed status request shows
+  // "reconnecting" and is retried with backoff until the session expires; it
+  // no longer ends the modal. Keyed on the session only, so a parent that
+  // re-renders with a new onUploaded does not restart polling.
+  const onUploadedRef = useRef(onUploaded);
   useEffect(() => {
-    if (!open || !session || phase !== "PENDING") return;
-
-    let active = true;
-    const poll = async () => {
-      try {
-        const result = await getProductImageUploadSessionStatus(session.sessionId);
-        if (!active) return;
+    onUploadedRef.current = onUploaded;
+  }, [onUploaded]);
+  useEffect(() => {
+    if (!open || !session) return;
+    const stop = startUploadStatusPolling({
+      sessionId: session.sessionId,
+      expiresAt: session.expiresAt,
+      fetchStatus: (id) => getProductImageUploadSessionStatus(id),
+      onPending: (result) => setSecondsLeft(getSecondsLeft(result.expiresAt)),
+      onReconnecting: setReconnecting,
+      onStop: (outcome) => {
+        setReconnecting(null);
+        if (outcome.kind !== "status") {
+          setPhase(outcome.kind === "expired" ? "EXPIRED" : "FAILED");
+          setError(outcome.message);
+          return;
+        }
+        const result = outcome.result;
         setPhase(result.status);
         setSecondsLeft(getSecondsLeft(result.expiresAt));
         if (result.status === "COMPLETED" && result.publicUrl) {
           setUploadedBytes(result.bytes);
           setUploadedUrl(result.publicUrl);
-          onUploaded(result.publicUrl, result.bytes);
+          onUploadedRef.current(result.publicUrl, result.bytes);
         }
-      } catch (e) {
-        if (!active) return;
-        setPhase("FAILED");
-        setError(e instanceof Error ? e.message : "Could not check the upload status.");
-      }
-    };
-
-    const timer = window.setInterval(() => void poll(), 2000);
-    void poll();
+      },
+    });
     return () => {
-      active = false;
-      window.clearInterval(timer);
+      stop();
+      setReconnecting(null);
     };
-  }, [open, onUploaded, phase, session]);
+  }, [open, session]);
 
   const handleClose = () => {
     if (session && phase === "PENDING") {
@@ -218,6 +230,13 @@ export const ProductImagePhoneUploadModal = ({
           {countdown && (
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">
               Link expires in {countdown}.
+            </div>
+          )}
+
+          {phase === "PENDING" && reconnecting && (
+            <div role="status" className="flex items-center gap-2 text-xs text-slate-500">
+              <span className="material-symbols-rounded animate-spin text-sm">progress_activity</span>
+              Connection problem, reconnecting... The phone upload is not affected.
             </div>
           )}
 

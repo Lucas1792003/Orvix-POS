@@ -80,6 +80,15 @@ describe("getPrintableBarcodeValue", () => {
     );
     expect(result).toBeNull();
   });
+
+  it("prints a default-unit barcode stored with the default unit's id (not the SKU)", () => {
+    const result = getPrintableBarcodeValue(
+      { id: "p1", sku: "BEE-001" },
+      [{ ...barcode("p1", "QA-BC-1"), productUnitId: "unit-default" }],
+      unit()
+    );
+    expect(result).toEqual({ value: "QA-BC-1", source: "barcode" });
+  });
 });
 
 describe("clampLabelQty", () => {
