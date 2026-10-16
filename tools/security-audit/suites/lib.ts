@@ -20,6 +20,10 @@ export const SERVICE = env("PHF_ISO_SERVICE_KEY");
 export const DB = env("PHF_ISO_DB");
 if (!DB.startsWith("phf-iso-")) throw new Error("refusing: PHF_ISO_DB is not a phf-iso-* container");
 export const MAX_MIG = Number(env("PHF_ISO_MAX_MIG"));
+/** migrations deliberately NOT applied (e.g. "84" to model production 083 + 085 without 084) */
+export const SKIPPED_MIGS = (process.env.PHF_ISO_SKIP_MIGRATIONS ?? "").split(/[\s,]+/).filter(Boolean).map(Number);
+/** true when migration n is part of the schema under test */
+export const applied = (n: number): boolean => n <= MAX_MIG && !SKIPPED_MIGS.includes(n);
 export const OUT = env("PHF_ISO_OUT");
 
 // ------------------------------------------------------------------ results

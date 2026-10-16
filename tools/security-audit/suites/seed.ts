@@ -7,7 +7,7 @@ import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  adminCreateUser, canaries, http, randomPassword, rpc, SERVICE, signIn, sql, sqlFile, enrollTotp, stepUp, uuid, q, redact, MAX_MIG,
+  adminCreateUser, canaries, http, randomPassword, rpc, SERVICE, signIn, sql, sqlFile, enrollTotp, stepUp, uuid, q, redact, MAX_MIG, applied,
 } from "./lib";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -150,7 +150,7 @@ async function objects(o: Org, adminToken: string) {
     if (r.status >= 300) throw new Error(`upload ${path}: ${r.status} ${redact(r.text).slice(0, 200)}`);
   };
   o.objects.orgProduct = `org/${o.id}/products/${o.products[0]}/front-${o.can}.jpg`;
-  if (MAX_MIG < 84) {
+  if (!applied(84)) {
     await up(o.objects.orgProduct, adminToken);               // as the org's ADMIN (RLS path rule)
   } else {
     // 084: staff cannot write directly any more; the object is written the

@@ -2,7 +2,7 @@
 // move or sign org B's objects (org/<B>/..., legacy temp/ and products/ paths,
 // brand logo). Public-bucket reads are documented as public by design.
 import type { World, Org } from "./seed";
-import { capture, check, gap, http, record, rpc, sql, q, ANON, MAX_MIG, SERVICE } from "./lib";
+import { capture, check, gap, http, record, rpc, sql, q, ANON, MAX_MIG, applied, SERVICE } from "./lib";
 
 const jpeg = () => Buffer.concat([Buffer.from("ffd8ffe000104a464946", "hex"), Buffer.from(Array(48).fill(1)), Buffer.from("ffd9", "hex")]);
 
@@ -144,7 +144,7 @@ async function uploadLimits(w: World) {
     const name = `${base}-ok-${label.replace(/\W+/g, "-")}`;
     const r = await put(name, body, type, multipart);
     capture(`storage g5 ${label}`, r.text);
-    if (MAX_MIG >= 84) {
+    if (applied(84)) {
       // 084: staff have no INSERT/UPDATE policy any more - even a valid image is refused on the direct path
       const stored = rowCount(name) !== "0";
       check("storage", `G5/084 desktop: a staff DIRECT upload of a valid ${label} image is refused (only the validated session flow writes)`,
@@ -263,7 +263,7 @@ async function desktopValidated(w: World) {
     const over = await http("POST", `/storage/v1/object/product-images/${enc(s.path)}`,
       { token: admin, raw: fixtures.polyglot(), headers: { "Content-Type": "image/jpeg", "x-upsert": "true" } });
     const sizeNow = sql(`SELECT metadata->>'size' FROM storage.objects WHERE bucket_id='product-images' AND name=${q(s.path)}`);
-    if (MAX_MIG >= 84) {
+    if (applied(84)) {
       check("storage", `G5/084 desktop: staff cannot overwrite the validated ${label} object with its own JWT (upsert refused, bytes unchanged)`,
         over.status >= 400 && sizeNow === String(body.length), ["storage-policy:product_images_read"], `status ${over.status}, size ${sizeNow}`);
     } else {
@@ -288,7 +288,7 @@ async function desktopValidated(w: World) {
   }
 
   // 084: the direct path is closed for every staff role and every path shape (incl. the own live session path)
-  if (MAX_MIG >= 84) {
+  if (applied(84)) {
     const live = await session(A.products[0]);
     const paths: [string, string][] = [
       ["org product path", `org/${A.id}/products/${A.products[0]}/direct-${A.can}.jpg`],

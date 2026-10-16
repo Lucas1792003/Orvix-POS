@@ -140,6 +140,7 @@ ALTER ROLE postgres WITH LOGIN PASSWORD '%s';\n" "$AUTH_PW" "$AUTH_PW" "$AUTH_PW
   for f in "$REPO"/supabase/migrations/*.sql; do
     n="$(basename "$f" | cut -d_ -f1)"
     case "$n" in ''|*[!0-9]*) continue;; esac
+    case " ${PHF_ISO_SKIP_MIGRATIONS:-} " in *" $((10#$n)) "*|*" $n "*) log "skipping migration $n (PHF_ISO_SKIP_MIGRATIONS)"; continue;; esac
     if [ "$((10#$n))" -gt 61 ] && [ "$((10#$n))" -le "$((10#$MAX_MIG))" ]; then
       pg_psql -f - < "$f" > "$WORK/mig_$n.log" 2>&1 || { tail -20 "$WORK/mig_$n.log"; die "migration $(basename "$f")"; }
       applied="$n"
@@ -150,7 +151,7 @@ ALTER ROLE postgres WITH LOGIN PASSWORD '%s';\n" "$AUTH_PW" "$AUTH_PW" "$AUTH_PW
   su_psql >/dev/null <<SQL || die "migration ledger"
 CREATE SCHEMA IF NOT EXISTS supabase_migrations;
 CREATE TABLE IF NOT EXISTS supabase_migrations.schema_migrations (version text PRIMARY KEY);
-INSERT INTO supabase_migrations.schema_migrations SELECT lpad(g::text, 3, '0') FROM generate_series(1, $((10#$applied))) g ON CONFLICT DO NOTHING;
+INSERT INTO supabase_migrations.schema_migrations SELECT lpad(g::text, 3, '0') FROM generate_series(1, $((10#$applied))) g WHERE NOT (g = ANY ('{${PHF_ISO_SKIP_MIGRATIONS// /,}}'::int[])) ON CONFLICT DO NOTHING;
 SQL
   # 080: trusted public API origin for the completion URL
   su_psql -c "INSERT INTO public.app_config (key, value) SELECT 'supabase_public_url', 'http://127.0.0.1' WHERE to_regclass('public.app_config') IS NOT NULL ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value" >/dev/null 2>&1 || true
