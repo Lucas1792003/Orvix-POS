@@ -33,7 +33,8 @@ import { decryptQueueExport, encryptQueueExport, validatePayload } from "../../l
 import { exportedEntry, recordQueueExport, resetQueueExportRecord, wasExported } from "../../lib/queueExport/exportRecord";
 import { entryDigest } from "../../lib/reconcile/digest";
 import { checkServerRecord } from "../../lib/reconcile/serverCheck";
-import { reconcileBlock, validateResolution } from "../../lib/reconcile/policy";
+import { reconcileBlock, recordConsistencyProblem, validateResolution } from "../../lib/reconcile/policy";
+import type { ReconciliationRecord, ServerCheck } from "../../lib/reconcile/types";
 import type { ServerCheck } from "../../lib/reconcile/types";
 import { buildAppState } from "../../lib/updateGuardBridge";
 import { replayExport, exitCodeFor } from "../../../tools/queue-recovery/replay";
@@ -205,6 +206,28 @@ describe("preconditions: export of this exact entry, fresh server check, documen
     // the store enforces it too: cancelled with a "recorded" check is refused before any owner check
     await expectCode(reconcileOutboxEntry(row.localId, await input(row.localId, { check: rec }), deps()), "invalid");
     expect(auth.calls).toHaveLength(0);
+  });
+
+  it("matched / recreated need an UNAMBIGUOUS server result: an inconclusive check (several plausible sales, an exact match plus candidates, a read error) can never be matched by picking one, nor re-entered", async () => {
+    const row = await putRow();
+    await exportNow();
+    const d = await entryDigest(row);
+    const v = (over: Parameters<typeof validateResolution>[0]) => validateResolution(over, { entryDigest: d, now: NOW.getTime() });
+    const ref = (id: string) => ({ saleId: id, receiptNo: id, shopId: "shop-1", shiftId: "shift-1", createdAt: "2026-10-16T09:00:00Z" });
+    const base = { entryDigest: d, checkedAt: NOW.toISOString(), method: "sale-client-identity" } as const;
+    const twoExact = { ...base, result: "inconclusive", matches: [ref("s1"), ref("s2")], candidates: [], detail: "2 exact" } as unknown as ServerCheck;
+    const exactPlusCandidate = { ...base, result: "inconclusive", matches: [ref("s1")], candidates: [ref("s3")], detail: "1 + 1" } as unknown as ServerCheck;
+    const readError = { ...base, result: "inconclusive", matches: [], candidates: [], detail: "The server could not be read" } as unknown as ServerCheck;
+    const reentered = ref("s9");
+    for (const check of [twoExact, exactPlusCandidate, readError]) {
+      expect(v({ resolution: "matched", check, reason: "valid reason" })).toMatchObject({ ok: false });
+      expect(v({ resolution: "matched", check, matchedSaleId: "s1", reason: "valid reason" })).toMatchObject({ ok: false });
+      expect(v({ resolution: "recreated", check, recreatedSale: reentered, reason: "valid reason" })).toMatchObject({ ok: false });
+      expect(v({ resolution: "cancelled", check, reason: "valid reason" })).toMatchObject({ ok: false });
+    }
+    // a stored record that matched from an ambiguous check is treated as unresolved on load
+    const forged = { v: 1, localId: row.localId, idempotencyKey: row.idempotencyKey, statusBefore: "archived", owner: { userId: "u", role: "ADMIN" }, reason: "valid reason", entryDigest: d, check: exactPlusCandidate, resolution: "matched", serverRef: ref("s1") } as unknown as ReconciliationRecord;
+    expect(recordConsistencyProblem({ ...row, statusBeforeReconcile: "archived" } as unknown as SyncOutboxEntry, forged)).toMatch(/unambiguous/);
   });
 
   it("recreated: links the owner's re-entered sale (verified on the server); the same server sale cannot close two entries", async () => {
