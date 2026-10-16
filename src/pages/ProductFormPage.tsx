@@ -6,7 +6,7 @@ import { z } from "zod";
 import { useAuthStore } from "../stores/authStore";
 import { useAppStore } from "../stores/appStore";
 import { useDataStore } from "../stores/dataStore";
-import type { Brand, ProductBarcode, ProductUnit } from "../types";
+import type { Brand, ProductUnit } from "../types";
 import {
   checkBarcodeAddable,
   findBarcodeOwner,
@@ -38,6 +38,11 @@ import {
   validateProductUnits,
 } from "../features/catalog/productUnits";
 import { getActivePriceLevels } from "../features/pricing/priceLevels";
+import {
+  loadUnitBarcodes,
+  planProductBarcodeSave,
+  type LoadedUnitBarcode,
+} from "../features/catalog/productBarcodeForm";
 import { useTranslation } from "../hooks/useTranslation";
 import { newId } from "../lib/id";
 
@@ -134,7 +139,7 @@ export const ProductFormPage = () => {
   const priceLevels = useDataStore((state) => state.priceLevels);
   const productUnitPrices = useDataStore((state) => state.productUnitPrices);
   const replaceProductUnitPrices = useDataStore((state) => state.replaceProductUnitPrices);
-  const replaceProductBarcodes = useDataStore((state) => state.replaceProductBarcodes);
+  const applyProductBarcodeChanges = useDataStore((state) => state.applyProductBarcodeChanges);
   const addAuditLog = useDataStore((state) => state.addAuditLog);
 
   const editingProduct = useMemo(
@@ -209,6 +214,9 @@ export const ProductFormPage = () => {
   const previousUnitTypeRef = useRef<string>("");
   const [formUnits, setFormUnits] = useState<ProductUnit[]>([]);
   const [unitBarcodes, setUnitBarcodes] = useState<Record<string, string>>({});
+  // Barcode rows the form showed per unit when it was hydrated; the save
+  // diffs against this so untouched barcodes are never deleted or rewritten.
+  const loadedUnitBarcodesRef = useRef<Record<string, LoadedUnitBarcode>>({});
   const [formUnitLevelPrices, setFormUnitLevelPrices] = useState<Record<string, Record<string, string>>>({});
   const [scanUnitId, setScanUnitId] = useState<string | null>(null);
   const [scanModalOpen, setScanModalOpen] = useState(false);
@@ -321,15 +329,12 @@ export const ProductFormPage = () => {
         ? savedUnits
         : [buildInitialUnit(editingProduct.id, editingProduct.unitType, editingProduct.priceMmk, editingProduct.costMmk)];
       setFormUnits(units);
-      setUnitBarcodes(Object.fromEntries(
-        units.map((unit) => {
-          const barcode = barcodes.find((b) =>
-            b.productId === editingProduct.id &&
-            (unit.isDefault ? !b.productUnitId : b.productUnitId === unit.id),
-          );
-          return [unit.id, barcode?.value ?? ""];
-        })
-      ));
+      // A default-unit barcode may be stored with or without the unit id;
+      // show both, and remember what was loaded so the save only writes the
+      // fields the user changed.
+      const loaded = loadUnitBarcodes(editingProduct.id, units, barcodes);
+      loadedUnitBarcodesRef.current = loaded;
+      setUnitBarcodes(Object.fromEntries(Object.entries(loaded).map(([unitId, row]) => [unitId, row.value])));
       const nextLevelPrices: Record<string, Record<string, string>> = {};
       for (const unit of units) {
         const perLevel: Record<string, string> = {};
@@ -381,6 +386,7 @@ export const ProductFormPage = () => {
       setFormUnitLevelPrices({
         [seedUnit.id]: Object.fromEntries(activePriceLevels.map((level) => [level.id, ""])),
       });
+      loadedUnitBarcodesRef.current = {};
       setUnitBarcodes({});
       setSelectedSupplierIds([]);
     }
@@ -720,7 +726,9 @@ export const ProductFormPage = () => {
     setIsSaving(true);
     setProductSaveError(null);
     try {
-      if (editingId) await updateProduct(product, []);
+      // No barcode list: updateProduct must not touch product_barcodes —
+      // the barcode diff below is the only barcode write of this save.
+      if (editingId) await updateProduct(product);
       else await addProduct(product, []);
 
       await replaceProductUnits(productId, nextUnits);
@@ -746,19 +754,14 @@ export const ProductFormPage = () => {
         await replaceProductUnitPrices(unit.id, rows);
       }
 
-      const nextRows: ProductBarcode[] = nextUnits
-        .flatMap((unit): ProductBarcode[] => {
-          const value = normalizeBarcodeValue(unitBarcodes[unit.id] ?? "");
-          if (!value) return [];
-          return [{
-            id: newId("bc"),
-            productId,
-            productUnitId: unit.isDefault ? undefined : unit.id,
-            value,
-            type: "EAN13" as const,
-          }];
-        });
-      await replaceProductBarcodes(productId, nextRows);
+      await applyProductBarcodeChanges(productId, planProductBarcodeSave({
+        productId,
+        units: nextUnits,
+        existing: useDataStore.getState().barcodes,
+        loaded: editingId ? loadedUnitBarcodesRef.current : {},
+        formValues: unitBarcodes,
+        newId: () => newId("bc"),
+      }));
 
       await replaceProductSuppliers(productId, selectedSupplierIds);
 
