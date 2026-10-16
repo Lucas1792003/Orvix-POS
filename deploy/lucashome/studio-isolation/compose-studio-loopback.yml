@@ -1,0 +1,20 @@
+# Studio isolation, compose part 1 of 2 (REQUIRED with the Envoy patch).
+# PREPARED, NOT APPLIED. See docs/selfhost-migration/phase-f/studio-isolation.md.
+#
+# Publishes Studio on the server's loopback only. The operator reaches it with
+#   mac$ ssh -N -L 54323:127.0.0.1:54323 <host>
+#   then http://127.0.0.1:54323 in a browser on the Mac.
+#
+# How to apply: copy the `ports:` entry below into the existing `studio:` block
+# of deploy/lucashome/docker-compose.override.yml (do not add this file to
+# COMPOSE_FILE; .env stays untouched), scp the override to the server, then
+#   docker compose up -d studio
+#
+# Port 54323: free on the server (checked 2026-10-16); 3000 (open-webui) and
+# 3100 (another app) are taken. Studio has no login of its own in the
+# self-hosted image: the basic auth lived in Envoy. Loopback plus SSH is the
+# access control, so never change 127.0.0.1 to 0.0.0.0 or a tailnet address.
+services:
+  studio:
+    ports:
+      - "127.0.0.1:54323:3000/tcp"

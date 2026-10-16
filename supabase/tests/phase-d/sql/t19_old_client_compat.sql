@@ -334,8 +334,13 @@ SELECT test.check('t19/phone: the attached token is still the desktop''s (foreig
 -- unprefixed products/<productId>/<ts>.webp
 SELECT test.login(:'AA') AS zz \gset
 SET ROLE authenticated;
-SELECT test.check('t19/phone: old desktop upload to legacy products/<own product>/x.webp is allowed (own org)',
-  test.can_insert_object('products/prod-t19-old/1790000000000.webp', :'AA'));
+-- 084 (G5 follow-up): direct staff uploads are removed for EVERY client; the
+-- old build must be replaced before 084 (g5-followups.md rollout order)
+SELECT CASE WHEN test.m084()
+  THEN test.check('t19/phone 084: old desktop direct upload to legacy products/<own product>/x.webp is REFUSED (update the till before 084)',
+         NOT test.can_insert_object('products/prod-t19-old/1790000000000.webp', :'AA'))
+  ELSE test.check('t19/phone: old desktop upload to legacy products/<own product>/x.webp is allowed (own org)',
+         test.can_insert_object('products/prod-t19-old/1790000000000.webp', :'AA')) END;
 SELECT test.check('t19/phone: old desktop upload to legacy products/<FOREIGN product>/x.webp is refused',
   NOT test.can_insert_object('products/prod-x1/1790000000000.webp', :'AA'));
 SELECT test.check('t19/phone: a legacy unprefixed temp/<session id> write is refused (the session minted org/... instead)',

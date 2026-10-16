@@ -7,7 +7,7 @@ import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  adminCreateUser, canaries, http, randomPassword, rpc, SERVICE, signIn, sql, sqlFile, enrollTotp, stepUp, uuid, q, redact,
+  adminCreateUser, canaries, http, randomPassword, rpc, SERVICE, signIn, sql, sqlFile, enrollTotp, stepUp, uuid, q, redact, MAX_MIG,
 } from "./lib";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -150,7 +150,14 @@ async function objects(o: Org, adminToken: string) {
     if (r.status >= 300) throw new Error(`upload ${path}: ${r.status} ${redact(r.text).slice(0, 200)}`);
   };
   o.objects.orgProduct = `org/${o.id}/products/${o.products[0]}/front-${o.can}.jpg`;
-  await up(o.objects.orgProduct, adminToken);                 // as the org's ADMIN (RLS path rule)
+  if (MAX_MIG < 84) {
+    await up(o.objects.orgProduct, adminToken);               // as the org's ADMIN (RLS path rule)
+  } else {
+    // 084: staff cannot write directly any more; the object is written the
+    // validated way (service-role signed path) and stamped with its uploader
+    await up(o.objects.orgProduct, SERVICE);
+    sql(`UPDATE storage.objects SET owner = ${q(o.people.admin.authId)}::uuid, owner_id = ${q(o.people.admin.authId)} WHERE bucket_id = 'product-images' AND name = ${q(o.objects.orgProduct)}`);
+  }
   o.objects.legacyProduct = `products/${o.products[1]}/legacy-${o.can}.jpg`;
   o.objects.legacyTemp = `temp/${o.sessions[1].id}`;
   o.objects.brandLogo = `products/brand/${o.p}-logo.jpg`;

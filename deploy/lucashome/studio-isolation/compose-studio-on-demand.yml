@@ -1,0 +1,21 @@
+# Studio isolation, compose part 2 of 2 (OPTIONAL, after part 1 is proven).
+# PREPARED, NOT APPLIED. See docs/selfhost-migration/phase-f/studio-isolation.md §5.4.
+#
+# Studio does not start with the stack; the operator starts it when needed:
+#   ls$ cd /srv/supabase/stack && docker compose --profile studio up -d studio
+#   ls$ docker compose --profile studio stop studio      # when done
+#
+# Upstream api-gw has `depends_on: studio: condition: service_healthy`. With a
+# profile alone, `docker compose up -d` would still pull studio in (or refuse),
+# so the dependency is reset. After the Envoy patch the gateway has no route
+# to Studio, so it does not need Studio to be up.
+#
+# How to apply: merge both blocks into deploy/lucashome/docker-compose.override.yml
+# (the `studio:` block already exists there; add `profiles:` to it), scp, then
+#   docker compose config --quiet && docker compose up -d --wait
+#   docker compose --profile studio stop studio
+services:
+  studio:
+    profiles: ["studio"]
+  api-gw:
+    depends_on: !reset {}

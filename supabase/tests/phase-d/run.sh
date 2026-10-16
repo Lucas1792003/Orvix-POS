@@ -339,6 +339,103 @@ if [ "$((10#$MAX_MIG))" -ge 83 ]; then
 else
   log "skipping t20_upload_limits (migrations capped at $MAX_MIG < 083)"
 fi
+# 084 (G5 follow-up): staff INSERT/UPDATE on product-images removed. Part A
+# (state, every staff write refused, the validated flow end to end; then
+# recent direct-upload-shaped objects), followed by guard cycles on the
+# populated database: 078 re-applied (= production before 084) -> 084 must
+# ABORT on the recent owner'd direct upload without naming it -> nothing
+# changed -> forced apply succeeds -> without the old-client footprint a plain
+# apply succeeds -> 083 missing aborts -> RLS off aborts -> final apply.
+# Then the abandoned-upload sweep's REAL candidate query on fixtures.
+if [ "$((10#$MAX_MIG))" -ge 84 ]; then
+  M078="$REPO/supabase/migrations/078_storage_org_paths.sql"
+  M083="$REPO/supabase/migrations/083_product_images_upload_limits.sql"
+  M084="$REPO/supabase/migrations/084_product_images_validated_writes_only.sql"
+  t21_check() { local n; n="$(printf '%s' "$1" | sed "s/'/''/g")"; su_psql -Atc "SELECT test.check('$n', $2)" | grep -E '^(PASS|FAIL)'; }
+  t21_reapply_078() { pg_psql -f "$M078" > "$WORK/mig_t21_078_$1.log" 2>&1 || { tail -5 "$WORK/mig_t21_078_$1.log"; fail "t21: re-apply 078 ($1)"; }; }
+  # t21_expect_abort TAG EXPECTED-TEXT NAME [PGOPTIONS]
+  t21_expect_abort() {
+    if PGOPTIONS="${4:-}" pg_psql -f "$M084" > "$WORK/mig_t21_084_$1.log" 2>&1; then
+      t21_check "$3" "false"
+    else
+      ok=false; grep -qF "$2" "$WORK/mig_t21_084_$1.log" && ok=true
+      leak=false; grep -qE 't21-|org/org-test' "$WORK/mig_t21_084_$1.log" && leak=true
+      grep -h -E '084:' "$WORK/mig_t21_084_$1.log" | sed 's/^.*ERROR: */INFO aborted as expected: /' | head -2
+      t21_check "$3" "$ok AND NOT $leak"
+    fi
+  }
+  # t21_expect_apply TAG NAME [PGOPTIONS]
+  t21_expect_apply() {
+    if PGOPTIONS="${3:-}" pg_psql -f "$M084" > "$WORK/mig_t21_084_$1.log" 2>&1; then
+      grep -h -E '084:' "$WORK/mig_t21_084_$1.log" | sed 's/^.*NOTICE: */INFO /' | head -2
+      t21_check "$2" "test.m084()"
+    else
+      tail -5 "$WORK/mig_t21_084_$1.log"; t21_check "$2" "false"
+    fi
+  }
+  t21_same_objects() { t21_check "$1" "(SELECT count(*)::text || ':' || md5(coalesce(string_agg(o::text, E'\\n' ORDER BY o.id), '')) FROM storage.objects o) = test.var('t21_objects_a')"; }
+
+  run_sql_test "$SQL/t21_validated_writes_only.sql"
+
+  log "t21 guard 1: 078 re-applied (pre-084 state) + a recent owner'd direct upload -> 084 must abort, naming no object"
+  t21_reapply_078 g1
+  t21_check "t21 guard: after re-applying 078 the staff INSERT/UPDATE policies are back (pre-084 production state)" \
+    "NOT test.m084() AND (SELECT count(*) FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects') = 4"
+  t21_expect_abort g1 "084: 1 product-images object(s) were uploaded directly by a client in the last 14 days" \
+    "t21 guard: 084 aborts on a recent direct upload by a client (count + newest time only; the ownerless migrated object and the 30-day-old upload do not count)"
+  t21_check "t21 guard: the aborted 084 changed nothing (4 policies, no marker)" \
+    "NOT test.m084() AND (SELECT count(*) FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects') = 4"
+  t21_same_objects "t21 guard: the aborted 084 changed no storage.objects row (whole-row digest)"
+
+  log "t21 guard 2: the operator override phf.g5_084_force=on"
+  t21_expect_apply g2 "t21 guard: with phf.g5_084_force=on 084 applies despite the recent direct upload" "-c phf.g5_084_force=on"
+  grep -q 'proceeding because phf.g5_084_force is on' "$WORK/mig_t21_084_g2.log" && t21_check "t21 guard: the forced apply says so (NOTICE)" "true" || t21_check "t21 guard: the forced apply says so (NOTICE)" "false"
+  t21_same_objects "t21 guard: the forced apply changed no storage.objects row"
+
+  log "t21 guard 3: without the old-client footprint (only ownerless migrated + old uploads) a plain apply succeeds"
+  t21_reapply_078 g3
+  su_psql -Atc "DELETE FROM storage.objects WHERE name = 'org/org-test/products/prod-1/t21-recent-direct.webp'" >/dev/null
+  su_psql -Atc "SELECT test.setvar('t21_objects_a', (SELECT count(*)::text || ':' || md5(coalesce(string_agg(o::text, E'\n' ORDER BY o.id), '')) FROM storage.objects o))" >/dev/null
+  t21_expect_apply g3 "t21 guard: 084 applies without override when no owner'd direct upload is younger than 14 days"
+  t21_same_objects "t21 guard: that apply changed no storage.objects row"
+
+  log "t21 guard 4: 083 not applied -> abort; RLS disabled -> abort"
+  t21_reapply_078 g4
+  su_psql -Atc "COMMENT ON FUNCTION public.complete_product_image_upload_session(text,text,text,integer,text) IS NULL" >/dev/null
+  t21_expect_abort g4 "084: migration 083 is not applied" "t21 guard: 084 aborts when 083's validated completion is not in place"
+  pg_psql -f "$M083" > "$WORK/mig_t21_083.log" 2>&1 || { tail -5 "$WORK/mig_t21_083.log"; fail "t21: re-apply 083"; }
+  su_psql -Atc "ALTER TABLE storage.objects DISABLE ROW LEVEL SECURITY" >/dev/null
+  t21_expect_abort g5 "084: row level security is not enabled on storage.objects" "t21 guard: 084 aborts when RLS is off on storage.objects"
+  su_psql -Atc "ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY" >/dev/null
+  t21_check "t21 guard: both aborted applies left the pre-084 policies in place" \
+    "NOT test.m084() AND (SELECT count(*) FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects') = 4"
+  t21_expect_apply g6 "t21 guard: final apply (idempotent re-run) succeeds"
+  t21_expect_apply g7 "t21 guard: and a second re-run is a no-op success"
+  t21_same_objects "t21 guard: storage.objects unchanged across all 084 runs"
+  t21_check "t21 guard: after the cycles exactly product_images_read + product_images_delete remain" \
+    "(SELECT string_agg(policyname, ',' ORDER BY policyname) FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects') = 'product_images_delete,product_images_read'"
+
+  log "t21 sweep: the real candidate query (deploy/lucashome/backup/sweep-abandoned-uploads.sql, grace 24 h) on fixtures"
+  run_sql_test "$SQL/t21_sweep_seed.sql"
+  if su_psql -At -F "$(printf '\t')" -v grace_hours=24 < "$REPO/deploy/lucashome/backup/sweep-abandoned-uploads.sql" > "$WORK/t21_sweep.tsv" 2> "$WORK/t21_sweep.err"; then
+    pg_psql -c "\\copy test.t21_sweep FROM '$WORK/t21_sweep.tsv' (FORMAT text)" >/dev/null || fail "t21 sweep: load"
+    echo "candidate query: $(wc -l < "$WORK/t21_sweep.tsv" | tr -d ' ') row(s)"
+  else
+    cat "$WORK/t21_sweep.err"; fail "t21 sweep: candidate query"
+  fi
+  run_sql_test "$SQL/t21_sweep_check.sql"
+  # the file's transaction is READ ONLY: a write injected right after its BEGIN must be refused
+  python3 -I -c 'import sys; s=open(sys.argv[1]).read(); m="BEGIN TRANSACTION READ ONLY;\n"; assert s.count(m)==1; sys.stdout.write(s.replace(m, m+"INSERT INTO test.vars (k, v) VALUES ($$t21_ro$$, $$x$$);\n"))' \
+    "$REPO/deploy/lucashome/backup/sweep-abandoned-uploads.sql" > "$WORK/t21_ro.sql"
+  if su_psql -At -v grace_hours=24 < "$WORK/t21_ro.sql" > "$WORK/t21_ro.log" 2>&1; then
+    t21_check "t21 sweep: the candidate query runs in a READ ONLY transaction (an injected write is refused)" "false"
+  else
+    t21_check "t21 sweep: the candidate query runs in a READ ONLY transaction (an injected write is refused)" \
+      "$(grep -q 'read-only transaction' "$WORK/t21_ro.log" && echo true || echo false) AND test.var('t21_ro') IS NULL"
+  fi
+else
+  log "skipping t21_validated_writes_only / sweep (migrations capped at $MAX_MIG < 084)"
+fi
 # Concurrent first-time setup (076). MUST RUN LAST: t12_bootstrap_prep
 # empties public.users (TRUNCATE ... CASCADE) to recreate a fresh install in
 # this throwaway database. Two sessions call bootstrap_first_admin(); A holds

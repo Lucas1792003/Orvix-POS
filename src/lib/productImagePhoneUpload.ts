@@ -1,5 +1,5 @@
 import { MAX_PRODUCT_IMAGE_BYTES } from "./compressProductImage";
-import { PRODUCT_IMAGE_BUCKET } from "./productImageStorage";
+import { PRODUCT_IMAGE_BUCKET } from "./productImageBucket";
 import {
   buildPhoneUploadQrUrl,
   PRODUCT_IMAGE_PHONE_UPLOAD_ROUTE,
