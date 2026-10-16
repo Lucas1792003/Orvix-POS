@@ -90,6 +90,16 @@ async function exportQueue(file: string): Promise<void> {
 async function queueOfflineSale(): Promise<OutboxRow> {
   await A.signIn(emails.cashA, pw, "/app/pos");
   await A.waitForApp();
+  // The previous test closed this cashier's shift server-side. Stay online until
+  // the till has refreshed and offers a NEW shift; only then go offline, or the
+  // local cache can still show the old shift as open (test race, not app state).
+  await A.navigate("/app/shifts");
+  await expect.poll(async () => {
+    if (await A.page.locator("#opening-cash").isVisible()) return "ready";
+    await A.reload();
+    await A.page.locator("#opening-cash, #own-shift-closing-cash").first().waitFor({ state: "visible", timeout: 15_000 }).catch(() => {});
+    return (await A.page.locator("#opening-cash").isVisible()) ? "ready" : "stale";
+  }, { timeout: 90_000, intervals: [1_000, 3_000, 5_000] }).toBe("ready");
   await A.setOffline(true);
   await A.openShift(0);
   await A.gotoPos();
