@@ -17,5 +17,5 @@
     "esModuleInterop": true,
     "resolveJsonModule": true
   },
-  "include": ["./**/*.ts", "../playwright.config.ts", "../src/types/electron.d.ts", "../src/live/liveHelpers.ts"]
+  "include": ["./**/*.ts", "../playwright.config.ts", "../src/types/electron.d.ts", "../src/live/liveHelpers.ts", "../src/live/imageFixtures.ts"]
 }

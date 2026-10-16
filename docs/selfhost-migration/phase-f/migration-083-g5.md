@@ -273,10 +273,18 @@ Envoy v1.39.1 = production): **28/28 PASS**. Covered:
 | Envoy rule `deploy/lucashome/tests/envoy-storage-headers-test.sh` | 28/28 |
 | e2e spec D | **not run** (production; needs 083 deployed). Prepared: the function's completion calls go to the `completes` ledger, so existing D cases keep their counts after the deploy. **D-g5-bucket**: bucket values, and anon RPC → permission denied. **D-g5-html-as-jpeg**: HTML and polyglot declared JPEG via the page's own code get PUT 200 → 422, object deleted, PENDING; then a real photo completes and is saved. **D-g5-declared-types**: html/svg/octet-stream PUTs refused, nothing stored. All three `test.skip` unless schema ≥ `083` |
 
-The historic live suites (`src/live/phase-d|g|g2|g3|g4*.live.test.ts`,
-skipped by default) assert the pre-083 contract: anon may call the
-completion RPC. They will fail on those lines after 083. Update them if they
-are ever re-run against a stack at 083.
+The live suites (`src/live/phase-d|g|g2|g3|g4*.live.test.ts`, skipped by
+default) are schema-aware (`src/live/phoneCompletion.ts`): below 083 the
+phone completes with the anon RPC as before; from 083 it completes through
+the function, every suite asserts that anon and authenticated get 42501 from
+the RPC, and the RPC's own path / URL / existence checks run as
+service_role. `phase-g4` adds G5-1..3 (≥ 083 only): real JPEG / WebP up to
+exactly 100 KB complete; disguised HTML (`qa-photo.jpg`, multipart), SVG,
+JPEG+HTML polyglot, a 150 KB JPEG, wrong magic both ways and PNG are stored
+then refused (422, object deleted, PENDING); `text/html`, `image/svg+xml` and
+> 5 MiB are refused by storage; cross-org token / path swaps complete
+nothing. Payloads: `src/live/imageFixtures.ts`, checked against
+`imageCheck.ts` by `imageFixtures.test.ts`.
 
 ## 7. Deploy procedure (owner approval needed for each step)
 

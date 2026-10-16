@@ -11,6 +11,11 @@
 //        must end with the session's own object path; attach rollback fix
 // docs/selfhost-migration/phase-g/upload-security-and-077.md
 //
+// Migration 083 (G5) aware (src/live/phoneCompletion.ts): below 083 the phone
+// completes with the anon RPC; from 083 through phone-upload-token
+// {action:"complete"}, anon / authenticated get 42501 from the RPC (asserted),
+// and the RPC's own path / URL checks are exercised as service_role.
+//
 // Skipped unless LIVE_SUPABASE_URL is set (same env as phase-g.org-isolation).
 // Optional: LIVE_STORAGE_MANIFEST (default
 //   ~/shwephala-migration/20261011T2347Z/storage-manifest.sha256)
@@ -33,14 +38,18 @@ import {
   Evidence, liveConfig, makeClient, randomPassword, runSql, createAuthUser, signedInClient,
   sleep, uuid, type LiveConfig,
 } from "./liveHelpers";
+// 34-byte lossless 1x1 WebP: a real image that passes 083's completion check.
+import { TINY_WEBP } from "./imageFixtures";
+import {
+  completeThroughFunction, completeThroughRpc, describeCompletion, isInactive, isInvalidLink, isNotUploaded,
+  isPermissionDenied, isPost083, phoneCompleter, schemaVersion, type PhoneCompletion,
+} from "./phoneCompletion";
 
 const LIVE = Boolean(process.env.LIVE_SUPABASE_URL);
 vi.setConfig({ testTimeout: 600_000, hookTimeout: 600_000 });
 
 const BUCKET = "product-images";
 const REAL_ORG = "org-shwe-pha-lar";
-// 1x1 lossless WebP (26 bytes): a real image, well under the bucket limits.
-const TINY_WEBP = Buffer.from("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==", "base64");
 const INACTIVE = "Upload link is no longer active";
 const URL_MISMATCH = "Uploaded image URL does not match this upload session";
 const PATH_MISMATCH = "Upload path does not match this session";
@@ -84,6 +93,26 @@ describe.skipIf(!LIVE)("Phase G live checks for 077-079 (self-hosted stack)", ()
   const A = { key: "a" } as Org;
   const B = { key: "b" } as Org;
   let realBefore = "";
+  /** max(schema_migrations.version). From 083 (G5) the phone completes through the function. */
+  let schema = "";
+  const has083 = () => isPost083(schema);
+  let phoneComplete: (s: { token: string; storagePath: string }, rpcOver?: Record<string, unknown>) => Promise<PhoneCompletion>;
+  const completed = (c: PhoneCompletion, what: string): any => {
+    if (!c.ok) throw new Error(`${what} failed: ${describeCompletion(c)}`);
+    return c.data;
+  };
+  /** The completion RPC's argument checks, as the role allowed to call it: anon < 083, service_role (= the function) >= 083. */
+  const rpcCompleter = (): SupabaseClient => (has083() ? svc : anon);
+  /** 083: anon and an org ADMIN get 42501 from the RPC whatever the arguments. */
+  const expectRpcLocked = async (args: Record<string, unknown>): Promise<string> => {
+    const out: string[] = [];
+    for (const [who, c] of [["anon", anon], ["A ADMIN", A.admin]] as const) {
+      const r = await completeThroughRpc(c, args);
+      expect(isPermissionDenied(r), `${who}: ${describeCompletion(r)}`).toBe(true);
+      out.push(`${who} -> ${r.code}`);
+    }
+    return out.join(", ");
+  };
 
   const sql1 = (q: string): string => runSql(cfg, q).trim();
   /** Lines of a multi-statement script that start with `R|` (marker), marker stripped. */
@@ -163,8 +192,9 @@ ROLLBACK;`);
     // 077-079 applied; since 2026-10-13 the stack is at 080 (completion URL
     // derived server-side, object must exist) - test 8 asserts that behaviour.
     expect(sql1(`SELECT string_agg(version, ',' ORDER BY version) FROM supabase_migrations.schema_migrations WHERE version IN ('077','078','079','080');`)).toBe("077,078,079,080");
-    const maxVersion = sql1(`SELECT max(version) FROM supabase_migrations.schema_migrations;`);
-    expect(maxVersion >= "080", `schema ${maxVersion} must be >= 080`).toBe(true);
+    schema = schemaVersion(cfg);
+    expect(schema >= "080", `schema ${schema} must be >= 080`).toBe(true);
+    phoneComplete = phoneCompleter(cfg, anon, has083);
   });
 
   afterAll(async () => {
@@ -515,7 +545,9 @@ SELECT 'R|can_write_new_own_path=' || public.app_storage_can_write_path('org/${R
     expect(up.error, `phone upload: ${up.error?.message}`).toBeNull();
     uploaded.add(s1.storagePath);
     const pubUrl = anon.storage.from(BUCKET).getPublicUrl(g.storagePath).data.publicUrl;
-    const done = ok(await rpc(anon, "complete_product_image_upload_session", completeArgs(s1, { p_public_url: pubUrl })), "complete");
+    // < 083 the phone sends getPublicUrl() to the anon RPC; >= 083 it sends only its token to the function
+    if (has083()) await expectRpcLocked(completeArgs(s1, { p_public_url: pubUrl }));
+    const done = completed(await phoneComplete(s1, { p_public_url: pubUrl }), "complete");
     expect(done).toMatchObject({ sessionId: s1.sessionId, status: "COMPLETED", storagePath: s1.storagePath, publicUrl: pubUrl });
     const r1 = sessRow(s1.sessionId);
     expect(r1).toBe(`COMPLETED|${s1.storagePath}|${pubUrl}|${TINY_WEBP.length}|false`);
@@ -529,7 +561,7 @@ SELECT 'R|can_write_new_own_path=' || public.app_storage_can_write_path('org/${R
     // a completed object cannot be overwritten with the same token (upsert false)
     const again = await anon.storage.from(BUCKET).uploadToSignedUrl(g.storagePath, g.uploadToken, Buffer.from("QA second"), { contentType: "image/webp" });
     expect(again.error).not.toBeNull();
-    notes.push(`legit: create -> ${s1.storagePath}; desktop createSignedUploadUrl ok; attach -> PENDING; anon by_token -> 8 fields, same token/path; anon uploadToSignedUrl ok; complete(getPublicUrl) -> COMPLETED; row status|path|url|bytes|token_kept = ${r1.replace(cfg.url, "<base>")}; object owner = A ADMIN auth uid; public GET 200 sha ok; desktop poll COMPLETED; re-upload with same token -> "${short(again.error!.message, 40)}"`);
+    notes.push(`legit (schema ${schema}): create -> ${s1.storagePath}; desktop createSignedUploadUrl ok; attach -> PENDING; anon by_token -> 8 fields, same token/path; anon uploadToSignedUrl ok; ${has083() ? "anon / A ADMIN RPC -> 42501; function complete" : "anon RPC complete(getPublicUrl)"} -> COMPLETED; row status|path|url|bytes|token_kept = ${r1.replace(cfg.url, "<base>")}; object owner = A ADMIN auth uid; public GET 200 sha ok; desktop poll COMPLETED; re-upload with same token -> "${short(again.error!.message, 40)}"`);
 
     // ---- wrong product / wrong org --------------------------------------------
     const nSess = sql1(`SELECT count(*) FROM product_image_upload_sessions;`);
@@ -550,16 +582,33 @@ SELECT 'R|can_write_new_own_path=' || public.app_storage_can_write_path('org/${R
     // ---- completion with another session's URL / a different path --------------
     const s2 = await create(A);
     const s3 = await create(A);
-    const cUrl = await rpc(anon, "complete_product_image_upload_session", completeArgs(s2, { p_public_url: publicUrl(s3.storagePath) }));
+    // The RPC's own path / URL checks, as its allowed caller (anon < 083, service_role >= 083)
+    const variants = {
+      url: completeArgs(s2, { p_public_url: publicUrl(s3.storagePath) }),
+      urlB: completeArgs(s2, { p_public_url: publicUrl(sB.storagePath) }),
+      path: completeArgs(s2, { p_storage_path: s3.storagePath, p_public_url: publicUrl(s3.storagePath) }),
+      legacy: completeArgs(s2, { p_storage_path: `temp/${s2.sessionId}`, p_public_url: publicUrl(`temp/${s2.sessionId}`) }),
+    };
+    const cUrl = await rpc(rpcCompleter(), "complete_product_image_upload_session", variants.url);
     expect(cUrl.error?.message).toBe(URL_MISMATCH);
-    const cUrlB = await rpc(anon, "complete_product_image_upload_session", completeArgs(s2, { p_public_url: publicUrl(sB.storagePath) }));
+    const cUrlB = await rpc(rpcCompleter(), "complete_product_image_upload_session", variants.urlB);
     expect(cUrlB.error?.message).toBe(URL_MISMATCH);
-    const cPath = await rpc(anon, "complete_product_image_upload_session", completeArgs(s2, { p_storage_path: s3.storagePath, p_public_url: publicUrl(s3.storagePath) }));
+    const cPath = await rpc(rpcCompleter(), "complete_product_image_upload_session", variants.path);
     expect(cPath.error?.message).toBe(PATH_MISMATCH);
-    const cLegacy = await rpc(anon, "complete_product_image_upload_session", completeArgs(s2, { p_storage_path: `temp/${s2.sessionId}`, p_public_url: publicUrl(`temp/${s2.sessionId}`) }));
+    const cLegacy = await rpc(rpcCompleter(), "complete_product_image_upload_session", variants.legacy);
     expect(cLegacy.error?.message).toBe(PATH_MISMATCH);
+    let lockNote = "";
+    if (has083()) {
+      // 083: the phone roles cannot try any of these; the function takes only the token,
+      // derives s2's own path, and (s2 has no object; s3 / B's paths are never read) completes nothing
+      for (const args of Object.values(variants)) await expectRpcLocked(args);
+      const fn = await completeThroughFunction(cfg, s2.token, { p_storage_path: s3.storagePath, p_public_url: publicUrl(sB.storagePath) });
+      expect(isNotUploaded(fn), describeCompletion(fn)).toBe(true);
+      lockNote = `; 083: anon / A ADMIN -> 42501 for all 4; function with s2's token (body naming s3's path, B's URL) -> ${describeCompletion(fn)}`;
+    }
     expect(sessRow(s2.sessionId).startsWith("PENDING|")).toBe(true);
-    notes.push(`complete s2 with s3's URL -> "${cUrl.error.message}"; with B session's URL -> "${cUrlB.error.message}"; with s3's path -> "${cPath.error.message}"; with legacy temp/<s2> -> "${cLegacy.error.message}"; s2 still PENDING`);
+    expect(sessRow(s3.sessionId).startsWith("PENDING|")).toBe(true);
+    notes.push(`complete s2 (RPC as ${has083() ? "service_role" : "anon"}) with s3's URL -> "${cUrl.error.message}"; with B session's URL -> "${cUrlB.error.message}"; with s3's path -> "${cPath.error.message}"; with legacy temp/<s2> -> "${cLegacy.error.message}"${lockNote}; s2, s3 still PENDING`);
 
     // ---- expired ---------------------------------------------------------------
     const s4 = await create(A);
@@ -571,23 +620,26 @@ SELECT 'R|can_write_new_own_path=' || public.app_storage_can_write_path('org/${R
     const sig4b = await st(A.admin).createSignedUploadUrl(s4.storagePath);
     const att4 = await rpc(A.admin, "attach_product_image_upload_session_token", { p_session_id: s4.sessionId, p_signed_upload_token: "qa-g3-new-token" });
     const row4a = sql1(`SELECT status || '|' || (signed_upload_token = '${sig4.data!.token}') FROM product_image_upload_sessions WHERE id = '${s4.sessionId}';`);
-    const c4 = await rpc(anon, "complete_product_image_upload_session", completeArgs(s4));
+    const c4 = await phoneComplete(s4);
     const g4 = ok(await rpc(anon, "get_product_image_upload_session_by_token", { p_token: s4.token }), "by_token s4");
-    const c4b = await rpc(anon, "complete_product_image_upload_session", completeArgs(s4));
+    const c4b = await phoneComplete(s4);
     expect(sig4b.error).not.toBeNull();
     expect(att4.error?.message).toBe(INACTIVE);
     expect(row4a).toBe("PENDING|true"); // 079: the refused attach wrote nothing (old token kept, derivably expired)
-    expect(c4.error?.message).toBe(INACTIVE);
+    expect(isInactive(c4), describeCompletion(c4)).toBe(true);
     expect(g4.status).toBe("EXPIRED");
     expect(g4.uploadToken).toBeNull();
-    expect(c4b.error?.message).toBe(INACTIVE);
+    expect(isInactive(c4b), describeCompletion(c4b)).toBe(true);
     // residual (documented 2c): the token issued while live can still write its one object until its exp
     const late = await anon.storage.from(BUCKET).uploadToSignedUrl(s4.storagePath, sig4.data!.token, TINY_WEBP, { contentType: "image/webp" });
     if (!late.error) uploaded.add(s4.storagePath);
-    const c4c = await rpc(anon, "complete_product_image_upload_session", completeArgs(s4));
-    expect(c4c.error?.message).toBe(INACTIVE);
+    const c4c = await phoneComplete(s4);
+    expect(isInactive(c4c), describeCompletion(c4c)).toBe(true);
+    const r4 = await rpc(rpcCompleter(), "complete_product_image_upload_session", completeArgs(s4));
+    expect(r4.error?.message).toBe(INACTIVE);
+    if (has083()) await expectRpcLocked(completeArgs(s4));
     expect(sql1(`SELECT status FROM product_image_upload_sessions WHERE id = '${s4.sessionId}';`)).toBe("EXPIRED");
-    notes.push(`expired s4: new createSignedUploadUrl -> "${short(sig4b.error!.message, 50)}"; attach -> "${att4.error.message}", row status|old token kept = ${row4a} (no write); complete -> "${c4.error.message}"; by_token -> ${g4.status}, uploadToken=${g4.uploadToken}; complete again -> rejected; residual: upload with the token issued BEFORE expiry -> ${late.error ? `rejected "${short(late.error.message, 40)}"` : "ACCEPTED (stateless JWT within its 60 s; object never attached)"}; complete after that -> "${c4c.error.message}"`);
+    notes.push(`expired s4: new createSignedUploadUrl -> "${short(sig4b.error!.message, 50)}"; attach -> "${att4.error.message}", row status|old token kept = ${row4a} (no write); phone complete -> ${describeCompletion(c4)}; by_token -> ${g4.status}, uploadToken=${g4.uploadToken}; complete again -> rejected; residual: upload with the token issued BEFORE expiry -> ${late.error ? `rejected "${short(late.error.message, 40)}"` : "ACCEPTED (stateless JWT within its 60 s; object never attached)"}; phone complete after that -> ${describeCompletion(c4c)}; RPC (${has083() ? "service_role; anon / A ADMIN -> 42501" : "anon"}) -> "${r4.error.message}"`);
 
     // ---- cancelled ---------------------------------------------------------------
     const s5 = await create(A);
@@ -597,15 +649,16 @@ SELECT 'R|can_write_new_own_path=' || public.app_storage_can_write_path('org/${R
     const sig5b = await st(A.admin).createSignedUploadUrl(s5.storagePath);
     const att5 = await rpc(A.admin, "attach_product_image_upload_session_token", { p_session_id: s5.sessionId, p_signed_upload_token: "qa-g3-new-token" });
     const g5 = ok(await rpc(anon, "get_product_image_upload_session_by_token", { p_token: s5.token }), "by_token s5");
-    const c5 = await rpc(anon, "complete_product_image_upload_session", completeArgs(s5));
+    const c5 = await phoneComplete(s5);
     expect(sig5b.error).not.toBeNull();
     expect(att5.error?.message).toBe(INACTIVE);
     expect(g5.status).toBe("CANCELED");
     expect(g5.uploadToken).toBeNull();
-    expect(c5.error?.message).toBe(INACTIVE);
+    expect(isInactive(c5), describeCompletion(c5)).toBe(true);
+    if (has083()) await expectRpcLocked(completeArgs(s5));
     const row5 = sql1(`SELECT status || '|' || COALESCE(signed_upload_token, '<null>') || '|' || COALESCE(public_url, '<null>') FROM product_image_upload_sessions WHERE id = '${s5.sessionId}';`);
     expect(row5).toBe("CANCELED|<null>|<null>");
-    notes.push(`cancelled s5: createSignedUploadUrl -> "${short(sig5b.error!.message, 50)}"; attach -> "${att5.error.message}"; by_token -> ${g5.status}, uploadToken=${g5.uploadToken}; complete -> "${c5.error.message}"; row ${row5}`);
+    notes.push(`cancelled s5: createSignedUploadUrl -> "${short(sig5b.error!.message, 50)}"; attach -> "${att5.error.message}"; by_token -> ${g5.status}, uploadToken=${g5.uploadToken}; phone complete -> ${describeCompletion(c5)}; row ${row5}`);
     ev.pass("6 phone upload flow", notes.join(" || "));
   });
 
@@ -637,7 +690,7 @@ SELECT 'R|can_write_new_own_path=' || public.app_storage_can_write_path('org/${R
     const tIn = Math.round((Date.now() - t0) / 1000);
     if (inWin.status === 200) uploaded.add(sa.storagePath);
     expect(inWin.status).toBe(200);
-    ok(await rpc(anon, "complete_product_image_upload_session", { p_token: sa.token, p_storage_path: sa.storagePath, p_public_url: publicUrl(sa.storagePath), p_bytes: TINY_WEBP.length, p_mime_type: "image/webp" }), "complete a");
+    completed(await phoneComplete(sa), "complete a");
     notes.push(`upload with token a at t+${tIn} s -> HTTP ${inWin.status}; completed`);
     // b: after 65 s
     await sleep(Math.max(0, t0 + 65_000 - Date.now()));
@@ -657,7 +710,7 @@ SELECT 'R|can_write_new_own_path=' || public.app_storage_can_write_path('org/${R
     const fresh = await anon.storage.from(BUCKET).uploadToSignedUrl(gb.storagePath, gb.uploadToken, TINY_WEBP, { contentType: "image/webp" });
     expect(fresh.error).toBeNull();
     uploaded.add(sb.storagePath);
-    const cb = ok(await rpc(anon, "complete_product_image_upload_session", { p_token: sb.token, p_storage_path: sb.storagePath, p_public_url: publicUrl(sb.storagePath), p_bytes: TINY_WEBP.length, p_mime_type: "image/webp" }), "complete b");
+    const cb = completed(await phoneComplete(sb), "complete b");
     expect(cb.status).toBe("COMPLETED");
     notes.push(`same PENDING session b: desktop createSignedUploadUrl again + attach (2nd token accepted) -> by_token returns the NEW token; phone upload with it -> ok; complete -> ${cb.status}`);
     ev.add("7 signed token lifetime", "PASS", `MEASURED EXPIRY: ${lifetime} s (JWT exp-iat), bracketed live: ok at t+${tIn} s, rejected at t+${tLate} s || ${notes.join(" || ")}`);
@@ -672,14 +725,21 @@ SELECT 'R|can_write_new_own_path=' || public.app_storage_can_write_path('org/${R
     const s = ok(await rpc(A.admin, "create_product_image_upload_session", { p_shop_id: A.shop, p_product_id: A.prod }), "session");
     const foreign = `https://example.invalid/storage/v1/object/public/${BUCKET}/${s.storagePath}`;
     const args = { p_token: s.token, p_storage_path: s.storagePath, p_public_url: foreign, p_bytes: TINY_WEBP.length, p_mime_type: "image/webp" };
-    const r0 = await rpc(anon, "complete_product_image_upload_session", args);
+    // the RPC as its allowed caller: anon < 083; service_role (= the function) >= 083, when
+    // the phone roles cannot send a URL at all
+    const locked = has083() ? await expectRpcLocked(args) : "";
+    const r0 = await rpc(rpcCompleter(), "complete_product_image_upload_session", args);
     expect(r0.error?.message).toBe("Uploaded image was not found in storage");
+    if (has083()) {
+      const f0 = await completeThroughFunction(cfg, s.token, { p_public_url: foreign, publicUrl: foreign });
+      expect(isNotUploaded(f0), describeCompletion(f0)).toBe(true);
+    }
     expect(sql1(`SELECT status || '|' || COALESCE(public_url, '<null>') FROM product_image_upload_sessions WHERE id = '${s.sessionId}';`)).toBe("PENDING|<null>");
     const up = await svc.storage.from(BUCKET).upload(s.storagePath, TINY_WEBP, { contentType: "image/webp" });
     expect(up.error, `upload: ${up.error?.message}`).toBeNull();
     uploaded.add(s.storagePath);
-    const r = await rpc(anon, "complete_product_image_upload_session", args);
-    const derived = `${trusted}/storage/v1/object/public/${BUCKET}/${s.storagePath}`;
+    const r = await rpc(rpcCompleter(), "complete_product_image_upload_session", args);
+    const derived =`${trusted}/storage/v1/object/public/${BUCKET}/${s.storagePath}`;
     expect(r.error).toBeNull();
     expect(r.data.status).toBe("COMPLETED");
     expect(r.data.publicUrl).toBe(derived);
@@ -691,14 +751,15 @@ SELECT 'R|can_write_new_own_path=' || public.app_storage_can_write_path('org/${R
     expect(byToken.publicUrl).toBe(derived);
     expect(sql1(`SELECT count(*) FROM product_image_upload_sessions WHERE id = '${s.sessionId}' AND to_jsonb(product_image_upload_sessions)::text LIKE '%example.invalid%';`)).toBe("0");
     expect(trusted).toBe(cfg.url);
-    ev.pass("8 080: foreign host ignored", `complete with https://example.invalid/<exact session path> before the upload -> "${r0.error.message}", row PENDING|<null>; after the object exists -> COMPLETED; returned / stored / desktop poll / by_token publicUrl = <app_config origin>/storage/v1/object/public/${BUCKET}/<session path> (x4); "example.invalid" nowhere in the row`);
+    ev.pass("8 080: foreign host ignored", `schema ${schema}; RPC as ${has083() ? `service_role (083; ${locked}; the function, given the foreign URL in its body, -> 409 not_uploaded before the upload)` : "anon"}; complete with https://example.invalid/<exact session path> before the upload -> "${r0.error.message}", row PENDING|<null>; after the object exists -> COMPLETED; returned / stored / desktop poll / by_token publicUrl = <app_config origin>/storage/v1/object/public/${BUCKET}/<session path> (x4); "example.invalid" nowhere in the row`);
   });
 
   // =========================================================================
-  it("9. anonymous surface: exactly the three anon functions; wrong token rejected; only the documented fields", async () => {
+  it("9. anonymous surface: exactly the anon functions (three < 083, two >= 083); wrong token rejected; only the documented fields", async () => {
     const notes: string[] = [];
     const anonFns = sql1(`SELECT string_agg(p.proname, ',' ORDER BY p.proname) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND has_function_privilege('anon', p.oid, 'EXECUTE');`);
-    expect(anonFns).toBe("app_setup_needed,complete_product_image_upload_session,get_product_image_upload_session_by_token");
+    // 083 (G5) revoked the completion RPC from anon: the phone completes through the function
+    expect(anonFns).toBe(has083() ? "app_setup_needed,get_product_image_upload_session_by_token" : "app_setup_needed,complete_product_image_upload_session,get_product_image_upload_session_by_token");
     notes.push(`anon EXECUTE (pg_proc, public) = ${anonFns}`);
     const calls: [string, Record<string, unknown>][] = [
       ["create_product_image_upload_session", { p_shop_id: A.shop, p_product_id: A.prod }],
@@ -728,11 +789,19 @@ SELECT 'R|can_write_new_own_path=' || public.app_storage_can_write_path('org/${R
       const r = await rpc(anon, "get_product_image_upload_session_by_token", { p_token: t });
       expect(r.error?.message).toBe("Invalid upload link");
       expect(r.data).toBeNull();
-      const c = await rpc(anon, "complete_product_image_upload_session", { p_token: t, p_storage_path: s.storagePath, p_public_url: publicUrl(s.storagePath), p_bytes: 26, p_mime_type: "image/webp" });
-      expect(c.error?.message).toBe("Invalid upload link");
+      const args = { p_token: t, p_storage_path: s.storagePath, p_public_url: publicUrl(s.storagePath), p_bytes: TINY_WEBP.length, p_mime_type: "image/webp" };
+      // the phone's completion on this schema; 083: also the RPC is closed to anon before any token check
+      const c = await phoneComplete({ token: t, storagePath: s.storagePath });
+      expect(isInvalidLink(c), describeCompletion(c)).toBe(true);
+      if (has083()) {
+        const direct = await completeThroughRpc(anon, args);
+        expect(isPermissionDenied(direct), describeCompletion(direct)).toBe(true);
+        const asSvc = await rpc(svc, "complete_product_image_upload_session", args);
+        expect(asSvc.error?.message).toBe("Invalid upload link");
+      }
     }
     expect(sql1(`SELECT status FROM product_image_upload_sessions WHERE id = '${s.sessionId}';`)).toBe("PENDING");
-    notes.push(`by_token / complete with random 128-hex, one-char-off token, short, stored hash, session id -> "Invalid upload link" x5 each; session still PENDING`);
+    notes.push(`by_token with random 128-hex, one-char-off token, short, stored hash, session id -> "Invalid upload link" x5; phone completion -> ${has083() ? "function 404 invalid x5 (anon RPC -> 42501, service_role RPC -> \"Invalid upload link\")" : "anon RPC \"Invalid upload link\" x5"}; session still PENDING`);
     const g = ok(await rpc(anon, "get_product_image_upload_session_by_token", { p_token: s.token }), "by_token");
     const keys = Object.keys(g).sort().join(",");
     expect(keys).toBe(PHONE_FIELDS);

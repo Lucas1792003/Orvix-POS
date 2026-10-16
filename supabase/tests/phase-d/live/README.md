@@ -87,8 +87,12 @@ before and after a run.
 ## Notes on the environment
 
 - 30 RPCs take a required trailing `p_idempotency_key uuid`; anon can execute
-  exactly `get_product_image_upload_session_by_token` and
-  `complete_product_image_upload_session`.
+  exactly `get_product_image_upload_session_by_token` and (below migration
+  083) `complete_product_image_upload_session`. From 083 the completion RPC is
+  service_role only and the phone completes through
+  `POST /functions/v1/phone-upload-token {token, action:"complete"}`; the live
+  suites pick the path from the schema version (`src/live/phoneCompletion.ts`)
+  and upload real images (`src/live/imageFixtures.ts`).
 - Realtime: a channel's `SUBSCRIBED` status only acknowledges the join; the
   `postgres_changes` subscription is active after the channel's `system`
   message `{extension: "postgres_changes", status: "ok"}` — the test waits for
