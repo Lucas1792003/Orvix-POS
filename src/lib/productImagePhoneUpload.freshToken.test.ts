@@ -81,6 +81,14 @@ describe("createPhoneProductImageUploadSession (desktop)", () => {
     expect(s).not.toHaveProperty("uploadToken");
   });
 
+  it("refuses with a clear message and creates NO session when the phone page origin is not secure", async () => {
+    await expect(createPhoneProductImageUploadSession({ productId: "p1", origin: "http://192.168.1.5:4173" })).rejects.toThrow(
+      /Phone upload is not available in this build/,
+    );
+    await expect(createPhoneProductImageUploadSession({ productId: "p1", origin: "null" })).rejects.toThrow(/https/);
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
   it("no longer exports the desktop refresh / attach helpers", () => {
     expect(lib).not.toHaveProperty("issueSignedUploadToken");
     expect(lib).not.toHaveProperty("SIGNED_UPLOAD_TOKEN_REFRESH_MS");

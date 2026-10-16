@@ -8,6 +8,11 @@ stack, with the function itself running in a disposable local
 the self-hosted stack was changed: no container, no config, no migration, no file under
 `volumes/functions`. Nothing is committed. Deploying needs owner approval (§7).
 
+**Follow-up (2026-10-13):** packaged Electron builds put a `file://` URL in
+the QR. Since then the till's QR opens the `phone-upload-page` function on the
+API origin, which drives this same token flow. See
+[`../phase-f/phone-qr-origin.md`](../phase-f/phone-qr-origin.md).
+
 Fixes the defect in the self-host risk register (private ops notes)
 ("Phone-upload signed URLs live only 60 s"): with the token minted once when
 the desktop shows the QR, any phone upload sent more than 60 s later failed
