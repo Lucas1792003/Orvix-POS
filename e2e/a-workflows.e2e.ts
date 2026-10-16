@@ -148,6 +148,20 @@ test("A2 manager and cashier permissions: routes/nav gated, forbidden RPCs refus
     `manager nav=[${mgrNav.join("|")}] (no Users); /app/admin/users -> ${"/app/pos"}; create_app_user as manager -> HTTP ${mgrCreate.status} "${mgrCreate.body?.message}", users row absent; cashier nav=[${cashNav.join("|")}] (no Purchases); /app/purchases -> /app/pos; Inventory page has 0 Adjust buttons; adjust_stock as cashier -> HTTP ${cashAdjust.status} "${cashAdjust.body?.message}", stock unchanged (${q0}), 0 movements`);
 });
 
+/** A receipt number is the next one of its shop/day bucket. Numbers restart
+ *  at 0001 each receipt day, so "all of the shop's sales + 1" is wrong when
+ *  the run crosses the day boundary with sales on both sides (seen
+ *  2026-10-15 in the reverse-order run: F/C/B sold before 00:00 UTC, A after).
+ *  With `prev` from the same bucket, it must also directly follow it. */
+async function expectNextInDayBucket(receiptNo: string, prev?: string): Promise<void> {
+  const m = receiptNo.match(new RegExp(`^${ids.shopCode}-(\\d{8})-(\\d{4})$`));
+  expect(m, `receipt ${receiptNo}`).toBeTruthy();
+  const bucket = `${ids.shopCode}-${m![1]}-`;
+  const inBucket = await rows("sales", { shop_id: ids.shop }, (q: any) => q.like("receipt_no", `${bucket}%`));
+  expect(Number(m![2]), `receipt ${receiptNo} is the newest of ${inBucket.length} in its day bucket`).toBe(inBucket.length);
+  if (prev?.startsWith(bucket)) expect(Number(m![2])).toBe(Number(prev.slice(-4)) + 1);
+}
+
 test("A3 cashier: open shift, barcode scan (F4), checkout (F2), receipt + print path (F3) with no printer", async () => {
   await A.openShift(0);
   const shift = await row("shifts", { cashier_id: ids.cashA, ended_at: null });
@@ -165,10 +179,9 @@ test("A3 cashier: open shift, barcode scan (F4), checkout (F2), receipt + print 
   await A.toast("Added QA Product One - pcs");
   await expect(A.page.locator("text=1 item")).toBeVisible();
 
-  const seqBefore = await count("sales", { shop_id: ids.shop });
   const shiftSalesBefore = await count("sales", { shift_id: shift.id });
   const { receiptNo } = await A.posCheckout(1000);
-  expect(receiptNo).toMatch(new RegExp(`^${ids.shopCode}-\\d{8}-${String(seqBefore + 1).padStart(4, "0")}$`));
+  await expectNextInDayBucket(receiptNo);
   const sale = await row("sales", { receipt_no: receiptNo });
   expect(sale).toMatchObject({ shop_id: ids.shop, shift_id: shift.id, cashier_id: ids.cashA, total_mmk: 1000, paid_mmk: 1000, status: "NORMAL" });
   expect(await count("sale_items", { sale_id: sale.id })).toBe(1);
@@ -195,7 +208,7 @@ test("A3 cashier: open shift, barcode scan (F4), checkout (F2), receipt + print 
   await expect(A.page.locator("text=1 item")).toBeVisible();
   const second = await A.posCheckout(2000, { print: true });
   expect(second.toast).toContain("printing");
-  expect(second.receiptNo).toMatch(new RegExp(`^${ids.shopCode}-\\d{8}-${String(seqBefore + 2).padStart(4, "0")}$`));
+  await expectNextInDayBucket(second.receiptNo, receiptNo);
   // The hidden 80 mm receipt is portaled into <body> for ~500 ms before printing.
   const receiptSeen = await waitFor(async () => {
     const txt = await A.page.locator("body > .print-only-host .receipt").first().textContent().catch(() => null);
