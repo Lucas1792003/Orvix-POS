@@ -13,7 +13,15 @@
 - **Downgrade hits the till's local database version** (1.0.16 bumps Dexie schema; v1.0.15 cannot open it): needs a small code change in the rollback build or clearing app data; a till can only roll back with an empty sync queue.
 - **"After real sales" rollback (tier B in `08-cutover-rollback.md`) is obsolete** — it assumed identical schemas on hosted and lucashome, untrue since 062. Re-plan before full rollout.
 - **Merging to `main` deploys web builds**: `.github/workflows/deploy.yml` publishes GitHub Pages on push to `main` (no Supabase settings); if Vercel auto-deploys `main`, the new client goes live against hosted and fails. Decide before merging.
-- **Phone upload fails after 60 s** with the current client — see [`../lucashome-selfhost/risks.md`](../lucashome-selfhost/risks.md).
+- RESOLVED 2026-10-13 (JIT `phone-upload-token` deployed; branch client fetches a fresh token right before upload) — **Phone upload fails after 60 s** with the current client — see [`../lucashome-selfhost/risks.md`](../lucashome-selfhost/risks.md). Still to be proven on a real phone in the canary (F5: upload after > 60 s).
+
+## Found 2026-10-14 … 2026-10-16
+- **Migration 084 depends on every till being upgraded.** 084 removes staff direct writes to `product-images`; any till still on a pre-validated-upload build then loses image upload. Order: ship 1.0.16 to all tills → confirm builds → 084 ([`../selfhost-migration/phase-f/g5-followups.md`](../selfhost-migration/phase-f/g5-followups.md) §1.3).
+- **No version handshake** — a client cannot tell it is on a wrong or older backend before writing (proposal `app_backend_info()`, [`electron-compatibility.md`](../selfhost-migration/phase-f/electron-compatibility.md) §5; checklist A9, owner decision).
+- **Updater may install while sales are pending** — guard proposed, not built (checklist F3).
+- **Stale local builds** in `release/` are labelled 1.0.15 like the published release and predate every Phase F client fix; set aside before building (F1).
+- **Publication branch lags** — `publish/selfhost-support` was last synced 2026-10-16 04:30 UTC; anything pushed from it today would miss the validated desktop upload and the D300 fix. Re-sync and re-scan before E6.
+- **Repository visibility**: checklist E4 records a sanitized publication branch (0 private identifiers) as the path that avoids pushing the private branch; the owner dashboard steps (Vercel disconnect, branch protection) are still open (E5).
 
 ## Found 2026-10-13 — repository visibility and deploy triggers (release blocker)
 - **The GitHub repo `Lucas1792003/ShwePhaLa` is PUBLIC** (`gh api repos/...` → `visibility: public`, checked 2026-10-13). The local feature branch contains ~60 files naming the tailnet host, its IP, server paths, access procedures and the owner's email (ops docs, evidence, deploy tooling, live tests). **Do not push the branch while the repo is public**: either make the repo private first (owner, GitHub settings) or restructure the branch so ops/evidence material stays out of git. Public `main` today only carries the hosted project ref (also embedded in the shipped app).

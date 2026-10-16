@@ -8,7 +8,10 @@ second factor (authenticator app or emailed code), the UI is fully
 English/Myanmar, the business brand (name + logo) is admin-editable, and
 the complete app supports System / Light / Dark themes. The latest published
 desktop release is **v1.0.15** (2026-08-26, points at hosted Supabase); the
-backend is being moved to a self-hosted Supabase stack on `lucashome` — see
+backend is being moved to a self-hosted Supabase stack on `lucashome`
+(**2026-10-16:** server at schema 085, 1.0.16 not built, no real sales yet;
+remaining blockers in the
+[production-readiness checklist](./selfhost-migration/phase-f/production-readiness-checklist.md)) — see
 [Environments](#environments-ops-record) below and
 [`selfhost-migration/`](./selfhost-migration/MIGRATION-PLAN.md). Document 10
 covers the Windows updater history and stuck-installer recovery.
@@ -48,8 +51,9 @@ Full setup, env, Supabase, and deployment notes:
 | 08 | [Testing & QA](./08-testing-qa.md) | Verifying a change end-to-end before shipping. |
 | 09 | [Roadmap & TODO](./09-roadmap-todo.md) | Picking up open work; tracking what's still outstanding. |
 | 10 | [Offline-First & Desktop — Known Issues & TODO](./10-offline-desktop-known-issues.md) | Touching the sync outbox, local cache, or the Electron wrapper; before trusting offline mode in production. |
-
 | — | [Self-host migration](./selfhost-migration/MIGRATION-PLAN.md) | The hosted → `lucashome` migration: audit, risk register, runbook, gates, per-phase evidence. |
+| — | [Production-readiness checklist](./selfhost-migration/phase-f/production-readiness-checklist.md) | **Start here for what is left** before real trading on the self-hosted backend (owner/state/evidence per item). |
+| — | Phase F design notes ([`selfhost-migration/phase-f/`](./selfhost-migration/phase-f/)) | Security: [org-isolation audit](./selfhost-migration/phase-f/org-isolation-security-audit.md), [082](./selfhost-migration/phase-f/migration-082.md), [083 (G5)](./selfhost-migration/phase-f/migration-083-g5.md), [085 (PNG)](./selfhost-migration/phase-f/migration-085-png.md), [G5 follow-ups / 084](./selfhost-migration/phase-f/g5-followups.md), [staff creation](./selfhost-migration/phase-f/staff-creation.md), [phone QR origin](./selfhost-migration/phase-f/phone-qr-origin.md), [rate limiting](./selfhost-migration/phase-f/rate-limiting.md), [Studio isolation](./selfhost-migration/phase-f/studio-isolation.md). Backups: [email tier](./selfhost-migration/phase-f/email-backup-design.md), [restore from email](./selfhost-migration/phase-f/restore-from-email.md), [owner setup](./selfhost-migration/phase-f/owner-setup-checklist.md), [owner key](./selfhost-migration/phase-f/owner-recovery-key.md). Host/access: [remote access](./selfhost-migration/phase-f/remote-access-architecture.md), [free-tier compliance](./selfhost-migration/phase-f/free-tier-compliance.md), [WireGuard](./selfhost-migration/phase-f/wireguard-feasibility.md), [staged hardening](./selfhost-migration/phase-f/host-hardening-staged.md), [reboot](./selfhost-migration/phase-f/host-reboot-hardening.md), [cost](./selfhost-migration/phase-f/cost-research.md), [Vercel/GitHub](./selfhost-migration/phase-f/vercel-github-controls.md). App/data: [app bug fixes](./selfhost-migration/phase-f/app-bugfixes.md), [Electron compatibility](./selfhost-migration/phase-f/electron-compatibility.md), [queue export](./selfhost-migration/phase-f/queue-export.md), [QA inventory](./selfhost-migration/phase-f/qa-data-inventory.md), [QA cleanup](./selfhost-migration/phase-f/qa-cleanup-manifest.md). |
 
 ## Environments (ops record)
 
@@ -57,9 +61,9 @@ What is live where, how to reach it, what broke, what is open. Each folder has `
 
 | Folder | Environment | Start with |
 |---|---|---|
-| [`lucashome-selfhost/`](lucashome-selfhost/) | Self-hosted Supabase on the home server `lucashome` (`https://lucashome.tail8a86e4.ts.net`, tailnet only). Target backend; schema 073 since 2026-10-12 | [`status.md`](lucashome-selfhost/status.md) |
+| [`lucashome-selfhost/`](lucashome-selfhost/) | Self-hosted Supabase on the home server `lucashome` (`https://lucashome.tail8a86e4.ts.net`, tailnet only). Target backend; schema **085** since 2026-10-16 (084 held back), 6 edge functions, sign-up off, 0 sales, backups on one disk | [`status.md`](lucashome-selfhost/status.md) |
 | [`hosted-supabase/`](hosted-supabase/) | Hosted Supabase project `shwephala` (Free plan, Singapore). Original backend; frozen read-only fallback | [`status.md`](hosted-supabase/status.md) |
-| [`desktop-app/`](desktop-app/) | The Electron POS app: builds, releases, which backend each build talks to, tills | [`status.md`](desktop-app/status.md) |
+| [`desktop-app/`](desktop-app/) | The Electron POS app: builds, releases, which backend each build talks to, tills. Published v1.0.15 (hosted); 1.0.16 not built; canary pending | [`status.md`](desktop-app/status.md) |
 | [`runbooks/`](runbooks/) | Reusable procedures (apply migrations, tests, QA cleanup, backups) — pointers to the scripts | [`runbooks/README.md`](runbooks/README.md) |
 
 | File | Purpose |
@@ -105,8 +109,12 @@ Same two-step routing as `~/Projects/work/docs`.
   `useTranslation`.
 - **`supabase/`** — `schema.sql`, ordered `migrations/`, and Edge
   Functions in `functions/` (`email-sales-report`, `admin-2fa`,
-  `phone-upload-token`, `platform-console`). `rotate-audit-log` and
-  `weekly-sales-report` were removed on 2026-10-13.
+  `phone-upload-token`, `phone-upload-page`, `platform-console`,
+  `staff-admin`). `rotate-audit-log` and `weekly-sales-report` were removed
+  on 2026-10-13.
+- **`deploy/lucashome/`** — self-hosted stack config, migration apply,
+  backups, router/Envoy helpers; **`tools/security-audit/`** — the
+  org-isolation audit; **`e2e/`** — Electron end-to-end suite.
 
 ## Where Did The Old Docs Go?
 

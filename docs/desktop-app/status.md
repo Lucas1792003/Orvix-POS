@@ -1,10 +1,15 @@
 # Desktop app — status
 
+Last updated **2026-10-16**. What still blocks the release: [`../selfhost-migration/phase-f/production-readiness-checklist.md`](../selfhost-migration/phase-f/production-readiness-checklist.md) sections E–F.
+
 | Item | State | How verified |
 |---|---|---|
-| Latest **published** release | v1.0.15 (2026-08-26), points at **hosted** | `gh release view`, 2026-10-11 |
-| Tills | not yet using the app for trading (pre-production); no Tailscale on tills | owner, 2026-10-12 |
-| Code | branch `feature/selfhost-supabase-migration`, 8 local commits on top of `main` `ac2d663`, not pushed | `git log main..HEAD`, 2026-10-12 |
-| Local builds (unpublished) | version still 1.0.15, built 2026-10-12 with `npm run build:electron` (host-pinned to `lucashome.tail8a86e4.ts.net`): macOS arm64 DMG + zip, Windows x64 NSIS installer in `release/` (git-ignored). Unsigned (macOS ad-hoc) | packaged-app smoke launch: boots packaged, shows "Backend: lucashome…", 0 hosted requests |
-| Tests on the branch | `tsc -b` clean; 741 unit tests; Electron E2E 25/25 against lucashome; live two-org suite 12/12 | 2026-10-12 |
+| Latest **published** release | v1.0.15 (2026-08-26), points at **hosted**. **1.0.16 not built, not released** | `gh release view`, 2026-10-11; no release step in any record since |
+| Tills | not yet using the app for trading (pre-production); **no real sales yet** (lucashome: 0 sales); no Tailscale on tills; **real-device canary not done** (checklist F5) | owner, 2026-10-12; lucashome counts 2026-10-16 ([`../lucashome-selfhost/status.md`](../lucashome-selfhost/status.md)) |
+| Code | branch `feature/selfhost-supabase-migration`, **85 commits** on top of `main` `ac2d663` (HEAD `0abe0ad`), not pushed. `package.json` version **still 1.0.15** | `git rev-list --count main..HEAD`, `package.json`, 2026-10-16 |
+| Client changes waiting for 1.0.16 | server-side staff creation (no `auth.signUp`), phone page on the API origin, upload-status poll that survives transient errors, barcode-preserving product save, confirm-before-cancel on the QR modal (D300), **desktop uploads through the validated session flow** (G5 follow-up; prerequisite for migration 084) | [`app-bugfixes.md`](../selfhost-migration/phase-f/app-bugfixes.md), [`g5-followups.md`](../selfhost-migration/phase-f/g5-followups.md) §1 |
+| Publication branch | `publish/selfhost-support` (local only): 16 sanitized commits on `main`, last 2026-10-16 04:30 UTC (`1c7de2e`), unpushed. **Lags the private branch**: it has none of the security-audit tool, 083–085, the validated desktop upload or the D300 fix | `git log publish/selfhost-support`, `git ls-tree`, 2026-10-16; checklist E4 |
+| Local builds (unpublished, stale) | `release/` still holds 1.0.15-labelled builds from 2026-10-12/13 (macOS arm64 DMG + zip, Windows x64 NSIS), host-pinned to `lucashome.tail8a86e4.ts.net`, unsigned. Older than every client change above — set aside before building 1.0.16 (F1) | `ls release/`, 2026-10-16 |
+| Tests on the branch | `tsc -b` clean; vitest **971** (after the D300 fix); phone-modal harness 12/12; Electron e2e **44/44** twice in normal and once in reverse order (2026-10-15/16, cleanup CLEAN each), then after 083: 48 passed, 1 failed on a bug in the test's own SQL (fixed), 1 not run; `g-desktop-upload` 2/2 (+1 skip until 084) | app-bugfixes.md; [G10](../selfhost-migration/evidence/G10/2026-10-16-migration-083-headers.md) |
 | Backend selection | build refuses to start or build when the URL host ≠ `VITE_SUPABASE_EXPECTED_HOST`; backend host shown on login page and sidebar | negative build test with the hosted URL, 2026-10-12 |
+| Compatibility with the server | v1.0.15 (hosted) unaffected by lucashome changes; a 1.0.15-era client against lucashome cannot write (no idempotency keys) and cannot create staff (sign-up off). Old clients keep direct image upload until 084 — which is why 084 waits | [`electron-compatibility.md`](../selfhost-migration/phase-f/electron-compatibility.md), g5-followups.md §1.3 |

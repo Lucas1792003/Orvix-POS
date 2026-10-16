@@ -1,5 +1,11 @@
 # Migration 085: PNG completion, no refused uploads left behind
 
+> **Superseded status, 2026-10-16:** deployed to lucashome — function
+> (§7 A) 07:51 UTC, migration 085 (§7 B) 07:52 UTC; 084 still not applied
+> (ledger 84 rows, max 085). Current state:
+> [`../../lucashome-selfhost/status.md`](../../lucashome-selfhost/status.md).
+> The text below is the pre-deployment design and is kept unchanged.
+
 Status: **prepared, NOT deployed** (2026-10-16). Nothing in this change was
 applied to any server. Production is at 083; 084 is prepared, not deployed.
 085 does not depend on 084.

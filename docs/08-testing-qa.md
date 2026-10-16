@@ -5,11 +5,34 @@ supplier debt + action matrix, barcode lookup, error mapper, etc.). End-
 to-end UI assertions and database-side verification live in checklists.
 
 ```bash
-npm test             # Vitest (currently 49 files / 570 tests passing)
+npm test             # Vitest (971 tests on the self-host branch, 2026-10-16; was 570)
 npx tsc -b           # Type check
 npm run build        # Production build
 npm run lint         # ESLint
 ```
+
+## Self-host branch test suites (2026-10-16)
+
+Which suite answers which question, and the last recorded result. Never
+point an app or probe at hosted; every harness fails on a `*.supabase.co`
+request. Live suites and e2e write QA data to lucashome — run the cleanup
+after each and expect `CLEAN`. Run order before a release and full
+commands: [`runbooks/README.md`](./runbooks/README.md).
+
+| Suite | Command | Runs against | Last result |
+| --- | --- | --- | --- |
+| Unit / flow | `npx vitest run` | Mac | 971 pass (after the D300 fix) |
+| Edge functions (mocked email, no network) | `bash supabase/tests/functions/run.sh` | Mac (Deno) | 81 (G10) |
+| DB harness: migrations, RLS, idempotency, org isolation, 082–085 guards | `bash supabase/tests/phase-d/run.sh` (`POS_TEST_MAX_MIGRATION=NNN` to cap) | Mac, disposable Postgres | 710/0 (G10) |
+| **Org-isolation security audit** (real GoTrue/PostgREST/storage/edge-runtime, two synthetic orgs + attacker/orphan/platform admin, coverage gate) | `tools/security-audit/run.sh [--max-migration NNN]`; production model `PHF_ISO_SKIP_MIGRATIONS=84 … --max-migration 085`; schema parity `PHF_ISO_PARITY_SSH=<alias> … --parity` | Mac, disposable stack (parity = read-only on live) | 083: 446/0/2 low GAP, coverage 120/120, parity PASS ([`org-isolation-security-audit.md`](./selfhost-migration/phase-f/org-isolation-security-audit.md)) |
+| Live API suites (phase-d, phase-f-staff, org-isolation, g2–g4) | `npx vitest run src/live/<suite>.live.test.ts` — [`supabase/tests/phase-d/live/README.md`](../supabase/tests/phase-d/live/README.md) | lucashome (QA data) | after 083: 16/16, 9/9, 12/12, 4/4, 9/9, g4 14/15 (test bug, fixed for 085) |
+| Electron end-to-end | `npm run e2e` (spec D uses the deployed phone page by default), then `npm run e2e:cleanup` — [`e2e/README.md`](../e2e/README.md) | lucashome | 44/44 ×2 normal + ×1 reverse (2026-10-15/16) |
+| Phone QR modal harness | `npm run test:phone-modal` | Mac, headless Chromium + mocked loopback backend | 12/12 |
+| Server helper scripts | `deploy/lucashome/tests/{functions-router,envoy-storage-headers,envoy-studio-isolation}-test.sh` | Mac (Docker) | see the phase-f notes |
+
+Re-run **every** live suite after any migration, not only the targeted one
+(see [`lucashome-selfhost/incidents.md`](./lucashome-selfhost/incidents.md),
+2026-10-16), and run e2e once in reverse order before trusting a green run.
 
 ## Vitest Coverage Today
 
