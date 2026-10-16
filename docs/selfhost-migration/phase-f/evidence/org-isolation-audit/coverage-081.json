@@ -1,0 +1,1382 @@
+{
+ "migration": "081",
+ "totals": {
+  "org_scoped_tables": 30,
+  "storage_policies": 4,
+  "api_functions": 69,
+  "definer_service_role_only": 9,
+  "edge_functions": 6
+ },
+ "required": 119,
+ "mapped": 119,
+ "hard_gaps": 0,
+ "soft_gaps_service_role_only_no_behaviour_test": [],
+ "gate": "PASS",
+ "items": [
+  {
+   "kind": "org-scoped table",
+   "item": "public.audit_logs",
+   "cover": "table:public.audit_logs",
+   "tests": [
+    "tables-0184",
+    "tables-0185",
+    "tables-0186",
+    "tables-0187",
+    "tables-0188",
+    "tables-0189",
+    "tables-0190",
+    "authz-0358"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.brands",
+   "cover": "table:public.brands",
+   "tests": [
+    "tables-0065",
+    "tables-0066",
+    "tables-0067",
+    "tables-0068",
+    "tables-0069",
+    "tables-0070",
+    "tables-0071"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.business_profile",
+   "cover": "table:public.business_profile",
+   "tests": [
+    "tables-0093",
+    "tables-0094",
+    "tables-0095",
+    "tables-0096",
+    "tables-0097",
+    "tables-0098",
+    "tables-0099"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.categories",
+   "cover": "table:public.categories",
+   "tests": [
+    "tables-0058",
+    "tables-0059",
+    "tables-0060",
+    "tables-0061",
+    "tables-0062",
+    "tables-0063",
+    "tables-0064",
+    "tables-0203"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.inventory",
+   "cover": "table:public.inventory",
+   "tests": [
+    "tables-0100",
+    "tables-0101",
+    "tables-0102",
+    "tables-0103",
+    "tables-0104",
+    "tables-0105",
+    "tables-0106"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.inventory_movements",
+   "cover": "table:public.inventory_movements",
+   "tests": [
+    "tables-0107",
+    "tables-0108",
+    "tables-0109",
+    "tables-0110",
+    "tables-0111",
+    "tables-0112",
+    "tables-0113"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.organizations",
+   "cover": "table:public.organizations",
+   "tests": [
+    "authz-0357"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.price_levels",
+   "cover": "table:public.price_levels",
+   "tests": [
+    "tables-0051",
+    "tables-0052",
+    "tables-0053",
+    "tables-0054",
+    "tables-0055",
+    "tables-0056",
+    "tables-0057",
+    "authz-0359"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.price_tiers",
+   "cover": "table:public.price_tiers",
+   "tests": [
+    "tables-0044",
+    "tables-0045",
+    "tables-0046",
+    "tables-0047",
+    "tables-0048",
+    "tables-0049",
+    "tables-0050"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.product_barcodes",
+   "cover": "table:public.product_barcodes",
+   "tests": [
+    "tables-0037",
+    "tables-0038",
+    "tables-0039",
+    "tables-0040",
+    "tables-0041",
+    "tables-0042",
+    "tables-0043"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.product_image_upload_sessions",
+   "cover": "table:public.product_image_upload_sessions",
+   "tests": [
+    "tables-0191",
+    "tables-0192",
+    "tables-0193",
+    "tables-0194",
+    "tables-0195",
+    "tables-0196",
+    "tables-0197"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.product_unit_prices",
+   "cover": "table:public.product_unit_prices",
+   "tests": [
+    "tables-0030",
+    "tables-0031",
+    "tables-0032",
+    "tables-0033",
+    "tables-0034",
+    "tables-0035",
+    "tables-0036"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.product_units",
+   "cover": "table:public.product_units",
+   "tests": [
+    "tables-0023",
+    "tables-0024",
+    "tables-0025",
+    "tables-0026",
+    "tables-0027",
+    "tables-0028",
+    "tables-0029",
+    "tables-0199"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.products",
+   "cover": "table:public.products",
+   "tests": [
+    "tables-0016",
+    "tables-0017",
+    "tables-0018",
+    "tables-0019",
+    "tables-0020",
+    "tables-0021",
+    "tables-0022",
+    "tables-0202",
+    "tables-0204",
+    "tables-0205",
+    "authz-0355"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.purchase_order_items",
+   "cover": "table:public.purchase_order_items",
+   "tests": [
+    "tables-0142",
+    "tables-0143",
+    "tables-0144",
+    "tables-0145",
+    "tables-0146",
+    "tables-0147",
+    "tables-0148"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.purchase_orders",
+   "cover": "table:public.purchase_orders",
+   "tests": [
+    "tables-0135",
+    "tables-0136",
+    "tables-0137",
+    "tables-0138",
+    "tables-0139",
+    "tables-0140",
+    "tables-0141",
+    "tables-0200"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.rbac_assignment_violations",
+   "cover": "table:public.rbac_assignment_violations",
+   "tests": [
+    "helpers-0388"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.refund_void_requests",
+   "cover": "table:public.refund_void_requests",
+   "tests": [
+    "tables-0170",
+    "tables-0171",
+    "tables-0172",
+    "tables-0173",
+    "tables-0174",
+    "tables-0175",
+    "tables-0176"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.reprint_logs",
+   "cover": "table:public.reprint_logs",
+   "tests": [
+    "tables-0177",
+    "tables-0178",
+    "tables-0179",
+    "tables-0180",
+    "tables-0181",
+    "tables-0182",
+    "tables-0183"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.sale_items",
+   "cover": "table:public.sale_items",
+   "tests": [
+    "tables-0128",
+    "tables-0129",
+    "tables-0130",
+    "tables-0131",
+    "tables-0132",
+    "tables-0133",
+    "tables-0134"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.sales",
+   "cover": "table:public.sales",
+   "tests": [
+    "tables-0121",
+    "tables-0122",
+    "tables-0123",
+    "tables-0124",
+    "tables-0125",
+    "tables-0126",
+    "tables-0127",
+    "tables-0198",
+    "tables-0210",
+    "tables-0211",
+    "tables-0213",
+    "authz-0316",
+    "authz-0317",
+    "authz-0318",
+    "authz-0319",
+    "authz-0320",
+    "authz-0321",
+    "authz-0322",
+    "authz-0323",
+    "authz-0324",
+    "authz-0353"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.shifts",
+   "cover": "table:public.shifts",
+   "tests": [
+    "tables-0114",
+    "tables-0115",
+    "tables-0116",
+    "tables-0117",
+    "tables-0118",
+    "tables-0119",
+    "tables-0120"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.shops",
+   "cover": "table:public.shops",
+   "tests": [
+    "tables-0002",
+    "tables-0003",
+    "tables-0004",
+    "tables-0005",
+    "tables-0006",
+    "tables-0007",
+    "tables-0008",
+    "tables-0201",
+    "tables-0206",
+    "tables-0207",
+    "tables-0212",
+    "authz-0356"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.stock_transfer_items",
+   "cover": "table:public.stock_transfer_items",
+   "tests": [
+    "tables-0156",
+    "tables-0157",
+    "tables-0158",
+    "tables-0159",
+    "tables-0160",
+    "tables-0161",
+    "tables-0162"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.stock_transfers",
+   "cover": "table:public.stock_transfers",
+   "tests": [
+    "tables-0149",
+    "tables-0150",
+    "tables-0151",
+    "tables-0152",
+    "tables-0153",
+    "tables-0154",
+    "tables-0155"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.supplier_payments",
+   "cover": "table:public.supplier_payments",
+   "tests": [
+    "tables-0163",
+    "tables-0164",
+    "tables-0165",
+    "tables-0166",
+    "tables-0167",
+    "tables-0168",
+    "tables-0169"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.supplier_products",
+   "cover": "table:public.supplier_products",
+   "tests": [
+    "tables-0086",
+    "tables-0087",
+    "tables-0088",
+    "tables-0089",
+    "tables-0090",
+    "tables-0091",
+    "tables-0092"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.suppliers",
+   "cover": "table:public.suppliers",
+   "tests": [
+    "tables-0079",
+    "tables-0080",
+    "tables-0081",
+    "tables-0082",
+    "tables-0083",
+    "tables-0084",
+    "tables-0085",
+    "tables-0208",
+    "tables-0209",
+    "authz-0360"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.unit_types",
+   "cover": "table:public.unit_types",
+   "tests": [
+    "tables-0072",
+    "tables-0073",
+    "tables-0074",
+    "tables-0075",
+    "tables-0076",
+    "tables-0077",
+    "tables-0078"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "org-scoped table",
+   "item": "public.users",
+   "cover": "table:public.users",
+   "tests": [
+    "tables-0009",
+    "tables-0010",
+    "tables-0011",
+    "tables-0012",
+    "tables-0013",
+    "tables-0014",
+    "tables-0015",
+    "authlink-0314",
+    "authlink-0315",
+    "authz-0354"
+   ],
+   "classification": "org-scoped"
+  },
+  {
+   "kind": "storage policy",
+   "item": "storage.objects:product_images_delete",
+   "cover": "storage-policy:product_images_delete",
+   "tests": [
+    "storage-0258",
+    "storage-0259",
+    "storage-0260",
+    "storage-0261",
+    "storage-0262",
+    "storage-0265"
+   ],
+   "classification": ""
+  },
+  {
+   "kind": "storage policy",
+   "item": "storage.objects:product_images_insert",
+   "cover": "storage-policy:product_images_insert",
+   "tests": [
+    "storage-0253",
+    "storage-0254",
+    "storage-0255",
+    "storage-0256",
+    "storage-0257",
+    "storage-0263",
+    "storage-0265"
+   ],
+   "classification": ""
+  },
+  {
+   "kind": "storage policy",
+   "item": "storage.objects:product_images_read",
+   "cover": "storage-policy:product_images_read",
+   "tests": [
+    "storage-0250",
+    "storage-0251",
+    "storage-0252",
+    "storage-0265",
+    "storage-0266",
+    "storage-0267",
+    "storage-0268",
+    "storage-0269",
+    "authz-0361"
+   ],
+   "classification": ""
+  },
+  {
+   "kind": "storage policy",
+   "item": "storage.objects:product_images_update",
+   "cover": "storage-policy:product_images_update",
+   "tests": [
+    "storage-0253",
+    "storage-0254",
+    "storage-0255",
+    "storage-0256",
+    "storage-0257",
+    "storage-0264",
+    "storage-0265"
+   ],
+   "classification": ""
+  },
+  {
+   "kind": "api function",
+   "item": "public.adjust_stock",
+   "cover": "rpc:public.adjust_stock",
+   "tests": [
+    "rpcs-0217",
+    "rpcs-0245",
+    "authz-0325",
+    "authz-0326",
+    "authz-0327",
+    "authz-0328",
+    "authz-0329",
+    "authz-0330",
+    "authz-0331",
+    "authz-0332",
+    "authz-0333"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.app_can_for_shop",
+   "cover": "rpc:public.app_can_for_shop",
+   "tests": [
+    "helpers-0370",
+    "helpers-0371"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.app_has_perm",
+   "cover": "rpc:public.app_has_perm",
+   "tests": [
+    "helpers-0369"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.app_org_id",
+   "cover": "rpc:public.app_org_id",
+   "tests": [
+    "helpers-0365"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.app_org_shop_ids",
+   "cover": "rpc:public.app_org_shop_ids",
+   "tests": [
+    "helpers-0373"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.app_org_user_ids",
+   "cover": "rpc:public.app_org_user_ids",
+   "tests": [
+    "helpers-0374"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "security-definer (service-role-only)",
+   "item": "public.app_require_org",
+   "cover": "rpc:public.app_require_org",
+   "tests": [
+    "helpers-0391"
+   ],
+   "classification": "service_role-only"
+  },
+  {
+   "kind": "security-definer (service-role-only)",
+   "item": "public.app_require_org_items",
+   "cover": "rpc:public.app_require_org_items",
+   "tests": [
+    "helpers-0392"
+   ],
+   "classification": "service_role-only"
+  },
+  {
+   "kind": "api function",
+   "item": "public.app_role",
+   "cover": "rpc:public.app_role",
+   "tests": [
+    "helpers-0366"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "security-definer (service-role-only)",
+   "item": "public.app_seed_default_price_levels",
+   "cover": "rpc:public.app_seed_default_price_levels",
+   "tests": [
+    "helpers-0393"
+   ],
+   "classification": "service_role-only"
+  },
+  {
+   "kind": "api function",
+   "item": "public.app_setup_needed",
+   "cover": "rpc:public.app_setup_needed",
+   "tests": [
+    "authz-0362"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "public.app_shop_id",
+   "cover": "rpc:public.app_shop_id",
+   "tests": [
+    "helpers-0368"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.app_shop_in_org",
+   "cover": "rpc:public.app_shop_in_org",
+   "tests": [
+    "helpers-0372"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.app_storage_can_write_path",
+   "cover": "rpc:public.app_storage_can_write_path",
+   "tests": [
+    "helpers-0376",
+    "helpers-0377"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.app_storage_object_in_my_org",
+   "cover": "rpc:public.app_storage_object_in_my_org",
+   "tests": [
+    "helpers-0378"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "security-definer (service-role-only)",
+   "item": "public.app_storage_object_org",
+   "cover": "rpc:public.app_storage_object_org",
+   "tests": [
+    "helpers-0394"
+   ],
+   "classification": "service_role-only"
+  },
+  {
+   "kind": "api function",
+   "item": "public.app_storage_owner_in_org",
+   "cover": "rpc:public.app_storage_owner_in_org",
+   "tests": [
+    "helpers-0379"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.app_user_id",
+   "cover": "rpc:public.app_user_id",
+   "tests": [
+    "helpers-0367"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.approve_purchase_order",
+   "cover": "rpc:public.approve_purchase_order",
+   "tests": [
+    "rpcs-0219"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.approve_refund_request",
+   "cover": "rpc:public.approve_refund_request",
+   "tests": [
+    "rpcs-0232"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.approve_stock_transfer",
+   "cover": "rpc:public.approve_stock_transfer",
+   "tests": [
+    "rpcs-0226"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.approve_void_request",
+   "cover": "rpc:public.approve_void_request",
+   "tests": [
+    "rpcs-0234"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.attach_product_image_upload_session_token",
+   "cover": "rpc:public.attach_product_image_upload_session_token",
+   "tests": [
+    "helpers-0386"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.bootstrap_first_admin",
+   "cover": "rpc:public.bootstrap_first_admin",
+   "tests": [
+    "helpers-0387"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.cancel_product_image_upload_session",
+   "cover": "rpc:public.cancel_product_image_upload_session",
+   "tests": [
+    "helpers-0385"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.cancel_purchase_order",
+   "cover": "rpc:public.cancel_purchase_order",
+   "tests": [
+    "rpcs-0220"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.cancel_stock_transfer",
+   "cover": "rpc:public.cancel_stock_transfer",
+   "tests": [
+    "rpcs-0228"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "security-definer (service-role-only)",
+   "item": "public.claim_phone_upload_token_issue",
+   "cover": "rpc:public.claim_phone_upload_token_issue",
+   "tests": [
+    "helpers-0395"
+   ],
+   "classification": "service_role-only"
+  },
+  {
+   "kind": "api function",
+   "item": "public.close_shift",
+   "cover": "rpc:public.close_shift",
+   "tests": [
+    "rpcs-0215"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.complete_product_image_upload_session",
+   "cover": "rpc:public.complete_product_image_upload_session",
+   "tests": [
+    "phone-0278"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "public.complete_sale",
+   "cover": "rpc:public.complete_sale",
+   "tests": [
+    "rpcs-0216",
+    "authz-0363"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "security-definer (service-role-only)",
+   "item": "public.complete_stock_transfer",
+   "cover": "rpc:public.complete_stock_transfer",
+   "tests": [
+    "helpers-0396"
+   ],
+   "classification": "service_role-only"
+  },
+  {
+   "kind": "api function",
+   "item": "public.create_app_user",
+   "cover": "rpc:public.create_app_user",
+   "tests": [
+    "rpcs-0242",
+    "authlink-0311",
+    "authlink-0312",
+    "authlink-0313"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.create_product_image_upload_session",
+   "cover": "rpc:public.create_product_image_upload_session",
+   "tests": [
+    "rpcs-0243",
+    "phone-0271",
+    "phone-0272",
+    "phone-0273"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.create_purchase_order",
+   "cover": "rpc:public.create_purchase_order",
+   "tests": [
+    "rpcs-0218"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.create_refund_void_request",
+   "cover": "rpc:public.create_refund_void_request",
+   "tests": [
+    "rpcs-0231"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.create_stock_transfer",
+   "cover": "rpc:public.create_stock_transfer",
+   "tests": [
+    "rpcs-0225"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.create_supplier",
+   "cover": "rpc:public.create_supplier",
+   "tests": [
+    "rpcs-0246"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.current_app_user",
+   "cover": "rpc:public.current_app_user",
+   "tests": [
+    "authz-0352",
+    "helpers-0375"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.deactivate_app_user",
+   "cover": "rpc:public.deactivate_app_user",
+   "tests": [
+    "rpcs-0240"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.delete_product",
+   "cover": "rpc:public.delete_product",
+   "tests": [
+    "rpcs-0237"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.dispatch_stock_transfer",
+   "cover": "rpc:public.dispatch_stock_transfer",
+   "tests": [
+    "rpcs-0229"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.get_product_image_upload_session_by_token",
+   "cover": "rpc:public.get_product_image_upload_session_by_token",
+   "tests": [
+    "phone-0274",
+    "phone-0275"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "public.get_product_image_upload_session_status",
+   "cover": "rpc:public.get_product_image_upload_session_status",
+   "tests": [
+    "helpers-0384"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "security-definer (service-role-only)",
+   "item": "public.idem_begin",
+   "cover": "rpc:public.idem_begin",
+   "tests": [
+    "helpers-0397"
+   ],
+   "classification": "service_role-only"
+  },
+  {
+   "kind": "security-definer (service-role-only)",
+   "item": "public.idem_finish",
+   "cover": "rpc:public.idem_finish",
+   "tests": [
+    "helpers-0398"
+   ],
+   "classification": "service_role-only"
+  },
+  {
+   "kind": "api function",
+   "item": "public.log_audit_event",
+   "cover": "rpc:public.log_audit_event",
+   "tests": [
+    "rpcs-0236"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.log_receipt_reprint",
+   "cover": "rpc:public.log_receipt_reprint",
+   "tests": [
+    "rpcs-0235"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.open_shift",
+   "cover": "rpc:public.open_shift",
+   "tests": [
+    "rpcs-0214"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.pay_supplier_lump_sum",
+   "cover": "rpc:public.pay_supplier_lump_sum",
+   "tests": [
+    "rpcs-0223"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.product_image_upload_token_hash",
+   "cover": "rpc:public.product_image_upload_token_hash",
+   "tests": [
+    "helpers-0382"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "security-definer (service-role-only)",
+   "item": "public.prune_idempotency_keys",
+   "cover": "rpc:public.prune_idempotency_keys",
+   "tests": [
+    "helpers-0399"
+   ],
+   "classification": "service_role-only"
+  },
+  {
+   "kind": "api function",
+   "item": "public.receive_purchase_order",
+   "cover": "rpc:public.receive_purchase_order",
+   "tests": [
+    "rpcs-0221"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.receive_stock_transfer",
+   "cover": "rpc:public.receive_stock_transfer",
+   "tests": [
+    "rpcs-0230"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.record_supplier_payment",
+   "cover": "rpc:public.record_supplier_payment",
+   "tests": [
+    "rpcs-0222"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.reject_refund_void_request",
+   "cover": "rpc:public.reject_refund_void_request",
+   "tests": [
+    "rpcs-0233"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.reject_stock_transfer",
+   "cover": "rpc:public.reject_stock_transfer",
+   "tests": [
+    "rpcs-0227"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.replace_manager",
+   "cover": "rpc:public.replace_manager",
+   "tests": [
+    "rpcs-0241"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.resolve_event_time",
+   "cover": "rpc:public.resolve_event_time",
+   "tests": [
+    "helpers-0381"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.role_default_permissions",
+   "cover": "rpc:public.role_default_permissions",
+   "tests": [
+    "helpers-0380"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.transfer_json",
+   "cover": "rpc:public.transfer_json",
+   "tests": [
+    "helpers-0383"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.update_app_user",
+   "cover": "rpc:public.update_app_user",
+   "tests": [
+    "rpcs-0239"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.update_supplier",
+   "cover": "rpc:public.update_supplier",
+   "tests": [
+    "rpcs-0238"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "public.void_supplier_payment",
+   "cover": "rpc:public.void_supplier_payment",
+   "tests": [
+    "rpcs-0224"
+   ],
+   "classification": "authenticated"
+  },
+  {
+   "kind": "api function",
+   "item": "storage.allow_any_operation",
+   "cover": "rpc:storage.allow_any_operation",
+   "tests": [
+    "helpers-0400"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "storage.allow_only_operation",
+   "cover": "rpc:storage.allow_only_operation",
+   "tests": [
+    "helpers-0400"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "storage.can_insert_object",
+   "cover": "rpc:storage.can_insert_object",
+   "tests": [
+    "helpers-0400"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "storage.extension",
+   "cover": "rpc:storage.extension",
+   "tests": [
+    "helpers-0400"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "storage.filename",
+   "cover": "rpc:storage.filename",
+   "tests": [
+    "helpers-0400"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "storage.foldername",
+   "cover": "rpc:storage.foldername",
+   "tests": [
+    "helpers-0400"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "storage.get_common_prefix",
+   "cover": "rpc:storage.get_common_prefix",
+   "tests": [
+    "helpers-0400"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "storage.get_size_by_bucket",
+   "cover": "rpc:storage.get_size_by_bucket",
+   "tests": [
+    "helpers-0400"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "storage.list_multipart_uploads_with_delimiter",
+   "cover": "rpc:storage.list_multipart_uploads_with_delimiter",
+   "tests": [
+    "helpers-0400"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "storage.list_objects_with_delimiter",
+   "cover": "rpc:storage.list_objects_with_delimiter",
+   "tests": [
+    "helpers-0400"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "storage.operation",
+   "cover": "rpc:storage.operation",
+   "tests": [
+    "helpers-0400"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "storage.search",
+   "cover": "rpc:storage.search",
+   "tests": [
+    "helpers-0400"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "storage.search_by_timestamp",
+   "cover": "rpc:storage.search_by_timestamp",
+   "tests": [
+    "helpers-0400"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "api function",
+   "item": "storage.search_v2",
+   "cover": "rpc:storage.search_v2",
+   "tests": [
+    "helpers-0400"
+   ],
+   "classification": "anon+auth"
+  },
+  {
+   "kind": "edge function",
+   "item": "admin-2fa",
+   "cover": "edge-fn:admin-2fa",
+   "tests": [
+    "functions-0304",
+    "functions-0305",
+    "functions-0306"
+   ],
+   "classification": ""
+  },
+  {
+   "kind": "edge function",
+   "item": "email-sales-report",
+   "cover": "edge-fn:email-sales-report",
+   "tests": [
+    "functions-0307",
+    "functions-0308",
+    "functions-0309"
+   ],
+   "classification": ""
+  },
+  {
+   "kind": "edge function",
+   "item": "phone-upload-token",
+   "cover": "edge-fn:phone-upload-token",
+   "tests": [
+    "phone-0276",
+    "phone-0277"
+   ],
+   "classification": ""
+  },
+  {
+   "kind": "edge function",
+   "item": "phone-upload-page",
+   "cover": "edge-fn:phone-upload-page",
+   "tests": [
+    "helpers-0389",
+    "helpers-0390"
+   ],
+   "classification": ""
+  },
+  {
+   "kind": "edge function",
+   "item": "platform-console",
+   "cover": "edge-fn:platform-console",
+   "tests": [
+    "functions-0294",
+    "functions-0295",
+    "functions-0296",
+    "functions-0297",
+    "functions-0298",
+    "functions-0299",
+    "functions-0300",
+    "functions-0301",
+    "functions-0302",
+    "functions-0303",
+    "authz-0343",
+    "authz-0344",
+    "authz-0345",
+    "authz-0346",
+    "authz-0347",
+    "authz-0348",
+    "authz-0349",
+    "authz-0350",
+    "authz-0351"
+   ],
+   "classification": ""
+  },
+  {
+   "kind": "edge function",
+   "item": "staff-admin",
+   "cover": "edge-fn:staff-admin",
+   "tests": [
+    "functions-0281",
+    "functions-0282",
+    "functions-0283",
+    "functions-0284",
+    "functions-0285",
+    "functions-0286",
+    "functions-0287",
+    "functions-0288",
+    "functions-0289",
+    "functions-0290",
+    "functions-0291",
+    "functions-0292",
+    "functions-0293",
+    "authz-0334",
+    "authz-0335",
+    "authz-0336",
+    "authz-0337",
+    "authz-0338",
+    "authz-0339",
+    "authz-0340",
+    "authz-0341",
+    "authz-0342",
+    "authz-0364"
+   ],
+   "classification": ""
+  },
+  {
+   "kind": "extra",
+   "item": "edge-fn:signup",
+   "cover": "edge-fn:signup",
+   "tests": [
+    "functions-0310"
+   ],
+   "classification": ""
+  }
+ ]
+}
