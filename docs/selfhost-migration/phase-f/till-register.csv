@@ -1,4 +1,7 @@
-# Till register (PRIVATE). Method: till-readiness-084.md §2. One row per till; never delete a row, set retired=yes.
+# Till register (PRIVATE). Method: till-readiness-084.md §2 (084 columns) and §2.1 (1.0.16 migration columns + the "migrated" rule). One row per till; never delete a row, set retired=yes.
 # user_ref = the "u-<10 hex>" pseudonym printed by deploy/lucashome/verify-till-readiness.sh (never a user id or e-mail).
-# Times in UTC, e.g. 2026-10-20T03:15:00Z.
-till_id,label,shop_id,user_ref,updated_utc,test_utc,retired
+# Times in UTC, e.g. 2026-10-20T03:15:00Z. No commas or line breaks inside a value (or quote the value). Never put a passphrase, token or e-mail here.
+# The first 7 columns are read by verify-till-readiness.sh (by header name); keep their names. The rest are the owner's migration record.
+# till_id = "Till id" exactly as shown on screen (sidebar/login version line, or the queue-export file name). label = till name. updated_utc = date upgraded to 1.0.16.
+# hosted_queue_reconciliation: none | exported+replayed | exported+discarded-by-owner. status: not-started | canary | migrated | blocked.
+till_id,label,shop_id,user_ref,updated_utc,test_utc,retired,shop_name,os,installed_version,pending_before_upgrade_1015,pending_after_first_start_1016,quarantined_count,hosted_queue_reconciliation,reconciliation_export_file,reconciliation_by,reconciliation_utc,reconciliation_evidence,desktop_upload_result,desktop_upload_session_utc,phone_upload_result,phone_upload_utc,last_seen_utc,last_seen_source,status,status_checked_utc,notes
