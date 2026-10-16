@@ -204,7 +204,7 @@ A 1.0.15 till installs 1.0.16 on its next quit after the download, whatever its 
   1. On 1.0.16, sync to **0 pending**. If that is impossible, use **Export pending** and keep the file and its passphrase. Also export quarantined rows.
   2. Close the app. Copy `%APPDATA%\retails-shop` aside (cold copy).
   3. Uninstall, or clear app data, **only after** steps 1–2.
-  4. Install a **fix-forward** build by hand (e.g. 1.0.17 = 1.0.16 with the offending change reverted), pinned to the **self-hosted** backend like 1.0.16. **Owner rule (2026-10-13): a till is never redirected to hosted Supabase**, so no rollback build may contain v1.0.15's hosted pin; the earlier "1.0.17 = v1.0.15 code" idea (canary R7) is withdrawn (coordinator correction 2026-10-16). Before the first real sale on the self-hosted backend, the only situation where a till would go back to hosted is the pre-cutover period, and then only with zero pending entries on 1.0.16 and an owner decision.
+  4. Install a **fix-forward** build by hand (e.g. 1.0.17 = 1.0.16 with the offending change reverted), pinned to the **self-hosted** backend like 1.0.16. **Owner rule (2026-10-13): a till is never redirected to hosted Supabase**, so no rollback build may contain v1.0.15's hosted pin; the earlier "1.0.17 = v1.0.15 code" idea (canary R7) is withdrawn (coordinator correction 2026-10-16).
   5. The owner reconciles the export with `tools/queue-recovery` (`inspect`; replay only to an explicitly named target).
 - After the first real sale on lucashome the rule is **fix forward only** (release-compat §8).
 
