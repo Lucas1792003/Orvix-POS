@@ -271,3 +271,18 @@ Windows installer and real-till behaviour (install over 1.0.15, SmartScreen, `--
 3. The coordinator builds the real artifact (real anon key), records the hashes, and runs the live regression.
 4. Canary F5 on real devices: the version / backend / till id lines; an offline sale, then the updater notice (a local 1.0.17 test installer stays "Waiting" until synced); Export pending; zero `*.supabase.co`.
 5. Decide whether to pre-build a 1.0.17 fix-forward build (self-hosted pin; §5) before the first real sale.
+
+## 7. Release candidate RC1 (coordinator, 2026-10-16 09:44 UTC) — built, NOT published
+Built from commit `b777345` (clean tree) with the real anon key and the self-hosted origin; `npx electron-builder --mac --arm64 --win --x64 --publish never` into `release/rc-1.0.16/` (git-ignored). Unsigned.
+
+| Artifact | sha256 |
+|---|---|
+| `Shwe-Pha-La-POS-Setup-1.0.16.exe` | `b72bf9c38f0d1e922f38fd281c2ffac1fcc0d448d9bf93603a8c8e2c2e17f734` |
+| `Shwe-Pha-La-POS-1.0.16-arm64.dmg` | `447d710969d34256987924159229dda32f76f5229989dba97c6c5017d8bf901c` |
+| `Shwe-Pha-La-POS-1.0.16-x64.dmg` | `2c3bc7e9af33d719a3a8e1340f90796ae6062247744dfb33d47acff50ce1b659` |
+| `Shwe-Pha-La-POS-1.0.16-arm64.zip` | `fe8cbe32ab55232a211e8232469bf1644346cfb48cc14111b7d9f31f69c6add3` |
+| `Shwe-Pha-La-POS-1.0.16-x64.zip` | `bf43e31a5be78824b4102181171ed0e0a542e6bf6cf53cc8134dcd39ec0027ab` |
+
+`latest.yml` / `latest-mac.yml`: version 1.0.16. Bundle: only the self-hosted origin (4 refs), 0 hosted refs, 0 `signUp` refs, 0 service-key matches, `X-Client-Info` + `shwephala-pos` + `validated-uploads` present, version string 1.0.16.
+
+Final regression on RC1 (same commit): tsc clean; vitest 1010; Deno 94; harness 747/0 (capped 083: 672/0); isolation audit modelling production (083+085, 084 skipped) 454/0/2 low with **schema parity PASS**; live suites phase-f-staff 9/9, phase-g4 15+1 skip, phase-d 16/16, org-isolation 12/12, g2 4/4, g3 9/9; e2e **49 passed, 1 skipped** (084-only); cleanup CLEAN; 574/574 images; production fingerprint identical before/after. Till readiness for 084: **NO-GO** (expected: no till on 1.0.16 yet, 3.1 h of gateway log, no register).

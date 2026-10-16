@@ -58,16 +58,16 @@ States: **DONE** (verified, evidence linked) · **READY** (prepared and tested, 
 | E1 | Unit / type checks / function tests / DB harness green | DONE 2026-10-16 (re-run before release) | vitest 972, functions 94, harness 747/0 (capped 083: 672/0), audit at 085 454/0/2 low |
 | E2 | Full e2e suite green in one run | DONE 2026-10-16 08:27 UTC: 49 passed, 1 skipped (084-only), cleanup CLEAN; D300 cause analysed (stray Escape/click), confirm-before-cancel + close diagnostics added | [G11](../evidence/G11/2026-10-16-migration-085-png.md), [app-bugfixes.md](app-bugfixes.md) |
 | E3 | Barcode-loss-on-product-save bug and upload-poll stall fixed | DONE (client-only; ships with 1.0.16) | app-bugfixes.md; 44 new unit tests |
-| E4 | Sanitized publication branch updated with all publishable changes; scans + fresh-clone tests | OPEN — last synced 2026-10-16 ~04:30 UTC; lags the security audit, 082–085 tests, G5 follow-ups, D300 fix; re-sync + re-scan before any push | sync report 2026-10-16 |
+| E4 | Sanitized publication branch re-synced; full scan (incl. gitleaks) + fresh-clone tests | DONE 2026-10-16 (publish tip `ae046b6`, unpushed; 0 private identifiers in new commits; gitleaks 7 false positives in older commits; 0 private commits reachable; clone: vitest 1010, Deno 94, harness 740/0 without the private sweep query, 747/0 with it) | sync report |
 | E5 | Vercel Git integration disconnected; GitHub Pages workflow absent on the publication branch; main branch protection | OWNER (dashboards) | [vercel-github-controls.md](vercel-github-controls.md) |
 | E6 | Push branch / PR / merge (as Lucas1792003) | approval | release-checklist Phase 4 |
 
 ## F. Desktop release and real-device canary
 | # | Item | State | Evidence |
 |---|---|---|---|
-| F1 | Version bump to 1.0.16; remove/set aside the stale local `release/` builds that also say 1.0.15 | OPEN | electron-compatibility.md |
-| F2 | Build with `build:electron` (guard: https backend + phone origin), `--publish never`; bundle checks (host pin, no hosted ref, no signUp, no service key) | READY | electron-compatibility.md |
-| F3 | Updater guard: don't install an update while sales are pending (proposed) | OPEN — decision | electron-compatibility.md |
+| F1 | Version 1.0.16; stale local builds set aside | DONE 2026-10-16 (moved to `ShwePhaLa-stale-builds/2026-10-16-pre-1.0.16-release/`) | [release-1.0.16.md](../../desktop-app/release-1.0.16.md) |
+| F2 | RC1 built (`--publish never`) with bundle checks and full regression | DONE 2026-10-16 09:44 UTC, commit `b777345` | release-1.0.16.md §7 |
+| F3 | Updater guard + outbox origin tagging/quarantine (1.0.15 entries never sent to the new backend) | DONE in RC1 | release-1.0.16.md, electron-compatibility.md §8 |
 | F4 | Windows SmartScreen / unsigned installer accepted ($0; no code-signing cert) | OWNER | cost-research.md |
 | F5 | **Real-device canary** on one till per shop + one phone each, 8 checks: backend label + version; owner TOTP login + create/deactivate a CASHIER; staff-admin "not installed" message (dev build only); phone upload via QR after > 60 s; offline sale → restart → Export pending → reconnect drains once; pending entry survives a local 1.0.17 test installer; v1.0.15 machine sees "no update"; zero `*.supabase.co` requests | OPEN — after A6, C-decision, F1–F4 | electron-compatibility.md §canary |
 | F6 | No real shop sales until F5 passes on both shops and B7 is live | rule | owner instruction |
