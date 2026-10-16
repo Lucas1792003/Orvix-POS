@@ -12,6 +12,8 @@
 // collect.test.ts (queue byte-identical before/after; drain still works).
 // ----------------------------------------------------------------------
 import type { LocalDb, SyncOutboxEntry } from "../localDb";
+import { RECONCILE_LOG_PREFIX } from "../reconcile/constants";
+import { entryDigest } from "../reconcile/digest";
 import {
   QUEUE_EXPORT_FORMAT, QUEUE_EXPORT_FORMAT_VERSION, inQueueOrder, redactSecrets, summarize,
   type QueueExportEntry, type QueueExportPayload, type QueueExportSummary,
@@ -57,16 +59,59 @@ function toEntry(row: StoredRow, counter: { n: number }): QueueExportEntry {
     archivedBy: row.archivedBy ?? null,
     archiveReason: row.archiveReason ?? null,
     statusBeforeArchive: row.statusBeforeArchive ?? null,
+    statusBeforeReconcile: row.statusBeforeReconcile ?? null,
+    reconciliation: row.reconciliation ? redactSecrets(JSON.parse(JSON.stringify(row.reconciliation)), counter) : null,
+    reconcileRejected: row.reconcileRejected
+      ? { detectedAt: row.reconcileRejected.detectedAt, reason: row.reconcileRejected.reason, record: JSON.parse(JSON.stringify(row.reconcileRejected.record ?? null)) }
+      : null,
   };
 }
 
+export interface QueueExportSnapshot {
+  payload: QueueExportPayload;
+  /** entryDigest (lib/reconcile/digest.ts) of every exported row, computed
+   *  from the very rows of this snapshot — recorded per entry once the file
+   *  is saved, so a reconciliation can prove the file holds this version. */
+  digests: { opId: string; digest: string }[];
+}
+
 /** Snapshot of everything not yet on the server (every outbox row, any
- *  status), in queue order, plus the id map needed to resolve `refs`. */
-export async function collectQueueExport(db: LocalDb, ctx: QueueExportContext): Promise<QueueExportPayload> {
-  const [rows, idMap] = await db.transaction("r", db.syncOutbox, db.provisionalIdMap, async () => [
+ *  status), in queue order, plus the id map needed to resolve `refs` and
+ *  (RC3) the local reconciliation log. */
+export async function collectQueueExportSnapshot(db: LocalDb, ctx: QueueExportContext): Promise<QueueExportSnapshot> {
+  const [rows, idMap, logRows] = await db.transaction("r", db.syncOutbox, db.provisionalIdMap, db.syncState, async () => [
     (await db.syncOutbox.toArray()) as StoredRow[],
     await db.provisionalIdMap.toArray(),
+    await db.syncState.where("key").startsWith(RECONCILE_LOG_PREFIX).toArray(),
   ] as const);
+  const payload = buildPayload(rows, idMap, logRows, ctx);
+  const digests = await Promise.all(rows.map(async (r) => ({ opId: r.localId, digest: await entryDigest(r) })));
+  return { payload, digests };
+}
+
+export async function collectQueueExport(db: LocalDb, ctx: QueueExportContext): Promise<QueueExportPayload> {
+  return (await collectQueueExportSnapshot(db, ctx)).payload;
+}
+
+function parseLog(rows: readonly { value?: string }[]): QueueExportPayload["reconciliationLog"] {
+  const out: QueueExportPayload["reconciliationLog"] = [];
+  for (const r of rows) {
+    try {
+      const v = JSON.parse(r.value ?? "null") as QueueExportPayload["reconciliationLog"][number] | null;
+      if (v && typeof v.id === "string" && typeof v.at === "string" && typeof v.localId === "string") out.push(v);
+    } catch {
+      /* unreadable line: skipped */
+    }
+  }
+  return out.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id.localeCompare(b.id)));
+}
+
+function buildPayload(
+  rows: StoredRow[],
+  idMap: { provisionalId: string; realId: string; createdAt: string }[],
+  logRows: { value?: string }[],
+  ctx: QueueExportContext,
+): QueueExportPayload {
   const counter = { n: 0 };
   const entries = inQueueOrder(rows.map((r) => toEntry(r, counter)));
   return {
@@ -80,6 +125,7 @@ export async function collectQueueExport(db: LocalDb, ctx: QueueExportContext): 
     entries,
     provisionalIdMap: idMap.map((m) => ({ provisionalId: m.provisionalId, realId: m.realId, createdAt: m.createdAt })),
     redactedFields: counter.n,
+    reconciliationLog: parseLog(logRows),
   };
 }
 

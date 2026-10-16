@@ -12,7 +12,7 @@ import { getTillId } from "../tillId";
 import { APP_VERSION } from "../clientInfo";
 import { useAuthStore } from "../../stores/authStore";
 import { useAppStore } from "../../stores/appStore";
-import { collectQueueExport } from "./collect";
+import { collectQueueExportSnapshot } from "./collect";
 import { recordQueueExport } from "./exportRecord";
 import {
   assertNoSecretValues, defaultExportFileName, encryptQueueExport, summarize, type QueueExportSummary,
@@ -62,7 +62,7 @@ export async function exportPendingQueue(passphrase: string): Promise<ExportQueu
   const auth = useAuthStore.getState();
   const tillId = getTillId();
   const now = new Date();
-  const payload = await collectQueueExport(localDb, {
+  const { payload, digests } = await collectQueueExportSnapshot(localDb, {
     appVersion: await appVersion(),
     tillId,
     backendHost,
@@ -85,7 +85,7 @@ export async function exportPendingQueue(passphrase: string): Promise<ExportQueu
     const res = await api.saveQueueExport({ defaultFileName: fileName, contents });
     if (res.canceled) return { status: "canceled" };
     if (!res.ok || !res.filePath) throw new Error(res.error ?? "The file could not be saved.");
-    recordQueueExport(payload.entries.map((e) => e.opId));
+    recordQueueExport(digests);
     return { status: "saved", filePath: res.filePath, summary };
   }
 
@@ -101,6 +101,6 @@ export async function exportPendingQueue(passphrase: string): Promise<ExportQueu
   } finally {
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }
-  recordQueueExport(payload.entries.map((e) => e.opId));
+  recordQueueExport(digests);
   return { status: "downloaded", fileName, summary };
 }

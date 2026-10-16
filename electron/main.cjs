@@ -8,6 +8,7 @@ const path = require("node:path");
 const { autoUpdater } = require("electron-updater");
 const { setupUpdater } = require("./updater.cjs");
 const { createOwnerVerifier, loadBackendConfig } = require("./ownerVerify.cjs");
+const { createReconcileAuthority, fileKeyStore } = require("./reconcileAuthority.cjs");
 
 const isDev = !app.isPackaged;
 // Vite's default dev server port (see vite.config.ts) — overridable for a
@@ -178,8 +179,27 @@ app.on("will-quit", () => {
 // owner verified by main itself against the backend the build is pinned to
 // (dist/backend.json, written by the Electron Vite build). No file (dev
 // server, older build) = recovery refused.
-const ownerVerifier = createOwnerVerifier({
-  backend: loadBackendConfig(path.join(__dirname, "..", "dist", "backend.json")),
+// RC3: the same config also backs the owner check of a reconciliation
+// (reconcileAuthority.cjs). An unpackaged app under the e2e harness
+// (SHWE_POS_E2E=1, dev server, no dist/) reads the stack URL + public anon
+// key from the harness environment instead; a packaged build never does.
+function e2eBackendConfig() {
+  if (!isDev || !isE2E) return null;
+  try {
+    const url = new URL(String(process.env.E2E_SUPABASE_URL || ""));
+    const anonKey = process.env.E2E_ANON_KEY;
+    return typeof anonKey === "string" && anonKey ? { origin: url.origin, anonKey } : null;
+  } catch {
+    return null;
+  }
+}
+const backendConfig = loadBackendConfig(path.join(__dirname, "..", "dist", "backend.json")) ?? e2eBackendConfig();
+const ownerVerifier = createOwnerVerifier({ backend: backendConfig });
+const reconcileAuthority = createReconcileAuthority({
+  backend: backendConfig,
+  // Created lazily on the first reconciliation; userData is redirected for
+  // e2e runs before this is ever read.
+  keyStore: fileKeyStore(path.join(app.getPath("userData"), "reconcile-seal.key")),
 });
 const updater = setupUpdater({
   autoUpdater,
@@ -195,6 +215,31 @@ const UPDATE_CHECK_INTERVAL_MS = updater.UPDATE_CHECK_INTERVAL_MS;
 const checkForUpdates = () => updater.checkForUpdates();
 
 ipcMain.handle("app:get-version", () => app.getVersion());
+
+// ------------------------------------------------------------------
+// Owner reconciliation (RC3, electron/reconcileAuthority.cjs). Only the app
+// window may ask. attest = fresh server owner check + seal; never cached,
+// refused offline. Every decision is logged without the token.
+// ------------------------------------------------------------------
+ipcMain.handle("reconcile:attest", async (event, request) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, code: "refused", message: "Not allowed" };
+  const r = request && typeof request === "object" ? request : {};
+  let result;
+  try {
+    result = await reconcileAuthority.attest(typeof r.accessToken === "string" ? r.accessToken : "", {
+      localId: r.localId, entryDigest: r.entryDigest, recordDigest: r.recordDigest,
+    });
+  } catch (err) {
+    logUpdate("error", "reconcile owner check error", err);
+    result = { ok: false, code: "error", message: "Owner verification failed. Nothing was reconciled." };
+  }
+  logUpdate(result.ok ? "info" : "warn", "reconcile owner check", `result=${result.code}`, `step=${result.step ?? "-"}`);
+  return result;
+});
+ipcMain.handle("reconcile:verify-seals", (event, items) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return [];
+  return reconcileAuthority.verifySeals(items);
+});
 
 // ------------------------------------------------------------------
 // Pending-queue export (src/lib/queueExport/, docs/selfhost-migration/

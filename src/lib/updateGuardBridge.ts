@@ -10,7 +10,7 @@
 // No-op outside Electron or with an older preload script.
 // ----------------------------------------------------------------------
 import type { ElectronAppState } from "../types/electron";
-import { localDb } from "./localDb";
+import { blockingOutboxRows, desktopVerifyDeps } from "../stores/data/reconcile";
 import { exportCovers, onQueueExported } from "./queueExport/exportRecord";
 import { useSyncStore } from "../stores/syncStore";
 import { useConnectivityStore } from "../stores/connectivityStore";
@@ -61,8 +61,12 @@ export function ownerSignedIn(): boolean {
   return Boolean(auth.currentUserId) && auth.currentRole === "ADMIN" && !useSyncStore.getState().needsReauth;
 }
 
+/** RC3: the rows that block an ordinary install — every outbox row except
+ *  a reconciled one whose record, digests and seal check out (a row that
+ *  fails goes back to Set aside first: stores/data/reconcile.ts). Pending,
+ *  syncing, failed, conflict, quarantined and set-aside rows always block. */
 export async function collectAppState(): Promise<ElectronAppState> {
-  const rows = await localDb.syncOutbox.toArray();
+  const rows = await blockingOutboxRows(desktopVerifyDeps());
   const ids = rows.map((r) => r.localId);
   const auth = useAuthStore.getState();
   return buildAppState({

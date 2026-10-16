@@ -82,6 +82,7 @@ const e = (over: Partial<QueueExportEntry> & { opType: string }): QueueExportEnt
     refs: [], provisional: [], shopId: "shop-1", createdAt: `2026-10-13T01:00:${String(seq).padStart(2, "0")}.000Z`,
     ringUpAt: null, status: "pending", attempts: 2, lastErrorClass: "transient", lastError: "Failed to fetch", nextAttemptAt: null,
     backendOrigin: ORIGIN, quarantineReason: null, archivedAt: null, archivedBy: null, archiveReason: null, statusBeforeArchive: null,
+    statusBeforeReconcile: null, reconciliation: null, reconcileRejected: null,
     ...over,
     payload: over.payload !== undefined ? over.payload : { ...(over.kind === "table_write" ? {} : { p_idempotency_key: key }) },
   };
@@ -101,7 +102,7 @@ function outageQueue(): QueueExportPayload {
     format: "shwephala-queue-export", formatVersion: 1, appVersion: "1.0.16", exportedAt: "2026-10-13T02:00:00Z",
     tillId: "till-abc", backendHost: "pos.example.test", session: { userId: "u", orgId: "o", shopId: "shop-1", role: "CASHIER" },
     // shuffled on purpose: the replay must follow seq, not array order
-    entries: [sales[2], cat, shift, sales[0], sales[1]], provisionalIdMap: [], redactedFields: 0,
+    entries: [sales[2], cat, shift, sales[0], sales[1]], provisionalIdMap: [], redactedFields: 0, reconciliationLog: [],
   };
 }
 

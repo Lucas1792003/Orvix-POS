@@ -81,6 +81,7 @@ gitleaks 8.30.1 over `main..publish/selfhost-support` (fresh single-branch clone
 |---|---|---|---|
 | K1 | RC1 frozen (read-only, SHA256SUMS) | DONE | release-1.0.16.md §8 |
 | K2 | RC1 audit defects D1–D4 | FIXED in RC2 `adbaf1b` (set aside instead of delete; stranded syncing recovery with the same key; prune guard; owner verified by the main process via `app_role()`); RC2 frozen | release-1.0.16.md §9–§10 |
+| K2a | Set-aside rows block every later update (RC2 open decision) | RC3 (code, not built): owner reconciliation (`reconciled` status, read-only server check, owner verified by main at that moment, sealed record, tamper → back to Set aside); no migration; spec I prepared | release-1.0.16.md §11 |
 | K3 | Per-till migration register + "migrated" rule | DONE (template) | till-register.csv, till-readiness-084.md §2.1 |
 | K4 | Non-destructive canary (CANARY-tagged data only, fingerprint SQL) | DONE (prepared) | canary-1.0.16-checklist.md, canary-1.0.16-fingerprint.sql |
 | K5 | Hosted delta check prepared (owner runs) | OWNER | hosted-delta-check.md |

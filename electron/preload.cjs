@@ -43,6 +43,27 @@ contextBridge.exposeInMainWorld("electronAPI", {
     accessToken: request && typeof request.accessToken === "string" ? request.accessToken : "",
   }),
 
+  /** RC3: owner reconciliation. Main verifies the session as the owner with
+   *  the backend right now (no cache, refused offline) and seals the record
+   *  digests. Only strings cross. */
+  reconcileAttest: (request) => {
+    const r = request && typeof request === "object" ? request : {};
+    const s = (v) => (typeof v === "string" ? v : "");
+    return ipcRenderer.invoke("reconcile:attest", {
+      accessToken: s(r.accessToken), localId: s(r.localId), entryDigest: s(r.entryDigest), recordDigest: s(r.recordDigest),
+    });
+  },
+
+  /** RC3: main checks stored reconciliation seals. Returns booleans. */
+  reconcileVerifySeals: (items) => ipcRenderer.invoke("reconcile:verify-seals", Array.isArray(items) ? items.map((it) => {
+    const r = it && typeof it === "object" ? it : {};
+    const s = (v) => (typeof v === "string" ? v : "");
+    return {
+      localId: s(r.localId), entryDigest: s(r.entryDigest), recordDigest: s(r.recordDigest),
+      ownerUserId: s(r.ownerUserId), ownerName: s(r.ownerName), verifiedAt: s(r.verifiedAt), seal: s(r.seal),
+    };
+  }) : []),
+
   /** Reports the facts the install guard needs (counts and flags only). */
   reportAppState: (state) => {
     const s = state && typeof state === "object" ? state : {};

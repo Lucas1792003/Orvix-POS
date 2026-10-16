@@ -128,11 +128,14 @@ export function referencedProvisionalIds(rows: readonly SyncOutboxEntry[]): Set<
  *  else referenced), but otherwise unbounded — sweep out mappings older
  *  than a week that NO remaining outbox entry references (RC2, D3: a
  *  quarantined or set-aside entry can sit for weeks; its export must still
- *  resolve). One transaction, so an entry queued meanwhile is seen. */
+ *  resolve). RC3: a RECONCILED row no longer pins its mappings — the till
+ *  never replays it, and its record keeps the refs as resolved when it was
+ *  reconciled (`resolvedRefs`). A mapping any non-reconciled row still
+ *  references is kept. One transaction, so an entry queued meanwhile is seen. */
 export async function pruneProvisionalIdMap(now: number = Date.now()): Promise<number> {
   const cutoff = now - PROVISIONAL_MAP_MAX_AGE_MS;
   return localDb.transaction("rw", localDb.syncOutbox, localDb.provisionalIdMap, async () => {
-    const referenced = referencedProvisionalIds(await localDb.syncOutbox.toArray());
+    const referenced = referencedProvisionalIds((await localDb.syncOutbox.toArray()).filter((r) => r.status !== "reconciled"));
     const stale = (await localDb.provisionalIdMap.toArray())
       .filter((m) => Date.parse(m.createdAt) < cutoff && !referenced.has(m.provisionalId))
       .map((m) => m.provisionalId);
@@ -614,6 +617,9 @@ export async function retryOutboxEntry(localId: string): Promise<void> {
   if (entry.status === "archived") {
     throw new Error("This entry is set aside. An owner restores it first (Set aside list), then it syncs again.");
   }
+  if (entry.status === "reconciled") {
+    throw new Error("This entry was reconciled by the owner. It is never sent again from this till.");
+  }
   if (entry.status === "quarantined" || !belongsToBackend(entry, currentBackendOrigin())) {
     throw new Error("This entry was queued for another server and cannot be retried here. Export it for the owner.");
   }
@@ -633,7 +639,7 @@ export async function retryOutboxEntry(localId: string): Promise<void> {
 // exist in the app; the owner reconciles from the export file
 // (tools/queue-recovery) and the row stays until then.
 
-export type OutboxActionErrorCode = "not-found" | "not-owner" | "export-first" | "already-set-aside" | "not-set-aside";
+export type OutboxActionErrorCode = "not-found" | "not-owner" | "export-first" | "already-set-aside" | "not-set-aside" | "reconciled";
 
 export class OutboxActionError extends Error {
   readonly code: OutboxActionErrorCode;
@@ -666,6 +672,7 @@ export async function setAsideOutboxEntry(
     const entry = await localDb.syncOutbox.get(localId);
     if (!entry) throw new OutboxActionError("not-found", "This entry is no longer in the queue (it may have synced).");
     if (entry.status === "archived") throw new OutboxActionError("already-set-aside", "This entry is already set aside.");
+    if (entry.status === "reconciled") throw new OutboxActionError("reconciled", "This entry is reconciled; it is kept as it is.");
     const next: SyncOutboxEntry = {
       ...entry,
       status: "archived",
@@ -717,9 +724,17 @@ export async function countPendingOutbox(): Promise<number> {
   return localDb.syncOutbox.where("status").anyOf("pending", "syncing", "failed").count();
 }
 
-/** Everything the server does not have yet, whatever the status (pending,
- *  syncing, failed, conflict, quarantined, set aside). The desktop updater guard
- *  (electron/updateGuard.cjs) refuses to install while this is non-zero. */
+/** Everything the server does not have yet and the owner has not
+ *  reconciled, whatever the status (pending, syncing, failed, conflict,
+ *  quarantined, set aside). A quick count only: the desktop updater guard's
+ *  report (lib/updateGuardBridge.ts) uses blockingOutboxRows() from
+ *  ./reconcile, which also counts a reconciled row whose integrity check
+ *  fails (and sends it back to Set aside). */
 export async function countUnsyncedOutbox(): Promise<number> {
-  return localDb.syncOutbox.count();
+  return localDb.syncOutbox.filter((r) => r.status !== "reconciled").count();
+}
+
+export async function listReconciledEntries(): Promise<SyncOutboxEntry[]> {
+  const rows = (await localDb.syncOutbox.where("status").equals("reconciled").toArray()) as OutboxRow[];
+  return rows.sort(byQueueOrder);
 }

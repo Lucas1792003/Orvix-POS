@@ -43,6 +43,50 @@ export class QueueExportError extends Error {
 
 // ---------------------------------------------------------------- schema --
 
+const serverSaleRefSchema = z.object({
+  saleId: z.string(),
+  receiptNo: z.string().nullable(),
+  shopId: z.string().nullable(),
+  shiftId: z.string().nullable(),
+  createdAt: z.string().nullable(),
+});
+
+/** RC3 reconciliation record (lib/reconcile/types.ts). Core fields checked;
+ *  anything else is kept as-is (passthrough) so later additions still read. */
+const reconciliationSchema = z.object({
+  v: z.number().int(),
+  id: z.string(),
+  localId: z.string(),
+  idempotencyKey: z.string().nullable(),
+  entryDigest: z.string(),
+  resolution: z.enum(["matched", "recreated", "cancelled"]),
+  serverRef: serverSaleRefSchema.nullable(),
+  check: z.object({
+    result: z.enum(["recorded", "not-recorded", "inconclusive"]),
+    method: z.string(),
+    checkedAt: z.string(),
+    entryDigest: z.string(),
+    matches: z.array(serverSaleRefSchema),
+    candidates: z.array(serverSaleRefSchema),
+    detail: z.string(),
+  }).passthrough(),
+  reason: z.string(),
+  reconciledAt: z.string(),
+  statusBefore: z.enum(["conflict", "quarantined", "archived"]),
+  owner: z.object({ userId: z.string(), name: z.string() }).passthrough(),
+  recordDigest: z.string(),
+  seal: z.string(),
+}).passthrough();
+
+/** RC3 local reconciliation log line. */
+const reconcileLogSchema = z.object({
+  id: z.string(),
+  at: z.string(),
+  event: z.enum(["reconciled", "refused", "tamper-detected"]),
+  localId: z.string(),
+  detail: z.string(),
+}).passthrough();
+
 const entrySchema = z.object({
   /** Queue position assigned at enqueue (outbox `seq`); null only for pre-seq rows. */
   seq: z.number().int().nullable(),
@@ -68,7 +112,7 @@ const entrySchema = z.object({
    *  current one (or by a build that did not record it); never sent by the
    *  till. Replayed only on an explicit owner decision (tools/queue-recovery
    *  --include-quarantined). */
-  status: z.enum(["pending", "syncing", "failed", "conflict", "quarantined", "archived"]),
+  status: z.enum(["pending", "syncing", "failed", "conflict", "quarantined", "archived", "reconciled"]),
   attempts: z.number().int().min(0),
   lastErrorClass: z.enum(["transient", "permanent"]).nullable(),
   lastError: z.string().nullable(),
@@ -87,6 +131,17 @@ const entrySchema = z.object({
   archivedBy: z.string().nullable().default(null),
   archiveReason: z.string().nullable().default(null),
   statusBeforeArchive: z.enum(["pending", "syncing", "failed", "conflict", "quarantined"]).nullable().default(null),
+  /** RC3: "reconciled" = the owner documented the outcome on the till
+   *  (matched / recreated / cancelled; never sent by the till; replayed only
+   *  with tools/queue-recovery --include-reconciled). The status it had
+   *  before, and the full record (server check, resolution, server sale,
+   *  reason, time, owner, digests, seal). Additive; formatVersion stays 1 —
+   *  read such files with the RC3 recovery tool (older ones reject the
+   *  "reconciled" status as bad-format). */
+  statusBeforeReconcile: z.enum(["conflict", "quarantined", "archived"]).nullable().default(null),
+  reconciliation: reconciliationSchema.nullable().default(null),
+  /** RC3: a reconciliation rejected by the till's integrity check. */
+  reconcileRejected: z.object({ detectedAt: z.string(), reason: z.string(), record: z.unknown() }).nullable().default(null),
 });
 
 export type QueueExportEntry = z.infer<typeof entrySchema>;
@@ -110,6 +165,8 @@ const payloadSchema = z.object({
   provisionalIdMap: z.array(z.object({ provisionalId: z.string(), realId: z.string(), createdAt: z.string() })),
   /** Number of values the serializer blanked because their key looked like a credential. */
   redactedFields: z.number().int().min(0),
+  /** RC3: the till's local reconciliation log (absent in older files). */
+  reconciliationLog: z.array(reconcileLogSchema).default([]),
 });
 
 export type QueueExportPayload = z.infer<typeof payloadSchema>;

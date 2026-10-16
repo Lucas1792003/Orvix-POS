@@ -332,4 +332,175 @@ Bundle: only the self-hosted origin (4 refs), 0 hosted refs, 0 `signUp`, 0 servi
 
 Regression on `adbaf1b`: tsc clean; vitest 1040; Deno 94; harness 747/0 (capped 083: 672/0); isolation audit (083+085) 454/0/2 low, parity PASS; live suites all pass, CLEAN; e2e first run 47 passed / 2 failed (A8, C3 still clicked the removed Dismiss button — test-only), after updating those two specs to export + Set aside (commit after `adbaf1b`, **no product code changed**): **50 passed, 1 skipped (084-only)**, CLEAN; 574/574 images; production fingerprint identical.
 
-Open design decision: set-aside rows (including server-rejected "permanent conflict" sales) stay on the till forever and keep blocking a normal update install, so each later update on such a till needs the owner's "Install anyway (after export)". Nothing can permanently remove a set-aside row (by design).
+Open design decision: set-aside rows (including server-rejected "permanent conflict" sales) stay on the till forever and keep blocking a normal update install, so each later update on such a till needs the owner's "Install anyway (after export)". Nothing can permanently remove a set-aside row (by design). → Addressed by RC3 (§11): the owner can reconcile such a row; it then stops blocking ordinary updates and is still never removed.
+
+## 11. Release candidate RC3 (developer, 2026-10-16) — owner reconciliation, code only, NOT built
+
+Same version **1.0.16**; RC3 is identified by its artifact folder (`ShwePhaLa-artifacts/rc3-1.0.16-<commit>/`, built by the coordinator after the full regression) and optionally `VITE_BUILD_LABEL=rc3`. RC1 (`b777345`) and RC2 (`adbaf1b`) and their frozen folders are untouched.
+
+**Why.** RC2 left set-aside rows on the till forever, and every later update needed the owner's "Install anyway (after export)" (§10, open decision). RC3 lets the owner **document** what happened to such an entry. A documented ("reconciled") entry stays on the till and in every export but no longer holds back an ordinary update.
+
+**No migration. No server change. No Dexie schema change** (`status` is already indexed; the new fields are unindexed; the log uses the existing `syncState` table).
+
+### 11.1 State machine
+
+```
+                 enqueue
+                    |
+                    v
+   +---------> pending <------------------------------+
+   |              |  ^                                 |
+   |   drain      |  | transient error / stranded      | Retry (staff)
+   |              v  | (RC2 D2)                        |
+   |           syncing ----- success -----> (row deleted: synced)
+   |              |
+   |              | permanent rejection
+   |              v
+   |           conflict ----------------------+        quarantined  (other backend / 1.0.15;
+   |              |                           |             |         startup + every drain)
+   |    Set aside (owner, export first; RC2)  |             |
+   |              v                           |             |
+   +-- Restore -- archived ("Set aside") <----+-------------+  (Set aside from any status)
+                  |        ^                  |             |
+                  |        | integrity check  |             |
+                  |        | fails on load    |             |
+                  v        |                  v             v
+              +--------------------------------------------------+
+              |  reconciled  (owner; terminal; never sent;       |
+              |  in every export; does NOT block updates while   |
+              |  its record, digests and seal check out)         |
+              +--------------------------------------------------+
+
+  Reconcile allowed FROM:   conflict, quarantined, archived
+  Reconcile refused FROM:   pending, syncing, failed (still in the drain: set aside first),
+                            reconciled (duplicate)
+  reconciled -> anything:   only the integrity check (-> archived + reconcileRejected, "needs attention")
+  Never automatic:          no code path except stores/data/reconcile.ts writes "reconciled" (a test scans src/);
+                            permanent rejection, export, timeout and retry failure leave the row as it was (test)
+```
+
+### 11.2 Flow (owner, Sync Conflicts page → "Reconcile")
+
+1. **Export first.** The export of this session must contain *this exact entry*. At export time the app records, per entry, `entryDigest` = SHA-256 over localId + idempotency key + kind/name/table/op/row id + payload (`src/lib/reconcile/digest.ts`, `collectQueueExportSnapshot`). An entry changed since needs a new export ("export-stale").
+2. **Server check (read-only)**, §11.3. Result shown: *recorded* (sale id + receipt no.), *not recorded*, *inconclusive* (with the candidate sales).
+3. **Resolution** (`src/lib/reconcile/policy.ts`):
+   - `matched`: references the sale the check found (recorded: that one; inconclusive: one of the listed candidates);
+   - `recreated`: the owner re-entered it through the normal, idempotent POS flow. The app verifies the **new** sale on the server: same shop, rung up after the entry was queued, not one of the check's sales. Refused when the check says *recorded*. One server sale can close only one entry;
+   - `cancelled`: only when the check says *not recorded*.
+4. **Reason** (5–500 characters). The check must be at most 10 minutes old and made for this entry's digest.
+5. **Owner, verified now** (§11.4). Then **one Dexie transaction** over `syncOutbox` + `syncState`: compare-and-set on the whole row as the owner saw it (canonical JSON); status → `reconciled`, `statusBeforeReconcile`, the `reconciliation` record, plus one log line `reconcile-log:<id>`.
+
+The record (`src/lib/reconcile/types.ts`) holds:
+- the resolution and the server sale (id, receipt, shop, shift, time);
+- the full check;
+- the reason and `reconciledAt`;
+- `statusBefore` and the earlier status history (queued / quarantined / set aside, from the row's own fields);
+- the export (time + digest);
+- the entry's `refs` as resolved now;
+- the owner: `userId` from `app_user_id()`, `name` from the owner's own `users` row, org, `verifiedAt`, `source: "backend"`;
+- `entryDigest`, `recordDigest` and main's `seal`.
+
+Payload, idempotency key, attempts, last error and the RC2 set-aside fields stay on the row.
+
+Reconciling **never** sends the entry, never calls an RPC, and never writes stock, payments or sales. Tests: the RPC mock is not called; the local sales/inventory/movement tables are unchanged; the fake server gets no write; the server check uses `from().select()` only. A correction goes through the normal POS sale/refund screens; the record only links to it.
+
+### 11.3 Server check method (`src/lib/reconcile/serverCheck.ts`)
+
+- **By idempotency key: impossible without a migration.** `idempotency_keys` (062) has RLS on, no policies, and ALL revoked from `anon`/`authenticated`. No RPC answers "was key K recorded?" without executing the call, and re-sending `complete_sale` would **write** the sale when it is missing.
+- **So: by the client operation identity**, the same rule as `e2e/helpers/saleLedger.ts`. `complete_sale` stores the client's ring-up time `p_created_at` verbatim as `sales.created_at` (045, within −48 h/+5 min), and the client mints it once per operation. The check reads through the owner's normal RLS (069 `sales_sel`: ADMIN reads every sale of the org's shops; `sale_items_sel` inherits it):
+  - *exact*: same shop, same shift (resolved through the id map when the shift was opened offline; unknown = shop-wide), same instant, same payment method / paid amount / cart discount, same lines (product + base quantity);
+  - *loose*: same shop/shift, same amounts and lines, any time from ring-up − 24 h. This catches a replay stamped with server time (more than 48 h late, or a fast till clock);
+  - a sale at the same instant with other details is also a candidate.
+- Results:
+  - *recorded* = exactly one exact match and no candidate;
+  - *not recorded* = nothing exact, no candidate, a ring-up time present, fewer than 50 same-amount sales;
+  - anything else (several matches, candidates, a read error, a non-sale entry) = *inconclusive*.
+- Non-sale entries (`open_shift`, `adjust_stock`, table writes …) are *inconclusive / unsupported*. `matched` and `cancelled` are then impossible, and `recreated` needs a sale, so in practice they stay set aside and are reconciled from the export (`tools/queue-recovery`). This is a documented limitation.
+- A quarantined (other backend) entry is checked against **this** server only; the dialog says so.
+
+### 11.4 Owner verification (`electron/reconcileAuthority.cjs`, main process)
+
+IPC `reconcile:attest`, from the app window only. Main uses the session's access token and the build's own backend config (`dist/backend.json`, never from the renderer) and calls:
+- `rpc/app_role` (must be `ADMIN`);
+- `rpc/app_user_id`;
+- `users?id=eq.<id>` (own row: name, role ADMIN, active, org).
+
+This happens **every time, with no cache**. A network failure, timeout or 5xx is refused with "Reconciling needs a live owner check: try again when the till is online". The updater's recovery path (§9 D4) accepts an owner cached for 12 h during an outage; reconciliation has no such shortcut. Reconciling is a judgement against the server's data, which cannot be checked offline anyway, and a cached owner would let a stolen or left-open session close entries without the server's confirmation.
+
+On success main returns the owner identity and `seal = HMAC-SHA-256(key, {localId, entryDigest, recordDigest, owner id, owner name, verifiedAt})`:
+- the key is 32 random bytes in `userData/reconcile-seal.key` (mode 0600), created on first use, never sent to the renderer;
+- `reconcile:verify-seals` checks stored seals;
+- `updater.log` gets `reconcile owner check result=<code> step=<…>` (never the token);
+- without a main process (plain browser, older preload) reconciling is refused ("needs the desktop app");
+- unpackaged with `SHWE_POS_E2E=1` only, the backend config comes from `E2E_SUPABASE_URL`/`E2E_ANON_KEY` (for spec I). A packaged build never reads them.
+
+### 11.5 Update guard, integrity check, exports
+
+- `collectAppState()` (`src/lib/updateGuardBridge.ts`) now reports `blockingOutboxRows()`: every row except a **reconciled row whose record checks out** (structure; `entryDigest` recomputed from the row; `recordDigest`; main's seal). Pending, syncing, failed, conflict, quarantined and **unresolved set-aside** rows still block. `electron/updateGuard.cjs` is unchanged.
+- The same check runs before every guard report (at most every 30 s) and when the Sync page loads. A failing reconciled row:
+  - goes back to **Set aside** (`archived`; `statusBeforeArchive` = its earlier conflict/quarantined status, never a sendable one);
+  - keeps the rejected record under `reconcileRejected` and logs `tamper-detected`;
+  - shows "Reconciliation rejected: needs attention" and **blocks updates again**.
+
+  Without a main process to check seals, a reconciled row is not reverted but still blocks.
+- **Export format stays v1**, additive: status `reconciled`, `statusBeforeReconcile`, `reconciliation` (passthrough schema), `reconcileRejected`, and a top-level `reconciliationLog`. RC1/RC2 files still read (defaults; `audit/rc1/export-format-stability` passes). A file with reconciled entries needs the RC3 recovery tool; older tools reject the status as `bad-format`.
+- **`tools/queue-recovery`**: reconciled entries are `skipped-reconciled`, with the owner's record in the detail; `inspect` prints the record and the log. Only `--include-reconciled` replays them, judged by their former status (a former conflict still needs `--include-conflicts`, a former set-aside entry `--include-set-aside`). `skipped-reconciled` does not fail the exit code.
+- **Id map (D3 decision):** a reconciled row no longer pins its provisional-id mappings: the till never replays it, and the record keeps `resolvedRefs`. Mappings referenced by any non-reconciled row are kept as in RC2.
+- 1.0.15 rows (quarantined at startup) and RC1/RC2 rows (conflict, archived) reconcile like any other; their history fields stay. `quarantineForeignOutboxEntries` never touches a reconciled row; Retry and Set aside refuse it.
+
+### 11.6 Owner procedure (on the till, online)
+
+1. Sync Conflicts → **Export pending**. Keep the file and the passphrase.
+2. On the row (conflict / other server) or under "Set aside": **Reconcile** → **Check server**.
+3. Decide:
+   - *Recorded* → `matched`: the sale is already there. A refund, if any, goes through the normal refund flow.
+   - *Not recorded* → `cancelled` if it did not happen. Or ring it up again through the POS and choose `recreated` with the new receipt no. (**Verify on server**).
+   - *Inconclusive* → compare the listed sales with the export; `matched` to one of them, or leave it set aside.
+4. Write the reason → **Reconcile (owner check)**. Offline it is refused; try again online.
+5. A pending or retrying sale must be **set aside** first (that stops the drain from sending it).
+
+### 11.7 Security evidence (requirement 8)
+
+| Threat | Protection | Test |
+|---|---|---|
+| Duplicate reconciliation | Status check before and inside the transaction. A second attempt gets `already-reconciled`; one record, one log line | rc3 "reconciled -> reconciled is refused" |
+| Concurrent updates / two windows | One Dexie rw transaction with compare-and-set on the whole row as the owner saw it (`expectedRow`). A restore, set aside or edit between opening and committing (also during the owner check) → `changed`. Two parallel reconciles → exactly one succeeds. One server sale cannot close two entries | rc3 "two windows…", "COMPARE-AND-SET…", "recreated… same server sale" |
+| Server committed, response lost | The check reads by client operation identity, so the committed sale is found → *recorded* → `cancelled` refused, `matched` to that sale. Late replays (server time) are candidates → never *not recorded* | rc3 "server committed but the response was lost" (real drain: commit + network error → pending → set aside → check → matched; no RPC sent, no sale created, the drain never resends); serverCheck "RESPONSE LOST", "> 48 h" |
+| Offline authorization | Main verifies with the server every time, no cache. Offline/5xx is refused even right after a success | authority "OFFLINE is refused…"; rc3 "OFFLINE -> refused…" |
+| Non-owner / tampered renderer claim | Authorization is main's server answer only; `authStore` is not consulted. CASHIER / inactive / no profile / 401 are refused (logged `refused`). A renderer that forges an attestation (fake owner + seal) has its row reverted at the next integrity check | authority tests; rc3 "TAMPERED RENDERER CLAIM", "FORGED ATTESTATION" |
+| Tampered local queue data | The record is bound to `entryDigest` (payload + key + localId …) and `recordDigest`, sealed with main's HMAC key. On load a mismatch (payload, key, reason, resolution, owner, a row forged to `reconciled`) reverts to Set aside + `reconcileRejected` + log, and blocks updates again | rc3 "tamper detection" (7 cases) |
+| Crash between status write and log write | Both in one Dexie transaction. A failure in the log write rolls the status back; a retry then succeeds once | rc3 "CRASH between…" |
+
+**Residual risk.** An administrator of the till machine can read `reconcile-seal.key` and the IndexedDB and forge both the row and its seal. They could equally delete rows, and the updater guard trusts the renderer's report. True tamper evidence needs a server-side record.
+
+**Proposal (not written, not applied; separate deployment approval):**
+- **086** `record_outbox_reconciliation(p_local_id, p_entry_digest, p_record_digest, p_resolution, p_sale_id, p_reason, p_idempotency_key)`: SECURITY DEFINER, `app_role() = 'ADMIN'`, org-bound, append-only table + an `audit_logs` row, idempotent by `(org, local_id)`;
+- **087** a read-only, owner-only, org-bound `idempotency_key_recorded(p_key uuid) → {recorded, rpc, sale_id}` for an exact key lookup.
+
+RC3 needs neither.
+
+**Server audit entry: not written.** The only client-callable audit RPC (`log_audit_event`, 070) allow-lists catalogue actions (`PRODUCT_*`, `CATEGORY_*`), and `audit_logs` has no INSERT grant for `authenticated` (065). Writing a reconciliation under a catalogue action type would be misleading. The audit trail today is:
+- the local log (`syncState` `reconcile-log:*`), included in every export and in `inspect`;
+- the record on the row;
+- the `updater.log` lines of main's owner checks.
+
+### 11.8 Tests (developer run, 2026-10-16, no live runs)
+
+| Suite | Result |
+|---|---|
+| `npx tsc -b`, `npx tsc -p e2e/tsconfig.json`, `npx tsc -p tools/queue-recovery/tsconfig.json` | clean |
+| `npx vitest run --exclude '.claude/**'` | **1091 passed**, 66 skipped (baseline 1040 + 51: `src/stores/data/reconcile.rc3.test.ts` 35, `src/lib/reconcile/serverCheck.test.ts` 10, `src/lib/reconcile/authority.test.ts` 6; the fixtures of `format.test.ts` / `replay.test.ts` gained the additive fields) |
+| Deno functions | **94 passed**, 0 failed |
+| SQL harness | not run: no `supabase/` change, no migration |
+| eslint on every changed file | clean |
+
+E2E prepared, not run: `e2e/i-reconcile.e2e.ts`. Needs `E2E_QA_TOTP_SECRET`. Consistency gate after the spec.
+- **I1**, a server-rejected (conflict) sale: Reconcile blocked before export → export → check *not recorded* → `cancelled` + reason → reconciled (same key/payload; owner = QA admin, from the server); guard report unsynced 1 → 0; no sale and no key row on the server.
+- **I2**, response lost (the server commits, the reply is reset, later sends get 503): export + set aside (guard still 1) → check *recorded* with the receipt no. → `cancelled` disabled → `matched` → guard 0. After the routes are removed the row is never resent; 1 sale, 1 key row.
+
+### 11.9 For the coordinator (before building RC3)
+
+1. Live check through the gateway with an ADMIN token: `POST /rest/v1/rpc/app_user_id` (expects the app user id) and `GET /rest/v1/users?select=id,name,role,is_active,org_id&id=eq.<id>` (own row). Main's owner check needs both, besides `app_role`. All are existing grants (015/064, RLS 056). A blocked route makes Reconcile refuse (fail closed).
+2. Run spec I (and H, A8/C3 for the unchanged set-aside flow) live. Then build with `VITE_BUILD_LABEL=rc3` into `ShwePhaLa-artifacts/rc3-1.0.16-<commit>/`.
+3. Artifact scan: expectations unchanged (`dist/backend.json` as in RC2). The seal key is created on the till at the first reconciliation and never shipped.
+4. Decide whether to schedule the optional 086/087 (§11.7) for server-side tamper evidence. RC3 does not need them.

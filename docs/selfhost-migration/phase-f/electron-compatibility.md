@@ -218,3 +218,22 @@ RC1 (`b777345`, frozen) keeps the defects; RC2 fixes them without a server chang
 | D4 | override not owner-only (`updateGuard.cjs:81-88`, `CheckForUpdatesButton.tsx:187`) | **fixed**: recovery guard needs `ownerVerified` from the main process (`electron/ownerVerify.cjs`: backend `app_role()` with the session token, origin/anon key from the build's `dist/backend.json`; offline only for a token main verified online within 12 h); button shown to ADMIN only; fail closed |
 
 Compatibility impact: export format stays v1 (additive `archived*` fields); files with set-aside entries need the RC2 recovery tool. The till ↔ server contract is unchanged (`app_role()` exists since migration 003, granted to `authenticated`).
+
+## RC3: owner reconciliation (2026-10-16)
+
+Details: [`../../desktop-app/release-1.0.16.md`](../../desktop-app/release-1.0.16.md) §11. RC1 and RC2 and their frozen folders are unchanged.
+
+| | RC2 | RC3 |
+|---|---|---|
+| Set-aside rows and updates | stay forever and block every ordinary install; only "Install anyway (after export)" | the owner can **reconcile** a conflict, quarantined or set-aside row (`matched` / `recreated` / `cancelled`). New status `reconciled`: never sent, kept with payload + key + history, in every export, and it no longer blocks an ordinary install while its record checks out |
+| Owner check | `app_role()` by main; offline allowed for a token verified within 12 h (recovery install) | for reconciling: `app_role()` + `app_user_id()` + own `users` row by main **at that moment, no cache; offline refused**. Main seals the record (HMAC, key in userData) |
+| Server lookup | none | read-only check of `sales`/`sale_items` by client operation identity (shop, shift, ring-up time, amounts, lines) through the owner's RLS. The idempotency ledger is not readable by app users (062) |
+| Tamper handling | none | a reconciled row whose payload/key/record/seal no longer match goes back to Set aside ("needs attention") and blocks updates again |
+| Recovery tool | `--include-set-aside` | also `skipped-reconciled` unless `--include-reconciled` |
+
+**Till ↔ server contract:** unchanged. No migration and no server change. The new reads use existing grants and policies:
+- `app_user_id()` (015/064, `authenticated`);
+- `users` own row (056);
+- `sales` / `sale_items` for ADMIN (069).
+
+Export format stays **v1**, additive (`reconciled` status, `statusBeforeReconcile`, `reconciliation`, `reconcileRejected`, `reconciliationLog`). RC1/RC2 files still read. A file with reconciled entries needs the RC3 recovery tool. Optional server-side tamper evidence (086/087) is a proposal only (§11.7).

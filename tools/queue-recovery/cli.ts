@@ -27,13 +27,16 @@ const USAGE = `usage:
   queue-recovery inspect <file.spqx> [--json]
   queue-recovery replay  <file.spqx> --target <url> [--dry-run] [--email <user email>]
                          [--confirm-host <host>] [--include-conflicts] [--include-quarantined] [--include-set-aside]
-                         [--rest-prefix /rest/v1] [--report <out.json>]
+                         [--include-reconciled] [--rest-prefix /rest/v1] [--report <out.json>]
   --target is mandatory (no default, no env fallback). A host different from the one
   the till was built for must be repeated with --confirm-host.
   --include-quarantined replays entries the till QUARANTINED (queued for another backend,
   e.g. by v1.0.15 for hosted); it always needs --confirm-host <target host> as well.
   --include-set-aside replays entries an owner SET ASIDE on the till (RC2); without it they
-  are reported as skipped-set-aside and never sent.`;
+  are reported as skipped-set-aside and never sent.
+  --include-reconciled replays entries an owner RECONCILED on the till (RC3: matched /
+  recreated / cancelled); without it they are reported as skipped-reconciled (with the
+  owner's record) and never sent. Normally wrong: only on an explicit owner decision.`;
 
 interface Args { cmd: string; file: string; flags: Map<string, string | true> }
 
@@ -44,7 +47,7 @@ function parseArgs(argv: string[]): Args {
     const a = rest[i];
     if (!a.startsWith("--")) throw new Error(`unexpected argument: ${a}`);
     const name = a.slice(2);
-    if (["dry-run", "json", "include-conflicts", "include-quarantined", "include-set-aside"].includes(name)) flags.set(name, true);
+    if (["dry-run", "json", "include-conflicts", "include-quarantined", "include-set-aside", "include-reconciled"].includes(name)) flags.set(name, true);
     else if (["target", "email", "confirm-host", "rest-prefix", "report"].includes(name)) {
       const v = rest[++i];
       if (v === undefined) throw new Error(`--${name} needs a value`);
@@ -86,7 +89,12 @@ function printSummary(p: QueueExportPayload): void {
   console.log(`entries: ${s.total}  by status ${JSON.stringify(s.byStatus)}  by op ${JSON.stringify(s.byOpType)}`);
   if (p.redactedFields > 0) console.log(`note: ${p.redactedFields} credential-like field(s) were redacted at export; affected entries are not replayed`);
   for (const e of p.entries) {
-    console.log(`  ${String(e.seq ?? "-").padStart(3)}  ${e.opType.padEnd(28)}  ${e.status.padEnd(8)}  attempts ${String(e.attempts).padStart(2)}  key ${e.idempotencyKey?.slice(0, 8) ?? "-"}  ring-up ${e.ringUpAt ?? "-"}${e.refs.length ? `  refs ${e.refs.map((r) => r.field).join(",")}` : ""}${e.lastErrorClass ? `  last ${e.lastErrorClass}` : ""}`);
+    const r = e.reconciliation;
+    console.log(`  ${String(e.seq ?? "-").padStart(3)}  ${e.opType.padEnd(28)}  ${e.status.padEnd(8)}  attempts ${String(e.attempts).padStart(2)}  key ${e.idempotencyKey?.slice(0, 8) ?? "-"}  ring-up ${e.ringUpAt ?? "-"}${e.refs.length ? `  refs ${e.refs.map((x) => x.field).join(",")}` : ""}${e.lastErrorClass ? `  last ${e.lastErrorClass}` : ""}${r ? `  reconciled ${r.resolution}${r.serverRef ? ` -> ${r.serverRef.receiptNo ?? r.serverRef.saleId}` : ""} by ${r.owner.name} at ${r.reconciledAt}` : ""}${e.reconcileRejected ? "  RECONCILIATION REJECTED (integrity)" : ""}`);
+  }
+  if (p.reconciliationLog.length) {
+    console.log(`reconciliation log (${p.reconciliationLog.length}):`);
+    for (const l of p.reconciliationLog) console.log(`  ${l.at}  ${l.event.padEnd(15)}  ${l.localId}  ${l.detail}`);
   }
 }
 
@@ -159,6 +167,7 @@ async function main(): Promise<number> {
     includeConflicts: args.flags.has("include-conflicts"),
     includeQuarantined,
     includeSetAside: args.flags.has("include-set-aside"),
+    includeReconciled: args.flags.has("include-reconciled"),
     dryRun,
   });
   console.log(`\n${formatReport(report)}`);
