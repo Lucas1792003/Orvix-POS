@@ -70,17 +70,30 @@ export function validateResolution(
 
   switch (input.resolution) {
     case "matched": {
-      if (check.result === "not-recorded" || found.length === 0) return { ok: false, message: "The server check found no sale to match." };
-      const id = check.result === "recorded" ? check.matches[0]?.saleId : input.matchedSaleId;
-      const ref = found.find((s) => s.saleId === id);
-      if (!ref) return { ok: false, message: "Pick one of the sales the server check found." };
-      if (check.result === "recorded" && input.matchedSaleId && input.matchedSaleId !== ref.saleId) {
+      // Only an UNAMBIGUOUS server result may be matched: exactly one exact
+      // match and no other plausible candidate ("recorded"). An inconclusive
+      // check (several possible sales, a read error, ...) cannot be matched by
+      // picking one; the entry stays set aside until the check is unambiguous.
+      if (check.result !== "recorded" || check.matches.length !== 1 || check.candidates.length !== 0) {
+        return { ok: false, message: check.result === "inconclusive"
+          ? "The server check is inconclusive, so this entry cannot be matched. Keep it set aside and compare it with the export."
+          : "The server check found no sale to match." };
+      }
+      const ref = check.matches[0];
+      if (input.matchedSaleId && input.matchedSaleId !== ref.saleId) {
         return { ok: false, message: "The server check found exactly one sale; matched must reference it." };
       }
       return { ok: true, serverRef: ref, reason };
     }
     case "recreated": {
-      if (check.result === "recorded") return { ok: false, message: "The server already has this sale: choose \"matched\" (re-entering it would count it twice)." };
+      // Re-entering is only safe when the server definitely does not have the
+      // sale: after an inconclusive check one of the candidates might be it,
+      // and a re-entry would count the sale twice.
+      if (check.result !== "not-recorded") {
+        return { ok: false, message: check.result === "recorded"
+          ? "The server already has this sale: choose \"matched\" (re-entering it would count it twice)."
+          : "The server check is inconclusive; re-entering could count the sale twice. Keep it set aside and compare it with the export." };
+      }
       const sale = input.recreatedSale;
       if (!sale) return { ok: false, message: "Verify the re-entered sale on the server first." };
       if (found.some((s) => s.saleId === sale.saleId)) return { ok: false, message: "That sale is one the server check found: choose \"matched\" instead." };
@@ -110,8 +123,8 @@ export function recordConsistencyProblem(row: SyncOutboxEntry, rec: Reconciliati
   if (!rec.check || rec.check.entryDigest !== rec.entryDigest) return "server check not bound to the entry";
   const found = [...(rec.check.matches ?? []), ...(rec.check.candidates ?? [])];
   if (rec.resolution === "cancelled" && (rec.serverRef !== null || rec.check.result !== "not-recorded")) return "cancelled without a not-recorded check";
-  if (rec.resolution === "matched" && (!rec.serverRef || !found.some((s) => s.saleId === rec.serverRef!.saleId))) return "matched sale not from the check";
-  if (rec.resolution === "recreated" && (!rec.serverRef || rec.check.result === "recorded")) return "recreated without a verified new sale";
+  if (rec.resolution === "matched" && (!rec.serverRef || rec.check.result !== "recorded" || (rec.check.matches ?? []).length !== 1 || (rec.check.candidates ?? []).length !== 0 || rec.check.matches[0].saleId !== rec.serverRef.saleId)) return "matched without an unambiguous server sale";
+  if (rec.resolution === "recreated" && (!rec.serverRef || rec.check.result !== "not-recorded" || found.some((s) => s.saleId === rec.serverRef!.saleId))) return "recreated without a not-recorded check and a verified new sale";
   if (!["matched", "recreated", "cancelled"].includes(rec.resolution)) return "unknown resolution";
   return null;
 }

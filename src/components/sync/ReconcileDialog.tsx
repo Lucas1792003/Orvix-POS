@@ -53,7 +53,6 @@ export function ReconcileDialog(props: {
   const [, setExportTick] = useState(0);
   const [check, setCheck] = useState<ServerCheck | null>(null);
   const [resolution, setResolution] = useState<ReconcileResolution | null>(null);
-  const [matchedSaleId, setMatchedSaleId] = useState("");
   const [recreatedRef, setRecreatedRef] = useState("");
   const [recreatedSale, setRecreatedSale] = useState<ServerSaleRef | null>(null);
   const [recreatedError, setRecreatedError] = useState<string | null>(null);
@@ -67,7 +66,7 @@ export function ReconcileDialog(props: {
   // Load the row as it is NOW (the compare-and-set token is taken here).
   useEffect(() => {
     let alive = true;
-    setRow(null); setSnapshot(""); setDigest(null); setCheck(null); setResolution(null); setMatchedSaleId("");
+    setRow(null); setSnapshot(""); setDigest(null); setCheck(null); setResolution(null);
     setRecreatedRef(""); setRecreatedSale(null); setRecreatedError(null); setReason(""); setError(null);
     if (!localId) return;
     void (async () => {
@@ -108,7 +107,6 @@ export function ReconcileDialog(props: {
     const c = await checkServerRecord(row, { reader, resolveRef: (id) => resolved.get(id) ?? null, entryDigest: digest });
     setCheck(c);
     setResolution(null);
-    setMatchedSaleId(c.result === "recorded" ? c.matches[0]?.saleId ?? "" : "");
     setRecreatedSale(null);
   });
 
@@ -126,7 +124,7 @@ export function ReconcileDialog(props: {
     if (!row || !resolution) return;
     try {
       const stored = await reconcileOutboxEntry(row.localId, {
-        resolution, check, matchedSaleId: matchedSaleId || null, recreatedSale, reason, expectedRow: snapshot,
+        resolution, check, matchedSaleId: null, recreatedSale, reason, expectedRow: snapshot,
       }, {
         attest: api?.reconcileAttest ? (req) => api.reconcileAttest!(req) : undefined,
         accessToken: currentAccessToken,
@@ -141,7 +139,7 @@ export function ReconcileDialog(props: {
   });
 
   const canSubmit = !busy && !block && check !== null && resolution !== null && reason.trim().length > 0
-    && (resolution !== "matched" || Boolean(matchedSaleId))
+    && (resolution !== "matched" || check?.result === "recorded")
     && (resolution !== "recreated" || recreatedSale !== null)
     && (resolution !== "cancelled" || check.result === "not-recorded");
 
@@ -211,19 +209,17 @@ export function ReconcileDialog(props: {
               <h4 className="font-semibold text-slate-700">2. Resolution</h4>
               <div className="mt-2 space-y-2">
                 <label className="flex items-start gap-2">
-                  <input type="radio" name="resolution" disabled={busy || found.length === 0 || check.result === "not-recorded"}
+                  <input type="radio" name="resolution" disabled={busy || check.result !== "recorded"}
                     checked={resolution === "matched"} onChange={() => setResolution("matched")} data-testid="reconcile-resolution-matched" />
                   <span><b>Matched</b>: the server already has it (the sale found above).</span>
                 </label>
-                {resolution === "matched" && check.result !== "recorded" && (
-                  <select className="ml-6 rounded-lg border border-slate-200 px-2 py-1 text-xs" value={matchedSaleId}
-                    onChange={(e) => setMatchedSaleId(e.target.value)} data-testid="reconcile-matched-sale">
-                    <option value="">Pick the sale…</option>
-                    {found.map((s) => <option key={s.saleId} value={s.saleId}>{saleText(s)}</option>)}
-                  </select>
+                {check.result === "inconclusive" && (
+                  <p className="ml-6 text-xs text-amber-700" data-testid="reconcile-inconclusive-note">
+                    The server check is inconclusive, so this entry cannot be matched or re-entered. Keep it set aside and compare it with the export.
+                  </p>
                 )}
                 <label className="flex items-start gap-2">
-                  <input type="radio" name="resolution" disabled={busy || check.result === "recorded"}
+                  <input type="radio" name="resolution" disabled={busy || check.result !== "not-recorded"}
                     checked={resolution === "recreated"} onChange={() => setResolution("recreated")} data-testid="reconcile-resolution-recreated" />
                   <span><b>Recreated</b>: you rang it up again through the normal POS flow. Enter the new receipt number.</span>
                 </label>
