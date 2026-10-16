@@ -235,7 +235,7 @@ See [studio-isolation.md](studio-isolation.md). In short:
 |---|---|---|
 | 0 | 083 + the two functions deployed and verified ([migration-083-g5.md §7](migration-083-g5.md)) | in progress (coordinator) |
 | 1 | Ship this client build (validated desktop flow) to **every** till and the web build. Verify one desktop upload per till: `org/<org>/temp/<session>` object, session COMPLETED, `products.image_url` = derived URL. e2e spec G (`G-desktop-validated`, `G-desktop-polyglot`) | owner |
-| 2 | Wait, at least 14 days with no owner-stamped direct upload, or confirm every till's build version by hand | owner |
+| 2 | Prove every till: register + one desktop test upload per till, then `deploy/lucashome/verify-till-readiness.sh` must say **GO** ([till-readiness-084.md](till-readiness-084.md)); it includes 084's 14-day predicate | owner |
 | 3 | Pre-check (read-only): the readiness predicate of 084 → `0`. Dry run `apply-migrations.sh --from 084 --to 084 --dry-run`, then apply | owner |
 | 4 | Verify: 2 storage policies; a direct upload with a staff JWT → 403; the validated flow still works; audit `--max-migration 084`; e2e `G-084-direct-refused` | — |
 | S1 | Deploy the sweep files (`backup/deploy.sh`), dry run, review counts | owner |
@@ -282,7 +282,7 @@ the policy count is 2 (t09, t14).
    RLS). A staff member can point it at any URL, but can no longer place
    bytes on the public origin. Low.
 2. **Readiness guard is heuristic:** it sees only active old tills (§1.2).
-   Mitigation: the manual build check in step 2.
+   Mitigation: the per-till proof in step 2 ([till-readiness-084.md](till-readiness-084.md)).
 3. **Abandoned objects live up to grace + schedule interval** (24 h + cron
    period) before the sweep removes them. They are served as `image/*`, with
    nosniff if the optional 083 Envoy rule is applied. Low.
