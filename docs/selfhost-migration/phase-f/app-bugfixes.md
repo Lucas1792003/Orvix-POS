@@ -124,3 +124,134 @@ Earlier attempts that failed, and what was done (each one restarted the count):
   (invariants first, 2 to 4 PUTs, no unexplained PUT failure, no more PUTs
   than issued tokens) and records every PUT. Isolated, it passed 6 of 6
   (200+200 three times, 200+409 three times).
+
+## D300 analysis · "cancelled on the computer" with no desktop step (2026-10-16)
+
+Local investigation only: code reading, unit tests and a real-browser harness
+against a mocked loopback backend. Nothing was run against lucashome or the
+hosted project.
+
+### Every path that cancels a phone-upload session
+
+The server sets `CANCELED` in one place only: `cancel_product_image_upload_session`
+(019; `created_by = caller AND status = 'PENDING'`). No later migration, edge
+function or sweep writes `CANCELED` to `product_image_upload_sessions`. The
+phone page shows "cancelled on the computer" for any status other than
+PENDING, COMPLETED or EXPIRED (`phaseForStatus` in `client.js`), but the D300
+row really was `CANCELED`. Client callers of the RPC:
+
+1. `ProductImagePhoneUploadModal`: the only caller for a QR session. Before
+   this fix it cancelled from `handleClose` whenever the session was PENDING.
+   `handleClose` was reached from:
+   - the footer **Close** button;
+   - the header **X** button;
+   - **Escape**: a `keydown` listener on `window` (`Modal.tsx`), with any
+     focus target, trusted or synthetic, and no IME check;
+   - a **backdrop click**: `onClick` with `target === currentTarget`. A click
+     event targets the common ancestor of mousedown and mouseup, so pressing
+     inside the dialog and releasing outside it (a text-selection drag) also
+     counted.
+2. `uploadProductImage` (`productImageStorage.ts`, the desktop file-picker
+   path). It cancels only the session it created itself, after a bad path or
+   a failed upload. It never knows a QR session's id.
+
+There was **no** cancel on unmount, in an effect cleanup, on route change, on
+blur, focus or visibility change, in the status poller, on auth refresh or in
+the realtime handlers. The session id lives only in the modal's state, and the
+phone page has no cancel call.
+
+### Remount and timing paths checked (none can cancel)
+
+- `AppLayout`: a refresh on focus or visibility and every 120 s (`pullDeltas`),
+  an outbox tick every 30 s, `onAuthStateChange` (SIGNED_IN /
+  TOKEN_REFRESHED, which only drains the outbox), realtime inventory rows
+  (store updates). These re-render the product form but do not remount it.
+  `isLoaded` going false ("Loading data…") or a viewport under 768 px would
+  unmount the modal. That loses the modal but cancels nothing, and the phone
+  still finishes.
+- The modal is keyed on nothing. Polling is keyed on `[open, session]` and
+  `onUploaded` goes through a ref, so a new parent callback restarts nothing.
+  The create effect re-runs if `productId` or `currentShopId` changes. That
+  makes a new QR and leaves the old session PENDING (not cancelled). It is a
+  minor issue of its own: the desktop then polls the new session.
+- Time: `getSecondsLeft` is display only. The poller ends at expiry (10 min)
+  with EXPIRED, not CANCELED. Nothing changes at 300 s.
+- StrictMode double effects: the create effect's cleanup only sets
+  `active = false`.
+
+Harness evidence (`npm run test:phone-modal`, i.e.
+`tools/phone-modal-harness/run.mjs`): the real `ProductImageInput` and modal
+under StrictMode in headless Chromium, with Playwright's fake clock and every
+backend request answered by a mock on `127.0.0.1:59999` (any other host fails
+the run). On the **unfixed** code:
+
+| Scenario | cancel RPCs |
+|---|---|
+| 300 s, re-render every 1 s, blur/focus/visibilitychange every 20 s, mouse moves and wheel every 30 s | 0 |
+| 300 s, re-render every 50 ms | 0 |
+| unmount at +100 s, remount, re-key | 0 |
+| Close / X | 1 (expected) |
+| Escape (trusted) | 1 |
+| Escape dispatched by script (`isTrusted=false`) | 1 |
+| click on the backdrop | 1 |
+| press inside the dialog, release on the backdrop | 1 |
+
+### Root cause (most likely), and what is still uncertain
+
+App-internal causes are ruled out: no re-render, remount, timer, focus or
+auth path can call the RPC. So the cancel came from a real input event in the
+visible Electron window (1366x768, shown and focused by `main.cjs`, not
+headless; the phone browser is headless and takes no focus). That was an
+Escape key, a click anywhere on the dimmed area outside the dialog, or a drag
+that ended there, during the 5-minute idle wait of a 25-minute run on a
+workstation in use. Playwright sends no input to the desktop during that
+wait. The modal made each of these an immediate, silent cancel. Not proven:
+the original run kept no cancel timestamp or trigger, and the 7 later D300
+runs passed.
+
+### Fix (UX hardening, server and security unchanged)
+
+- `lib/phoneUploadClose.ts`: `decidePhoneUploadClose`. While a session is
+  PENDING, the explicit buttons (footer Close, header X, and "Stop upload")
+  cancel and close as before. **Escape and a backdrop click now only show
+  "Stop this phone upload?"** with "Keep waiting" (focused) and "Stop upload".
+  With nothing pending, every trigger just closes. Unmounting never cancels:
+  the server expires the session.
+- `Modal.tsx` (all modals): the backdrop closes only when the press also
+  started on the backdrop (`isBackdropDismiss`), so a drag out of the dialog
+  no longer closes anything. Escape is ignored during an IME composition.
+  `onClose` now receives the reason (`escape` / `backdrop` / `x-button`) and
+  `isTrusted`. Existing callers ignore them.
+- The cancel RPC, its rules and the session lifetime are untouched. The user
+  can still cancel at any time. An abandoned QR expires on the server as
+  before.
+
+### Diagnostics
+
+- Every close request while PENDING logs one console line:
+  `[phone-upload] close requested trigger=<close-button|x-button|confirm-stop|escape|backdrop|unmount> decision=<cancel+close|confirm|close|none> phase=… session=...<last 6> shown=+Ns left=Ns trusted=… visibility=… focus=…`
+- `Terminal.phoneUploadMarkers` / `phoneUploadMarkersSince()` (e2e) collects
+  these lines. Spec D puts them in the "phone did not finish" and "desktop
+  did not show the upload" diagnostics, with whether the stop confirmation is
+  showing. It records them as INFO on a passing D30–D300 case too, and
+  D-cancelled asserts `trigger=close-button decision=cancel+close`. A
+  recurrence now names its trigger and its timing. An Escape or a stray
+  click no longer fails D300; it shows up as an INFO line.
+
+### Tests
+
+- `src/lib/phoneUploadClose.test.ts` (10 tests): the decision table, 300 s
+  of repeated implicit dismissals under fake timers (never a cancel), the
+  marker format, the backdrop and Escape rules, and a source guard. The guard
+  checks that the modal calls the RPC in exactly one place, inside
+  `requestClose` behind `decision.cancel`, and that all `Modal` close reasons
+  go through it. The repo has no jsdom or Testing Library and none was added,
+  so component behaviour is covered by the harness.
+- Harness on the fixed code: 12/12 PASS. That covers the scenarios above (0
+  cancels; Escape, synthetic Escape and backdrop raise the confirmation; the
+  drag does nothing), plus Close and X (1 cancel each), Escape then "Stop
+  upload" (1), Escape then "Keep waiting" then 270 s (0), unmount (0, with an
+  `unmount` marker), and "COMPLETED then Escape" (closes, 0).
+- `npx tsc -b`, `npx tsc -p e2e/tsconfig.json`: clean. `npx vitest run`:
+  971 passed (baseline 961). Spec D was not run (live). The coordinator
+  should run it.
