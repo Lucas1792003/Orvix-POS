@@ -639,13 +639,16 @@ export class Terminal {
 
   /** Let the request reach the server, then drop the response ("commit then
    *  network cut"). Applies once per matching request; counts hits. */
-  async routeCommitThenAbort(pathPart: string, counter: { hits: number; serverStatus?: number }): Promise<string> {
+  async routeCommitThenAbort(pathPart: string, counter: { hits: number; serverStatus?: number; cut?: number }): Promise<string> {
     const glob = `${liveCfg().url}/**${pathPart}**`;
     await this.page.route(glob, async (route: Route) => {
       counter.hits++;
       const res = await route.fetch();
       counter.serverStatus = res.status();
-      await route.abort("connectionreset");
+      // `cut` counts requests whose server answer is captured AND whose reply
+      // was dropped: wait on it (not on hits) before unrouting
+      await route.abort("connectionreset").catch(() => {});
+      counter.cut = (counter.cut ?? 0) + 1;
     });
     return glob;
   }

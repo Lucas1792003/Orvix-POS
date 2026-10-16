@@ -183,10 +183,11 @@ test("I2 response lost: server committed, reply cut; owner sets it aside and rec
 
   // the first complete_sale reaches the server (commits) and its reply is cut;
   // every later send gets 503 so the entry stays queued
-  const cut = { hits: 0 } as { hits: number; serverStatus?: number };
+  const cut = { hits: 0 } as { hits: number; serverStatus?: number; cut?: number };
   const gCut = await A.routeCommitThenAbort("/rest/v1/rpc/complete_sale", cut);
   await A.setOffline(false);
-  await expect.poll(() => cut.hits, { timeout: 120_000 }).toBeGreaterThan(0);
+  // wait until the server's answer was captured and the reply cut (not just until the request started)
+  await expect.poll(() => cut.cut ?? 0, { timeout: 120_000 }).toBeGreaterThan(0);
   await A.unroutePath(gCut);
   const held = { hits: 0 };
   const g503 = await A.routeStatus("/rest/v1/rpc/complete_sale", 503, { message: "e2e: held (spec I2)" }, held);
