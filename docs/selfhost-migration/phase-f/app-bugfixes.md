@@ -94,3 +94,33 @@ with its last attempt, Retry-After cut to the deadline, and stop.
 request shape, network error, timeout, a 502 HTML page, 429 + Retry-After,
 the not-found RPC error, and unreadable vs `null` bodies. The spec-D failure
 diagnostic now also reports whether "reconnecting" was showing.
+
+## Suite stability (2026-10-15/16, lucashome, `E2E_PHONE_PAGE=deployed`)
+
+| Run | Order | Result | Duration | Cleanup |
+|---|---|---|---|---|
+| final 1 | normal | 44/44 | 24.7 m | CLEAN, 574 objects (575 files incl. `.gitkeep`) |
+| final 2 | normal | 44/44 | 24.3 m | CLEAN, same |
+| final 3 | reverse | 44/44 | 24.7 m | CLEAN, same |
+
+Earlier attempts that failed, and what was done (each one restarted the count):
+
+- **D300** (normal order): at +300 s the phone was told "cancelled on the
+  computer". The session row was CANCELED, and only the desktop's cancel RPC
+  sets that (it runs when the modal is closed while PENDING: Close, X,
+  Escape or a backdrop click). No test step does any of these. External
+  input to the visible Electron window is the likely cause, but this is not
+  proven. Spec D now records the phone message, session row, desktop modal
+  status, its create / cancel / status requests and a desktop screenshot
+  whenever the phone does not finish. 7 later D300 runs passed.
+- **A3** (reverse order): the receipt was `…-20261016-0023`, not `-0026`.
+  Receipt numbers restart per shop per receipt day. The run crossed 00:00
+  UTC with F/C/B sales before it, and A3 had assumed "all shop sales + 1".
+  It now checks the receipt against its own day bucket. Test bug.
+- **D-race** (reverse order): 3 PUTs, not 2, all 200 or duplicate, with
+  every invariant intact (one object, one completion, both calls
+  COMPLETED). The phone client retries a PUT once with a fresh token after
+  a transport failure, by design. The test now asserts that contract
+  (invariants first, 2 to 4 PUTs, no unexplained PUT failure, no more PUTs
+  than issued tokens) and records every PUT. Isolated, it passed 6 of 6
+  (200+200 three times, 200+409 three times).
