@@ -42,7 +42,39 @@ function renderFatal(err: unknown): void {
   );
 }
 
+// Before supabase-js exists: make sure this till's local data belongs to
+// the backend this build talks to (lib/backendOrigin.ts). Outbox entries
+// queued for another backend (v1.0.15 → hosted) are quarantined, and that
+// backend's cached catalogue, auth cache and sessions are discarded. A
+// failure here must not stop the till: the drain re-checks every entry's
+// origin before sending anything.
+async function prepareLocalState(): Promise<void> {
+  const [{ resolveBackendConfig }, { localDb }, { prepareLocalStateForBackend }] = await Promise.all([
+    import("./lib/backendConfig"),
+    import("./lib/localDb"),
+    import("./lib/backendOrigin"),
+  ]);
+  const { url } = resolveBackendConfig({
+    VITE_SUPABASE_URL: import.meta.env.VITE_SUPABASE_URL,
+    VITE_SUPABASE_ANON_KEY: import.meta.env.VITE_SUPABASE_ANON_KEY,
+    VITE_SUPABASE_EXPECTED_HOST: import.meta.env.VITE_SUPABASE_EXPECTED_HOST,
+  });
+  try {
+    const result = await prepareLocalStateForBackend({
+      db: localDb,
+      backendUrl: url,
+      storage: typeof localStorage === "undefined" ? null : localStorage,
+    });
+    if (result.originChanged || result.quarantined > 0 || result.removedAuthSessions > 0) {
+      console.info("[boot] local data prepared for this backend", result);
+    }
+  } catch (err) {
+    console.error("[boot] Could not prepare local data for this backend:", err);
+  }
+}
+
 async function boot(): Promise<void> {
+  await prepareLocalState();
   const [{ default: App }, { useAuthStore }] = await Promise.all([
     import("./App"),
     import("./stores/authStore"),
@@ -50,6 +82,10 @@ async function boot(): Promise<void> {
 
   // Restore Supabase session on app start
   void useAuthStore.getState().restoreSession();
+
+  // Desktop updater guard: tell the main process whether it may install an
+  // update (no unsynced sales, online, signed in, no sale in progress).
+  void import("./lib/updateGuardBridge").then(({ startUpdateGuardBridge }) => startUpdateGuardBridge());
 
   root.render(
     <React.StrictMode>

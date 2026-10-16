@@ -81,6 +81,7 @@ const e = (over: Partial<QueueExportEntry> & { opType: string }): QueueExportEnt
     seq, opId: `outbox-${seq}`, idempotencyKey: key, kind: "rpc", table: null, tableOp: null, rowId: null,
     refs: [], provisional: [], shopId: "shop-1", createdAt: `2026-10-13T01:00:${String(seq).padStart(2, "0")}.000Z`,
     ringUpAt: null, status: "pending", attempts: 2, lastErrorClass: "transient", lastError: "Failed to fetch", nextAttemptAt: null,
+    backendOrigin: ORIGIN, quarantineReason: null,
     ...over,
     payload: over.payload !== undefined ? over.payload : { ...(over.kind === "table_write" ? {} : { p_idempotency_key: key }) },
   };
@@ -196,6 +197,25 @@ describe("replayExport", () => {
     p2.entries.find((x) => x.seq === 5)!.status = "conflict";
     const withConflicts = await replayExport(p2, opts(b, { includeConflicts: true }));
     expect(withConflicts.ops[4]).toMatchObject({ opType: "categories.insert", outcome: "applied" });
+  });
+
+  it("skips entries the till quarantined (another backend) unless explicitly included", async () => {
+    const b = new FakeBackend();
+    const p = outageQueue();
+    // v1.0.15-era entries: no recorded backend, quarantined by the 1.0.16 till
+    for (const x of p.entries) {
+      x.status = "quarantined";
+      x.backendOrigin = null;
+      x.quarantineReason = "Queued by an older app version";
+    }
+    const r = await replayExport(p, opts(b));
+    expect(r.counts["skipped-quarantined"]).toBe(5);
+    expect(b.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+    expect(exitCodeFor(r)).toBe(4);
+
+    const forced = await replayExport(outageQueue(), opts(b, { includeQuarantined: true }));
+    expect(forced.counts["skipped-quarantined"]).toBe(0);
+    expect(b.sales).toHaveLength(3);
   });
 
   it("--dry-run sends nothing", async () => {

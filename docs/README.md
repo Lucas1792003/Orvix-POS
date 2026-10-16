@@ -75,6 +75,9 @@ outside this public repository.
 | [phase-f/migration-082.md](./selfhost-migration/phase-f/migration-082.md) | Close the "link any auth account" path (082, prepared) |
 | [phase-f/electron-compatibility.md](./selfhost-migration/phase-f/electron-compatibility.md) | Electron client × backend compatibility at schema 081 |
 | [phase-f/app-bugfixes.md](./selfhost-migration/phase-f/app-bugfixes.md) | Barcode-loss and QR status-polling fixes found by the e2e suite |
+| [phase-f/org-isolation-security-audit.md](./selfhost-migration/phase-f/org-isolation-security-audit.md) | Organization-isolation security audit (`tools/security-audit`) |
+| [phase-f/migration-083-g5.md](./selfhost-migration/phase-f/migration-083-g5.md) | Product-image upload limits and validated phone completion (083) |
+| [phase-f/migration-085-png.md](./selfhost-migration/phase-f/migration-085-png.md) | PNG completion and scoped cleanup of refused uploads (085) |
 
 ## Code Layout (one-screen orientation)
 
@@ -100,6 +103,8 @@ outside this public repository.
   `phone-upload-token`, `phone-upload-page`, `staff-admin`,
   `platform-console`). `rotate-audit-log` and
   `weekly-sales-report` were removed on 2026-10-13.
+- **`tools/security-audit/`** — the organization-isolation security audit;
+  **`e2e/`** — Electron end-to-end suite.
 
 ## Where Did The Old Docs Go?
 

@@ -169,3 +169,39 @@ Tests: +5 in `createStaffUser.test.ts`, +3 in `staffForm.test.ts`.
 | `npx vitest run --exclude '.claude/**'` | **892 passed**, 63 skipped (baseline 884 + 8) |
 | Harness `supabase/tests/phase-d/run.sh` (container `pos-test-db-compat`, port 55491) | **601 / 0**, 0 findings, 0 aborted (baseline 564 + 37 `t19`) |
 | `build:electron` guard runs | 3 refusals + 1 pass (§3) |
+
+## 8. Update 2026-10-16: release candidate 1.0.16
+
+Release notes and the canary checklist are kept with the private ops notes. Local only. Nothing published, hosted not contacted, no live test on the self-hosted stack.
+
+**Gaps from §5:**
+
+| §5 item | State |
+|---|---|
+| 2. Outbox entries carry no backend stamp (D-d) | **fixed.** Entries record `backendOrigin`. Untagged (v1.0.15) or foreign entries are quarantined at startup and before every send: never sent, never retried, never auto-deleted, exported with their origin. A backend change also discards the cached catalogue, cursors, auth cache and every stored session (re-login) |
+| 3. Version still 1.0.15; stale `release/` | **fixed.** `package.json` 1.0.16. The old `release/` output was moved out of the repository |
+| 4. Updater installs on quit with a pending queue | **fixed.** `autoInstallOnAppQuit` is off. A guarded install happens only with the queue empty, online, signed in and no sale in progress, or through the owner's export-first recovery path |
+| 1. Version handshake (`app_backend_info()`) | open (needs a migration; not a release blocker now that entries carry their backend) |
+
+The client also identifies itself on every request:
+`X-Client-Info: shwephala-pos/1.0.16 (validated-uploads; idem-v1; outbox-origin-v1; update-guard-v1)`.
+
+**Matrix rows changed for the current build × the self-hosted stack:**
+
+| Row | State |
+|---|---|
+| Desktop direct image upload | removed. The validated session flow only; clear error on a server without it |
+| Queue export | includes quarantined entries |
+| Upgrade 1.0.15 → 1.0.16 with pending entries | now **L**: quarantined, export required, no replay. It was **X** in release-compat §5, which replayed hosted-era entries on the self-hosted stack |
+
+**Operational rule (the 1.0.15 updater has no guard):** every 1.0.15 till is at 0 pending and closed before 1.0.16 is published as latest. The owner also runs a read-only hosted delta check for rows written after the migration export.
+
+**Tests:**
+
+| Suite | Result |
+|---|---|
+| vitest | **1010 passed** / 66 skipped (baseline 972 + 38) |
+| Deno functions | 94 |
+| tsc | app, e2e, tools clean |
+| Electron-level updater-guard test | 3/3 |
+| Packaged arm64 smoke, all requests aborted | version / backend / till id shown; 0 hosted requests; quarantine shown for a v1.0.15-style entry |

@@ -13,7 +13,7 @@ const entry = (over: Partial<QueueExportEntry>): QueueExportEntry => ({
   opType: "complete_sale", table: null, tableOp: null, rowId: null,
   payload: { p_shop_id: "shop-1", p_idempotency_key: "11111111-1111-4111-8111-111111111111", p_items: [{ productId: "p1", qty: 1 }] },
   refs: [], provisional: [], shopId: "shop-1", createdAt: "2026-10-13T01:00:00.000Z", ringUpAt: "2026-10-13T01:00:00.000Z",
-  status: "pending", attempts: 0, lastErrorClass: null, lastError: null, nextAttemptAt: null,
+  status: "pending", attempts: 0, lastErrorClass: null, lastError: null, nextAttemptAt: null, backendOrigin: "https://pos.example.test", quarantineReason: null,
   ...over,
 });
 

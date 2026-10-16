@@ -5,6 +5,11 @@ import { useAppStore } from "../../stores/appStore";
 import { useDataStore } from "../../stores/dataStore";
 import { cn } from "../../lib/utils";
 import { backendHost } from "../../lib/supabase";
+import { APP_VERSION, CAPABILITY_SUMMARY } from "../../lib/clientInfo";
+import { getTillId } from "../../lib/tillId";
+
+// On screen only (per-till verification); never sent in any request.
+const TILL_ID = getTillId();
 import type { Permission, Role } from "../../types";
 import { hasPermission, ROUTE_PERMISSIONS } from "../../lib/permissions";
 import { ShopSwitcher } from "./ShopSwitcher";
@@ -225,6 +230,16 @@ export const Sidebar = () => {
               user so a mis-targeted build is visible from any screen. */}
           <div className="sidebar-backend" title={`Backend: ${backendHost}`} data-testid="sidebar-backend">
             backend: {backendHost}
+          </div>
+          <div
+            className="sidebar-backend"
+            title={`Shwe Pha La POS ${APP_VERSION} · ${CAPABILITY_SUMMARY}`}
+            data-testid="sidebar-client-info"
+          >
+            v{APP_VERSION} · {CAPABILITY_SUMMARY}
+          </div>
+          <div className="sidebar-backend" title={`Till id: ${TILL_ID}`} data-testid="sidebar-till-id">
+            {TILL_ID}
           </div>
         </div>
         <div className="sidebar-footer-actions">

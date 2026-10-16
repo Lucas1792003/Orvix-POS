@@ -6,6 +6,7 @@ const { app, BrowserWindow, ipcMain, shell, dialog, autoUpdater: nativeAutoUpdat
 const fs = require("node:fs");
 const path = require("node:path");
 const { autoUpdater } = require("electron-updater");
+const { setupUpdater } = require("./updater.cjs");
 
 const isDev = !app.isPackaged;
 // Vite's default dev server port (see vite.config.ts) — overridable for a
@@ -130,6 +131,7 @@ function createWindow() {
 
 if (hasSingleInstanceLock) {
   app.whenReady().then(() => {
+    logUpdate("info", "app start", `version=${app.getVersion()}`, `packaged=${app.isPackaged}`, `platform=${process.platform}`);
     createWindow();
 
     app.on("activate", () => {
@@ -153,20 +155,16 @@ app.on("window-all-closed", () => {
 nativeAutoUpdater.on("before-quit-for-update", () => {
   logUpdate("info", "before-quit-for-update");
 });
-app.on("before-quit", () => {
-  logUpdate("info", "before-quit", `installRequested=${updateInstallStarted}`);
-});
 app.on("will-quit", () => {
   logUpdate("info", "will-quit", `windows=${BrowserWindow.getAllWindows().length}`);
 });
 
 // ------------------------------------------------------------------
 // Auto-update via electron-updater, checking GitHub Releases directly
-// (see package.json's "build.publish") — no separate update server needed.
-// A new version just needs `npm run electron:build:mac`/`:win` followed by
-// `electron-builder --publish always` (with a GH_TOKEN set) so the release
-// includes the latest.yml/latest-mac.yml metadata files this depends on;
-// a manually-uploaded release without those files won't be detected.
+// (see package.json's "build.publish"). Wiring and the 1.0.16 install guard
+// (never install while sales are unsynced or a sale is in progress) live in
+// electron/updater.cjs + electron/updateGuard.cjs. Releases are built with
+// `--publish never` and uploaded by hand (release notes: private ops notes).
 //
 // Real limitation, not yet worked around: on macOS, electron-updater's
 // actual install step (Squirrel.Mac) requires the app to be code-signed —
@@ -175,123 +173,17 @@ app.on("will-quit", () => {
 // this requirement and should auto-update even unsigned, aside from a
 // possible SmartScreen prompt on the downloaded update itself.
 // ------------------------------------------------------------------
-const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
-let updateCheckInFlight = false;
-let updateInstallStarted = false;
-// Set once a downloaded update's version is known (update-available /
-// update-downloaded), purely so the restart/quitAndInstall log lines below
-// can record which version is about to be installed, not just that a
-// restart happened.
-let pendingUpdateVersion = null;
-
-function checkForUpdates() {
-  if (updateCheckInFlight) return;
-  updateCheckInFlight = true;
-  logUpdate("info", "update check requested", `currentVersion=${app.getVersion()}`);
-  autoUpdater.checkForUpdates().catch((err) => {
-    logUpdate("error", "update check failed", err);
-  }).finally(() => {
-    updateCheckInFlight = false;
-  });
-}
-
-// Pushes live update status to the renderer (see preload.cjs's
-// onUpdateStatus) so the sidebar's "Check for Updates" button can show
-// checking/downloading/ready state without the user polling or restarting
-// the app to find out.
-function sendUpdateStatus(status) {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("updates:status", status);
-}
-
-function installDownloadedUpdate() {
-  if (updateInstallStarted) return false;
-  updateInstallStarted = true;
-  sendUpdateStatus({ state: "installing" });
-  logUpdate(
-    "info", "restart requested",
-    `currentVersion=${app.getVersion()}`, `updateVersion=${pendingUpdateVersion ?? "unknown"}`,
-    `platform=${process.platform}`,
-  );
-  logUpdate("info", "quitAndInstall called", "isSilent=false", "forceRunAfter=true");
-
-  // electron-updater owns the downloaded installer path, launch arguments,
-  // elevation fallback, and duplicate-install guard. Do not start the NSIS
-  // executable manually here. The installer-side lock probe in
-  // build/installer.nsh waits for actual write access after this graceful quit.
-  autoUpdater.quitAndInstall(false, true);
-
-  return true;
-}
-
-autoUpdater.autoDownload = true;
-autoUpdater.autoInstallOnAppQuit = true;
-autoUpdater.autoRunAppAfterInstall = true;
-autoUpdater.disableWebInstaller = true;
-autoUpdater.logger = {
-  info: (...args) => logUpdate("info", "electron-updater", ...args),
-  warn: (...args) => logUpdate("warn", "electron-updater", ...args),
-  error: (...args) => logUpdate("error", "electron-updater", ...args),
-  debug: (...args) => logUpdate("debug", "electron-updater", ...args),
-};
-
-autoUpdater.on("checking-for-update", () => {
-  logUpdate("info", "checking for update");
-  sendUpdateStatus({ state: "checking" });
+const updater = setupUpdater({
+  autoUpdater,
+  app,
+  dialog,
+  ipcMain,
+  getWindow: () => mainWindow,
+  log: logUpdate,
+  isDev,
 });
-autoUpdater.on("update-available", (info) => {
-  pendingUpdateVersion = info.version;
-  logUpdate(
-    "info", "update available; download started",
-    `currentVersion=${app.getVersion()}`, `updateVersion=${info.version}`,
-  );
-  sendUpdateStatus({ state: "available", version: info.version });
-});
-autoUpdater.on("update-not-available", (info) => {
-  logUpdate("info", "update not available", `version=${info.version}`);
-  sendUpdateStatus({ state: "not-available", version: info.version });
-});
-autoUpdater.on("download-progress", (progress) =>
-  sendUpdateStatus({ state: "downloading", percent: Math.round(progress.percent) }),
-);
-
-autoUpdater.on("error", (err) => {
-  logUpdate("error", "updater error", err);
-  sendUpdateStatus({ state: "error", message: err instanceof Error ? err.message : String(err) });
-});
-
-autoUpdater.on("update-downloaded", (info) => {
-  pendingUpdateVersion = info.version;
-  logUpdate("info", "download complete", `currentVersion=${app.getVersion()}`, `updateVersion=${info.version}`);
-  sendUpdateStatus({ state: "downloaded", version: info.version });
-  if (!mainWindow) return;
-  dialog
-    .showMessageBox(mainWindow, {
-      type: "info",
-      buttons: ["Restart now", "Later"],
-      defaultId: 0,
-      cancelId: 1,
-      title: "Update ready",
-      message: `Shwe Pha La POS ${info.version} has been downloaded.`,
-      detail: "Restart now to install it, or it'll install automatically the next time you quit the app.",
-    })
-    .then((result) => {
-      if (result.response === 0) installDownloadedUpdate();
-    });
-});
-
-// Manual "Check for Updates" button in the sidebar — lets a user pull the
-// latest build without deleting and reinstalling. Status is reported back
-// via the "updates:status" events above, not this handler's return value,
-// since checkForUpdates() is async/event-driven under the hood.
-ipcMain.handle("updates:check", () => {
-  if (isDev) return { ok: false, error: "Update checks are unavailable in dev mode." };
-  checkForUpdates();
-  return { ok: true };
-});
-
-ipcMain.handle("updates:install", () => {
-  return { ok: installDownloadedUpdate() };
-});
+const UPDATE_CHECK_INTERVAL_MS = updater.UPDATE_CHECK_INTERVAL_MS;
+const checkForUpdates = () => updater.checkForUpdates();
 
 ipcMain.handle("app:get-version", () => app.getVersion());
 
