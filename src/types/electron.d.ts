@@ -20,7 +20,7 @@ export interface ElectronUpdateCheckResult {
 /** electron/updateGuard.cjs evaluateInstallGuard() result. */
 export interface ElectronUpdateGuardDecision {
   allowed: boolean;
-  code: "no-state" | "sale-in-progress" | "unsynced" | "offline" | "signed-out" | "ok" | "recovery" | "recovery-needs-export";
+  code: "no-state" | "sale-in-progress" | "unsynced" | "offline" | "signed-out" | "ok" | "recovery" | "recovery-needs-export" | "recovery-needs-owner";
   unsynced: number;
   message: string;
 }
@@ -72,7 +72,11 @@ export interface ElectronAPI {
   installUpdate: () => Promise<ElectronInstallResult>;
   onUpdateStatus: (callback: (status: ElectronUpdateStatus) => void) => () => void;
   /** 1.0.16+ (absent in older preload scripts — feature-detect). */
-  installUpdateRecovery?: () => Promise<ElectronInstallResult>;
+  /** RC2: carries the session's access token; main verifies the owner with
+   *  the backend itself (electron/ownerVerify.cjs). */
+  installUpdateRecovery?: (request: { accessToken: string }) => Promise<ElectronInstallResult>;
+  /** RC2: prime main's owner verification while the server is reachable. */
+  verifyOwnerSession?: (request: { accessToken: string }) => Promise<{ ok: boolean; code?: string }>;
   reportAppState?: (state: ElectronAppState) => void;
   onUpdateRequest?: (callback: (request: { action: "open-export" | "sync-now" }) => void) => () => void;
   /** Save an ENCRYPTED pending-queue export through the native save dialog

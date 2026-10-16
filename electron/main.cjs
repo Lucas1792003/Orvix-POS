@@ -7,6 +7,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { autoUpdater } = require("electron-updater");
 const { setupUpdater } = require("./updater.cjs");
+const { createOwnerVerifier, loadBackendConfig } = require("./ownerVerify.cjs");
 
 const isDev = !app.isPackaged;
 // Vite's default dev server port (see vite.config.ts) — overridable for a
@@ -173,6 +174,13 @@ app.on("will-quit", () => {
 // this requirement and should auto-update even unsigned, aside from a
 // possible SmartScreen prompt on the downloaded update itself.
 // ------------------------------------------------------------------
+// RC2 (D4): the recovery install ("Install anyway (after export)") needs an
+// owner verified by main itself against the backend the build is pinned to
+// (dist/backend.json, written by the Electron Vite build). No file (dev
+// server, older build) = recovery refused.
+const ownerVerifier = createOwnerVerifier({
+  backend: loadBackendConfig(path.join(__dirname, "..", "dist", "backend.json")),
+});
 const updater = setupUpdater({
   autoUpdater,
   app,
@@ -181,6 +189,7 @@ const updater = setupUpdater({
   getWindow: () => mainWindow,
   log: logUpdate,
   isDev,
+  verifyOwner: (token) => ownerVerifier.verify(token),
 });
 const UPDATE_CHECK_INTERVAL_MS = updater.UPDATE_CHECK_INTERVAL_MS;
 const checkForUpdates = () => updater.checkForUpdates();

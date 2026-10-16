@@ -36,8 +36,25 @@ export interface SyncOutboxEntry {
   // its backend at all (v1.0.15, which targeted hosted Supabase). It is
   // never sent, never retried and never deleted automatically; staff export
   // it and the owner reconciles it (lib/backendOrigin.ts).
-  status: "pending" | "syncing" | "failed" | "conflict" | "quarantined";
+  // "archived" (1.0.16 RC2, shown as "Set aside"): an owner took the entry
+  // out of the sync queue after exporting it (Sync Conflicts page). The row,
+  // its payload and idempotency key stay on the till; it is never sent,
+  // is included in every export, still counts as unsynced for the updater
+  // guard, and an owner can restore it. There is no UI path that deletes
+  // an unsynced entry (docs/desktop-app/release-1.0.16.md, RC2).
+  status: "pending" | "syncing" | "failed" | "conflict" | "quarantined" | "archived";
   attempts: number;
+  /** When the drain marked the entry `syncing` (RC2): a `syncing` row older
+   *  than the stale threshold, or any at startup, is a request whose
+   *  response never arrived and is resent with the same key (outbox.ts). */
+  syncingSince?: string;
+  /** Set aside (status "archived"): when, by which app user, and the status
+   *  it had before — restored as-is (a former `syncing` row comes back as
+   *  `pending`). */
+  archivedAt?: string;
+  archivedBy?: string;
+  archiveReason?: string;
+  statusBeforeArchive?: "pending" | "syncing" | "failed" | "conflict" | "quarantined";
   lastError?: string;
   // Origin (scheme://host[:port]) of the backend this entry was queued for,
   // stamped at enqueue time (1.0.16+). Absent on entries written by older

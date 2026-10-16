@@ -5,7 +5,7 @@ import { useAppStore } from "../../stores/appStore";
 import { useDataStore } from "../../stores/dataStore";
 import { cn } from "../../lib/utils";
 import { backendHost } from "../../lib/supabase";
-import { APP_VERSION, CAPABILITY_SUMMARY } from "../../lib/clientInfo";
+import { APP_VERSION, BUILD_LABEL, CAPABILITY_SUMMARY } from "../../lib/clientInfo";
 import { getTillId } from "../../lib/tillId";
 
 // On screen only (per-till verification); never sent in any request.
@@ -236,7 +236,7 @@ export const Sidebar = () => {
             title={`Shwe Pha La POS ${APP_VERSION} · ${CAPABILITY_SUMMARY}`}
             data-testid="sidebar-client-info"
           >
-            v{APP_VERSION} · {CAPABILITY_SUMMARY}
+            v{APP_VERSION}{BUILD_LABEL ? ` ${BUILD_LABEL}` : ""} · {CAPABILITY_SUMMARY}
           </div>
           <div className="sidebar-backend" title={`Till id: ${TILL_ID}`} data-testid="sidebar-till-id">
             {TILL_ID}

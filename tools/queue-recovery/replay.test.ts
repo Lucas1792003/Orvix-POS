@@ -81,7 +81,7 @@ const e = (over: Partial<QueueExportEntry> & { opType: string }): QueueExportEnt
     seq, opId: `outbox-${seq}`, idempotencyKey: key, kind: "rpc", table: null, tableOp: null, rowId: null,
     refs: [], provisional: [], shopId: "shop-1", createdAt: `2026-10-13T01:00:${String(seq).padStart(2, "0")}.000Z`,
     ringUpAt: null, status: "pending", attempts: 2, lastErrorClass: "transient", lastError: "Failed to fetch", nextAttemptAt: null,
-    backendOrigin: ORIGIN, quarantineReason: null,
+    backendOrigin: ORIGIN, quarantineReason: null, archivedAt: null, archivedBy: null, archiveReason: null, statusBeforeArchive: null,
     ...over,
     payload: over.payload !== undefined ? over.payload : { ...(over.kind === "table_write" ? {} : { p_idempotency_key: key }) },
   };
@@ -215,6 +215,31 @@ describe("replayExport", () => {
 
     const forced = await replayExport(outageQueue(), opts(b, { includeQuarantined: true }));
     expect(forced.counts["skipped-quarantined"]).toBe(0);
+    expect(b.sales).toHaveLength(3);
+  });
+
+  it("RC2: skips entries an owner set aside on the till unless --include-set-aside; then judged by their former status", async () => {
+    const b = new FakeBackend();
+    const p = outageQueue();
+    for (const x of p.entries) {
+      x.statusBeforeArchive = x.status as "pending";
+      x.status = "archived";
+      x.archivedAt = "2026-10-16T09:00:00.000Z";
+    }
+    const r = await replayExport(p, opts(b));
+    expect(r.counts["skipped-set-aside"]).toBe(5);
+    expect(b.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+    expect(r.ops[0].detail).toContain("set aside on the till");
+
+    const p2 = outageQueue();
+    for (const x of p2.entries) { x.statusBeforeArchive = "pending"; x.status = "archived"; }
+    p2.entries.find((x) => x.opType === "categories.insert")!.statusBeforeArchive = "quarantined";
+    const forced = await replayExport(p2, opts(b, { includeSetAside: true }));
+    expect(forced.counts["skipped-set-aside"]).toBe(0);
+    expect(forced.ops[4].outcome).toBe("skipped-quarantined"); // a former quarantined entry still needs its own flag
+    expect(b.sales).toHaveLength(3);
+    // replaying the same set-aside entries again never duplicates
+    await replayExport(p2, opts(b, { includeSetAside: true }));
     expect(b.sales).toHaveLength(3);
   });
 

@@ -28,6 +28,14 @@ export const APP_NAME = "shwephala-pos";
 /** package.json version, inlined at build time (vite.config.ts `define`). */
 export const APP_VERSION: string = typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : "0.0.0-dev";
 
+/** Optional build label shown next to the version (e.g. "rc2" for a
+ *  release candidate): VITE_BUILD_LABEL at build time, default empty. Not
+ *  part of the version or the X-Client-Info header. */
+export const BUILD_LABEL: string = (() => {
+  const raw = import.meta.env?.VITE_BUILD_LABEL;
+  return typeof raw === "string" ? raw.trim().replace(/[^A-Za-z0-9._-]/g, "").slice(0, 24) : "";
+})();
+
 export const CLIENT_CAPABILITIES = [
   "validated-uploads",
   "idem-v1",

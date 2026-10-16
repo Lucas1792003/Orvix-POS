@@ -82,7 +82,10 @@ export async function quarantineForeignOutboxEntries(db: LocalDb, origin: string
   return db.transaction("rw", db.syncOutbox, async () => {
     let n = 0;
     await db.syncOutbox.toCollection().modify((entry: SyncOutboxEntry) => {
-      if (belongsToBackend(entry, origin) || entry.status === "quarantined") return;
+      // A set-aside entry is already out of the sync path; it keeps its own
+      // status (and its pre-archive status) until an owner restores it —
+      // restoring re-runs this rule on the next drain.
+      if (belongsToBackend(entry, origin) || entry.status === "quarantined" || entry.status === "archived") return;
       entry.statusBeforeQuarantine = entry.status;
       entry.status = "quarantined";
       entry.quarantinedAt = now.toISOString();

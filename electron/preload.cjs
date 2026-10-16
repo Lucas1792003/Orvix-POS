@@ -29,9 +29,19 @@ contextBridge.exposeInMainWorld("electronAPI", {
   installUpdate: () => ipcRenderer.invoke("updates:install"),
 
   /** Owner's recovery path: install although entries are unsynced, allowed
-   *  only after they were exported in this session; main asks for a native
-   *  confirmation first. */
-  installUpdateRecovery: () => ipcRenderer.invoke("updates:install-recovery"),
+   *  only after they were exported in this session AND (RC2) when main
+   *  itself verifies the session's access token as the owner with the
+   *  backend; main asks for a native confirmation first. Only the token
+   *  string crosses. */
+  installUpdateRecovery: (request) => ipcRenderer.invoke("updates:install-recovery", {
+    accessToken: request && typeof request.accessToken === "string" ? request.accessToken : "",
+  }),
+
+  /** RC2: let main verify (with the backend) that this session is the
+   *  owner's while the server is reachable. Returns { ok, code }. */
+  verifyOwnerSession: (request) => ipcRenderer.invoke("updates:verify-owner", {
+    accessToken: request && typeof request.accessToken === "string" ? request.accessToken : "",
+  }),
 
   /** Reports the facts the install guard needs (counts and flags only). */
   reportAppState: (state) => {

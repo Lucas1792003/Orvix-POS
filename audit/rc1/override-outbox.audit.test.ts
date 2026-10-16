@@ -1,7 +1,9 @@
 // RC1 (b777345) release-readiness audit, steps 1(a)-(c): owner update
-// override ("Install anyway (after export)") vs. the outbox. These are
-// CHARACTERIZATION tests: they pin RC1's behaviour as it is, including the
-// findings reported as defects (marked FINDING). No product code is changed.
+// override ("Install anyway (after export)") vs. the outbox. Written as
+// characterization tests of RC1; since RC2 the four findings (D1-D4) are
+// asserted FIXED here (marked "FIXED (RC2, Dn)"; full regression cases in
+// src/stores/data/outbox.rc2.test.ts and src/lib/updateGuard.test.ts). The
+// remaining tests still pin behaviour RC1 already had right.
 import "fake-indexeddb/auto";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import Dexie from "dexie";
@@ -17,11 +19,13 @@ vi.mock("../../src/lib/supabase", () => ({
 
 import { localDb } from "../../src/lib/localDb";
 import { currentBackendOrigin, prepareLocalStateForBackend } from "../../src/lib/backendOrigin";
+import * as outbox from "../../src/stores/data/outbox";
 import {
-  countUnsyncedOutbox, dismissOutboxEntry, drainOutbox, enqueueOutbox, retryOutboxEntry,
+  countUnsyncedOutbox, drainOutbox, enqueueOutbox, setAsideOutboxEntry, OutboxActionError,
 } from "../../src/stores/data/outbox";
+import { useAuthStore } from "../../src/stores/authStore";
 import { collectQueueExport } from "../../src/lib/queueExport/collect";
-import { exportCovers, recordQueueExport, resetQueueExportRecord } from "../../src/lib/queueExport/exportRecord";
+import { exportCovers, recordQueueExport, resetQueueExportRecord, wasExported } from "../../src/lib/queueExport/exportRecord";
 import { buildAppState } from "../../src/lib/updateGuardBridge";
 import { replayExport } from "../../tools/queue-recovery/replay";
 import { TEST_BACKEND_URL } from "../../src/test/setup";
@@ -104,7 +108,7 @@ describe("override install path never touches rows (audit 1b)", () => {
       outboxIds: rows.map((r) => r.localId), statuses: rows.map((r) => r.status),
       online: false, authenticated: true, saleInProgress: false, exportCoversQueue: covers,
     }));
-    expect(evaluateInstallGuard(state(exportCovers(rows.map((r) => r.localId))), { recovery: true }).allowed).toBe(true);
+    expect(evaluateInstallGuard(state(exportCovers(rows.map((r) => r.localId))), { recovery: true, ownerVerified: true }).allowed).toBe(true);
     expect(evaluateInstallGuard(state(true), { recovery: false }).allowed).toBe(false);
     expect(JSON.stringify(await localDb.syncOutbox.toArray())).toBe(before);
 
@@ -113,9 +117,10 @@ describe("override install path never touches rows (audit 1b)", () => {
     expect(exportCovers(ids)).toBe(false);
   });
 
-  it("FINDING (low): the recovery guard does not require a signed-in owner; the 'Owner only' rule is text only", () => {
-    const s = sanitizeAppState({ unsynced: 3, pending: 3, online: false, authenticated: false, saleInProgress: false, exportCoversQueue: true });
-    expect(evaluateInstallGuard(s, { recovery: true })).toMatchObject({ allowed: true, code: "recovery" });
+  it("FIXED (RC2, D4): the recovery guard requires an owner verified by the main process; a renderer report cannot provide it", () => {
+    const s = sanitizeAppState({ unsynced: 3, pending: 3, online: false, authenticated: false, saleInProgress: false, exportCoversQueue: true, role: "ADMIN", ownerVerified: true });
+    expect(evaluateInstallGuard(s, { recovery: true })).toMatchObject({ allowed: false, code: "recovery-needs-owner" });
+    expect(evaluateInstallGuard(s, { recovery: true, ownerVerified: true })).toMatchObject({ allowed: true, code: "recovery" });
   });
 });
 
@@ -127,24 +132,22 @@ describe("findings in the outbox (audit 1a/1b)", () => {
     await localDb.provisionalIdMap.clear();
   });
 
-  it("FINDING (medium): a row left 'syncing' by a quit mid-request (e.g. recovery install during a drain) is never drained again and blocks every normal install", async () => {
+  it("FIXED (RC2, D2): a row left 'syncing' by a quit mid-request is resent with the same key and attempts+1, then syncs; the guard clears", async () => {
     await localDb.syncOutbox.put({
       localId: "o-stranded", kind: "rpc", name: "complete_sale", args: { p_idempotency_key: "k1" }, idempotencyKey: "k1",
       shopId: "s", createdAt: new Date().toISOString(), status: "syncing", attempts: 0, backendOrigin: currentBackendOrigin(),
     });
+    expect(await countUnsyncedOutbox()).toBe(1);
     rpc.mockResolvedValue({ data: { sale: { id: "x" } }, error: null });
+    // a pre-RC2 row has no syncingSince: it counts as stale on any pass
     await expect(drainOutbox()).resolves.toBe("drained");
-    expect(rpc).not.toHaveBeenCalled();
-    expect(await localDb.syncOutbox.get("o-stranded")).toMatchObject({ status: "syncing" }); // kept (not lost) ...
-    expect(await countUnsyncedOutbox()).toBe(1); // ... but the guard sees it unsynced forever
-    // only a manual Retry (Sync Conflicts page, audit:view_global) frees it; replay is idempotent (same key)
-    await retryOutboxEntry("o-stranded");
-    await drainOutbox();
     expect(rpc).toHaveBeenCalledTimes(1);
+    expect(rpc.mock.calls[0][1]).toMatchObject({ p_idempotency_key: "k1" }); // the SAME key
     expect(await localDb.syncOutbox.get("o-stranded")).toBeUndefined();
+    expect(await countUnsyncedOutbox()).toBe(0); // normal install possible again
   });
 
-  it("FINDING (medium): the 7-day provisionalIdMap prune deletes mappings that a quarantined entry still needs; a later export cannot resolve its refs", async () => {
+  it("FIXED (RC2, D3): the 7-day provisionalIdMap prune keeps mappings a quarantined entry still needs; a later export resolves its refs", async () => {
     await localDb.provisionalIdMap.put({ provisionalId: "shift-prov", realId: "shift-real", createdAt: new Date(Date.now() - 8 * DAY).toISOString() });
     await localDb.syncOutbox.put({
       localId: "o-q", kind: "rpc", name: "complete_sale", args: { p_shift_id: "shift-prov", p_idempotency_key: "k2" }, idempotencyKey: "k2",
@@ -157,17 +160,29 @@ describe("findings in the outbox (audit 1a/1b)", () => {
     await drainOutbox(); // any drain pass (reconnect, 'Sync now', periodic) prunes
     expect(await localDb.syncOutbox.get("o-q")).toMatchObject({ status: "quarantined" }); // the row itself survives
     const late = await collectQueueExport(localDb, ctx());
-    expect(late.provisionalIdMap).toHaveLength(0); // the mapping is gone from the device
+    expect(late.provisionalIdMap).toEqual([expect.objectContaining({ provisionalId: "shift-prov", realId: "shift-real" })]); // kept
 
     const noNet = (async () => { throw new Error("no network"); }) as unknown as typeof fetch;
     const report = await replayExport(late, { target: "http://127.0.0.1:54321", anonKey: null, accessToken: "x", dryRun: true, includeQuarantined: true, fetchImpl: noNet });
-    expect(report.ops[0].outcome).toBe("blocked-unresolved-ref");
+    expect(report.ops[0].outcome).toBe("planned");
   });
 
-  it("FINDING (medium): dismissOutboxEntry hard-deletes any row; the only guard (export-first) is in the page and covers quarantined rows only", async () => {
+  it("FIXED (RC2, D1): no outbox function deletes an unsynced row; set aside needs the owner and an export, and keeps the row", async () => {
+    expect((outbox as Record<string, unknown>).dismissOutboxEntry).toBeUndefined();
     await enqueueOutbox({ kind: "rpc", name: "complete_sale", args: { p_shop_id: "s" }, shopId: "s" });
     const [row] = await localDb.syncOutbox.toArray();
-    await dismissOutboxEntry(row.localId); // a pending, never-exported sale
-    expect(await localDb.syncOutbox.count()).toBe(0);
+    useAuthStore.setState({ currentUserId: "cashier-1", currentRole: "CASHIER" });
+    await expect(setAsideOutboxEntry(row.localId, { wasExported: () => true })).rejects.toMatchObject({ code: "not-owner" });
+    useAuthStore.setState({ currentUserId: "admin-1", currentRole: "ADMIN" });
+    try {
+      await expect(setAsideOutboxEntry(row.localId, { wasExported })).rejects.toBeInstanceOf(OutboxActionError); // never exported
+      recordQueueExport([row.localId]);
+      await setAsideOutboxEntry(row.localId, { wasExported });
+    } finally {
+      useAuthStore.setState({ currentUserId: null, currentRole: null });
+    }
+    expect(await localDb.syncOutbox.count()).toBe(1);
+    expect(await localDb.syncOutbox.get(row.localId)).toMatchObject({ status: "archived", statusBeforeArchive: "pending", idempotencyKey: row.idempotencyKey, args: row.args });
+    expect(await countUnsyncedOutbox()).toBe(1);
   });
 });

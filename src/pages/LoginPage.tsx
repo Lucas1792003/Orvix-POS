@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { isAppSetupNeeded, useAuthStore } from "../stores/authStore";
 import { useAppStore } from "../stores/appStore";
 import { backendHost } from "../lib/supabase";
-import { APP_VERSION, CAPABILITY_SUMMARY } from "../lib/clientInfo";
+import { APP_VERSION, BUILD_LABEL, CAPABILITY_SUMMARY } from "../lib/clientInfo";
 import { getTillId } from "../lib/tillId";
 import { useSyncStore } from "../stores/syncStore";
 import { Card } from "../components/ui/Card";
@@ -113,7 +113,7 @@ export const LoginPage = () => {
                 {t("auth", "backendLabel")}: {backendHost}
               </div>
               <div className="font-mono" data-testid="login-client-info">
-                v{APP_VERSION} · {CAPABILITY_SUMMARY}
+                v{APP_VERSION}{BUILD_LABEL ? ` ${BUILD_LABEL}` : ""} · {CAPABILITY_SUMMARY}
               </div>
               <div className="font-mono" data-testid="login-till-id">
                 {tillId}
