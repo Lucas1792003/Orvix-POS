@@ -12,7 +12,7 @@ States: **DONE** (verified, evidence linked) · **READY** (prepared and tested, 
 | A3 | Phone page on the backend origin + router allow-list, upgrade-safe (`functions-router.sh status/apply/verify`) | DONE | G8; [phone-qr-origin.md §6](phone-qr-origin.md); live verify 45/45 |
 | A4 | Obsolete `rotate-audit-log` / `weekly-sales-report` removed; no cron | DONE | status.md |
 | A5 | QA cleanup (exact approved rows) | DONE | [qa-cleanup-manifest.md §7](qa-cleanup-manifest.md) |
-| A6 | **Migration 082** (close admin auth-link path) + updated `staff-admin` in the same window | **READY — needs separate deployment approval** | [migration-082.md](migration-082.md); harness 647/0 (incl. t18), capped 081 601/0; sha256 `c4613aa3…` |
+| A6 | Migration 082 (close admin auth-link path) + marker-writing `staff-admin` | DONE 2026-10-16 05:31 UTC | [G9](../evidence/G9/2026-10-16-migration-082.md); audit at 082 395/0/0, parity 1872/1872 |
 | A6b | Org-isolation security audit (disposable stack, schema parity with production) | DONE 2026-10-16: 081 = 390 PASS / 0 FAIL / 4 GAP (G1–G4 admin auth-linking, closed by 082); 082 = 395 / 0 / 0; coverage gate 119/119; parity 1870/1870 | [org-isolation-security-audit.md](org-isolation-security-audit.md) |
 | A6c | G5: public `product-images` bucket has no MIME/size limits (drift from 016) — proposed fix, needs approval | OPEN — decision | audit report §6 G5 |
 | A7 | Review 7 orphan auth accounts (no app user; can never be linked after 082) — keep or delete | OWNER | [qa-data-inventory.md C2](qa-data-inventory.md), migration-082.md |

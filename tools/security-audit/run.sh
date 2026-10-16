@@ -72,14 +72,16 @@ for MAX_MIG in "${LEVELS[@]}"; do
 
   log "catalog inventory"
   su_psql -At < "$HERE/sql/inventory.sql" > "$OUT/inventory.json" || die "inventory"
-  # Parity is proven at 081 only (= production level); at 082 the disposable
-  # carries the not-yet-deployed migration, so it legitimately differs.
-  if [ "$PARITY" = 1 ] && [ -d "$RESULTS/parity" ] && [ "$((10#$MAX_MIG))" -eq 81 ]; then
+  # Parity is proven at the level production runs (highest MIGRATION line of the
+  # live fingerprint); other levels legitimately differ from production.
+  LIVE_LEVEL=""
+  [ -f "$RESULTS/parity/live.fingerprint" ] && LIVE_LEVEL="$(grep -E '^MIGRATION\|' "$RESULTS/parity/live.fingerprint" | cut -d'|' -f2 | sort | tail -1)"
+  if [ "$PARITY" = 1 ] && [ -n "$LIVE_LEVEL" ] && [ "$((10#$MAX_MIG))" -eq "$((10#$LIVE_LEVEL))" ]; then
     bash "$HERE/parity/local-dump.sh" "$OUT/parity-local"
     if node "$HERE/parity/compare.mjs" "$RESULTS/parity" "$OUT/parity-local" "$MAX_MIG" > "$OUT/parity.txt"; then
-      echo "parity 081: PASS"
+      echo "parity $MAX_MIG: PASS"
     else
-      echo "parity 081: FAIL (see $OUT/parity-081.md)"; OVERALL=1
+      echo "parity $MAX_MIG: FAIL (see $OUT/parity-$MAX_MIG.md)"; OVERALL=1
     fi
     head -3 "$OUT/parity.txt" 2>/dev/null
   fi
