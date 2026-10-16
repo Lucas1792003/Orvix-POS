@@ -34,6 +34,7 @@ import { reportError } from "../lib/errors";
 import { printReceipt as triggerPrint } from "../lib/print";
 import { getEffectiveShopId } from "../lib/utils";
 import { useTranslation } from "../hooks/useTranslation";
+import { useSaleActivityStore } from "../stores/saleActivityStore";
 
 export const PosPage = () => {
   const toast = useToast();
@@ -114,6 +115,13 @@ export const PosPage = () => {
     setOverrideItem(null);
     setPaymentOpen(false);
   }, [shopId]);
+  // A sale is "in progress" while the cart has lines, the payment dialog is
+  // open or a checkout is in flight: the desktop updater never installs then.
+  const setSaleInProgress = useSaleActivityStore((state) => state.setSaleInProgress);
+  useEffect(() => {
+    setSaleInProgress(cartItems.length > 0 || paymentOpen || submitting);
+  }, [cartItems.length, paymentOpen, submitting, setSaleInProgress]);
+  useEffect(() => () => setSaleInProgress(false), [setSaleInProgress]);
   const openShift = shifts.find((shift) => shift.shopId === shopId && shift.cashierId === currentUserId && !shift.endedAt);
   const canOverridePrice = hasShopPermission(currentUser, "pos:override_price", shopId);
   const canOverrideStock = hasShopPermission(currentUser, "pos:override_stock", shopId);

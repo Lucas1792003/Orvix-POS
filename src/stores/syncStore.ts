@@ -22,6 +22,12 @@ export interface SyncStatusState {
   pendingCount: number;
   /** Entries the server rejected permanently — need a person. */
   conflictCount: number;
+  /** Entries queued for ANOTHER backend (e.g. by v1.0.15 for hosted
+   *  Supabase): never sent; must be exported for the owner. */
+  quarantinedCount: number;
+  /** Bumped when something (the desktop updater notice) asks the app to
+   *  open the "Export pending" dialog. */
+  exportRequestedAt: number;
   /** The server rejected this device's session (refresh token invalid or
    *  revoked). Queued work is kept; the user must sign in again. */
   needsReauth: boolean;
@@ -35,6 +41,8 @@ export const useSyncStore = create<SyncStatusState>()((set) => ({
   inventorySyncState: "reconnecting",
   pendingCount: 0,
   conflictCount: 0,
+  quarantinedCount: 0,
+  exportRequestedAt: 0,
   needsReauth: false,
   isDraining: false,
   lastTransientError: null,

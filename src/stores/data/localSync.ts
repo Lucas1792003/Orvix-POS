@@ -82,6 +82,9 @@ export async function mergeProvisionalRows(snapshot: LocalSnapshot): Promise<Loc
     const entries = await localDb.syncOutbox.toArray();
     const idsByTable = new Map<keyof LocalSnapshot, Set<string>>();
     for (const entry of entries) {
+      // Quarantined entries belong to another backend (lib/backendOrigin.ts):
+      // their provisional rows are not this backend's data.
+      if (entry.status === "quarantined") continue;
       for (const { table, ids } of entry.provisional ?? []) {
         if (!PROVISIONAL_TABLES.has(table as keyof LocalSnapshot)) continue;
         const set = idsByTable.get(table as keyof LocalSnapshot) ?? new Set<string>();

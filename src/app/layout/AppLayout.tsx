@@ -35,6 +35,7 @@ export const AppLayout = () => {
   const isOnline = useConnectivityStore((state) => state.isOnline);
   const pendingCount = useSyncStore((state) => state.pendingCount);
   const conflictCount = useSyncStore((state) => state.conflictCount);
+  const quarantinedCount = useSyncStore((state) => state.quarantinedCount);
   const needsReauth = useSyncStore((state) => state.needsReauth);
   const isDraining = useSyncStore((state) => state.isDraining);
   const inventorySyncState = useSyncStore((state) => state.inventorySyncState);
@@ -46,6 +47,12 @@ export const AppLayout = () => {
   const [showInventoryBadge, setShowInventoryBadge] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const { t } = useTranslation();
+
+  // The desktop update notice's "Export pending" button (updateGuardBridge).
+  // Only requests made while this screen is mounted open the dialog.
+  useEffect(() => useSyncStore.subscribe((state, prev) => {
+    if (state.exportRequestedAt > prev.exportRequestedAt) setExportOpen(true);
+  }), []);
 
   useEffect(() => {
     if (!isLoaded && !isLoading && !loadError) {
@@ -235,6 +242,22 @@ export const AppLayout = () => {
             <Button size="sm" onClick={() => void handleSignInAgain()}>Sign in again</Button>
           </div>
         )}
+        {quarantinedCount > 0 && (
+          <div
+            role="alert"
+            data-testid="quarantine-banner"
+            className="flex flex-wrap items-center justify-between gap-3 border-b border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-900 print-hidden"
+          >
+            <span>
+              {quarantinedCount} {quarantinedCount === 1 ? "transaction was" : "transactions were"} recorded on this till by an
+              older app version for a different server. {quarantinedCount === 1 ? "It" : "They"} will NOT be sent from here.
+              Export {quarantinedCount === 1 ? "it" : "them"} and give the file to the owner; nothing has been deleted.
+            </span>
+            <Button size="sm" onClick={() => setExportOpen(true)} data-testid="quarantine-export">
+              {t("queueExport", "button")}
+            </Button>
+          </div>
+        )}
         <div className="app-content">
           <Outlet />
         </div>
@@ -248,7 +271,7 @@ export const AppLayout = () => {
             {isDraining ? "Syncing — " : ""}{queuedLabel}
           </div>
         )}
-        {(pendingCount > 0 || conflictCount > 0) && (
+        {(pendingCount > 0 || conflictCount > 0 || quarantinedCount > 0) && (
           // Outage recovery: any signed-in role can save an encrypted copy of
           // the queue, offline too (docs/selfhost-migration/phase-f/queue-export.md).
           <button

@@ -25,6 +25,7 @@ vi.mock("../authStore", async () => {
 
 import { fakeSupabase as fake } from "./testing/fakeSupabase";
 import { localDb, SYNC_STATE_KEYS } from "../../lib/localDb";
+import { currentBackendOrigin } from "../../lib/backendOrigin";
 import { createSaleSlice } from "./slices/saleSlice";
 import { createInventorySlice } from "./slices/inventorySlice";
 import { createPurchaseSlice } from "./slices/purchaseSlice";
@@ -496,19 +497,37 @@ describe("ordering, backoff and classification", () => {
   });
 
   it("legacy entries without a seq (pre-Phase-D rows) drain before new ones, by createdAt", async () => {
+    // Tagged with this build's backend: untagged rows are quarantined (1.0.16,
+    // see "untagged legacy rows are quarantined" below and backendOrigin.test.ts).
+    const backendOrigin = currentBackendOrigin();
     await localDb.syncOutbox.put({
       localId: "outbox-legacy-b", kind: "rpc", name: "adjust_stock", args: {}, shopId: "shop-1",
-      createdAt: "2026-01-02T00:00:00.000Z", status: "pending", attempts: 0,
+      createdAt: "2026-01-02T00:00:00.000Z", status: "pending", attempts: 0, backendOrigin,
     });
     await localDb.syncOutbox.put({
       localId: "outbox-legacy-a", kind: "rpc", name: "open_shift", args: {}, shopId: "shop-1",
-      createdAt: "2026-01-01T00:00:00.000Z", status: "pending", attempts: 0,
+      createdAt: "2026-01-01T00:00:00.000Z", status: "pending", attempts: 0, backendOrigin,
     });
     await enqueueOutbox({ kind: "rpc", name: "complete_sale", args: completeSaleArgs(newIdempotencyKey()), shopId: "shop-1" });
 
     await drainOutbox();
 
     expect(fake.calls.map((c) => c.name)).toEqual(["open_shift", "adjust_stock", "complete_sale"]);
+  });
+
+  it("untagged legacy rows are quarantined, never sent, while tagged entries still drain", async () => {
+    await localDb.syncOutbox.put({
+      localId: "outbox-untagged", kind: "rpc", name: "open_shift", args: {}, shopId: "shop-1",
+      createdAt: "2026-01-01T00:00:00.000Z", status: "pending", attempts: 0,
+    });
+    await enqueueOutbox({ kind: "rpc", name: "complete_sale", args: completeSaleArgs(newIdempotencyKey()), shopId: "shop-1" });
+
+    await drainOutbox();
+
+    expect(fake.calls.map((c) => c.name)).toEqual(["complete_sale"]);
+    const left = await listOutboxEntries();
+    expect(left).toHaveLength(1);
+    expect(left[0]).toMatchObject({ localId: "outbox-untagged", status: "quarantined", statusBeforeQuarantine: "pending" });
   });
 
   it("a transient failure stops the pass so later entries do not run ahead", async () => {

@@ -13,6 +13,7 @@ vi.mock("../../lib/supabase", () => ({
 }));
 
 import { localDb } from "../../lib/localDb";
+import { currentBackendOrigin } from "../../lib/backendOrigin";
 import {
   enqueueOutbox, drainOutbox, listOutboxConflicts, listOutboxEntries, retryOutboxEntry, dismissOutboxEntry,
   recordIdMapping,
@@ -81,9 +82,11 @@ describe("drainOutbox", () => {
 
   it("assigns a key on first drain to a legacy entry queued without one", async () => {
     // An entry written by a pre-Phase-D build (no idempotencyKey, no key in args).
+    // (Tagged with this build's backend; an untagged row is quarantined —
+    // see the next test.)
     await localDb.syncOutbox.put({
       localId: "outbox-legacy", kind: "rpc", name: "adjust_stock", args: { n: 1 }, shopId: "shop-1",
-      createdAt: new Date().toISOString(), status: "pending", attempts: 0,
+      createdAt: new Date().toISOString(), status: "pending", attempts: 0, backendOrigin: currentBackendOrigin(),
     });
     rpc.mockResolvedValue({ data: { ok: true }, error: null });
 
@@ -91,6 +94,37 @@ describe("drainOutbox", () => {
 
     const sent = rpc.mock.calls[0][1] as Record<string, unknown>;
     expect(typeof sent.p_idempotency_key).toBe("string");
+  });
+
+  it("never sends an entry queued for another backend, and refuses to retry it", async () => {
+    await localDb.syncOutbox.put({
+      localId: "outbox-foreign", kind: "rpc", name: "adjust_stock", args: { n: 1 }, shopId: "shop-1",
+      createdAt: new Date().toISOString(), status: "pending", attempts: 0,
+      backendOrigin: "https://gzqiukxnzfdouwaotelx.supabase.co",
+    });
+    await localDb.syncOutbox.put({
+      localId: "outbox-v1015", kind: "rpc", name: "complete_sale", args: { n: 2 }, shopId: "shop-1",
+      createdAt: new Date().toISOString(), status: "conflict", attempts: 1,
+    });
+    rpc.mockResolvedValue({ data: { ok: true }, error: null });
+
+    await expect(drainOutbox()).resolves.toBe("drained");
+
+    expect(rpc).not.toHaveBeenCalled();
+    const rows = await localDb.syncOutbox.toArray();
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.status === "quarantined")).toBe(true);
+    expect(rows.find((r) => r.localId === "outbox-v1015")?.statusBeforeQuarantine).toBe("conflict");
+    await expect(retryOutboxEntry("outbox-foreign")).rejects.toThrow(/another server/);
+    expect((await localDb.syncOutbox.get("outbox-foreign"))?.status).toBe("quarantined");
+  });
+
+  it("tags every new entry with this build's backend origin", async () => {
+    await enqueueOutbox({ kind: "rpc", name: "complete_sale", args: {}, shopId: "shop-1" });
+    await enqueueOutbox({ kind: "table_write", name: "products.update", table: "products", op: "update", row: { name: "x" }, id: "p1", shopId: null });
+    const rows = await localDb.syncOutbox.toArray();
+    expect(rows.map((r) => r.backendOrigin)).toEqual([currentBackendOrigin(), currentBackendOrigin()]);
+    expect(currentBackendOrigin()).toBe("http://127.0.0.1:54321");
   });
 
   it("flags a server-rejected entry as a conflict and keeps draining the rest", async () => {

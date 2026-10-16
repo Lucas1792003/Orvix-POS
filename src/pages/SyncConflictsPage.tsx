@@ -8,6 +8,7 @@ import { Badge } from "../components/ui/Badge";
 import { Table, THead, TBody, TR, TH, TD } from "../components/ui/Table";
 import { useToast } from "../components/ui/Toast";
 import { dismissOutboxEntry, drainOutbox, listOutboxEntries, retryOutboxEntry } from "../stores/data/outbox";
+import { wasExported } from "../lib/queueExport/exportRecord";
 import type { SyncOutboxEntry } from "../lib/localDb";
 import { ExportQueueDialog } from "../components/sync/ExportQueueDialog";
 import { useTranslation } from "../hooks/useTranslation";
@@ -53,9 +54,10 @@ const describeEntry = (entry: SyncOutboxEntry): string => {
 
 // Transient (auto-retrying) vs permanent (needs a person) — the two look
 // the same in the queue but mean very different things for the operator.
-type EntryKind = "conflict" | "retrying" | "waiting" | "queued";
+type EntryKind = "quarantined" | "conflict" | "retrying" | "waiting" | "queued";
 
 const classify = (entry: SyncOutboxEntry): EntryKind => {
+  if (entry.status === "quarantined") return "quarantined";
   if (entry.status === "conflict") return "conflict";
   if (entry.failureKind === "transient" && entry.lastError) return "retrying";
   if (entry.refs?.length) return "waiting";
@@ -65,6 +67,7 @@ const classify = (entry: SyncOutboxEntry): EntryKind => {
 // `now` is captured when the list was loaded (render must stay pure).
 const StatusBadge = ({ entry, now }: { entry: SyncOutboxEntry; now: number }) => {
   const kind = classify(entry);
+  if (kind === "quarantined") return <Badge tone="red">Other server: not sent, export for the owner</Badge>;
   if (kind === "conflict") return <Badge tone="red">Needs action</Badge>;
   if (kind === "retrying") {
     const next = entry.nextAttemptAt ? new Date(entry.nextAttemptAt) : null;
@@ -125,6 +128,12 @@ export const SyncConflictsPage = () => {
   };
 
   const handleDismiss = async (entry: SyncOutboxEntry) => {
+    // A quarantined entry exists nowhere else: it may only be dismissed once
+    // it has been exported in this session (the owner reconciles the file).
+    if (entry.status === "quarantined" && !wasExported(entry.localId)) {
+      addToast({ variant: "error", title: "Export first", description: "This entry was queued for another server and exists only on this till. Export pending transactions first, then dismiss it." });
+      return;
+    }
     setBusyId(entry.localId);
     try {
       await dismissOutboxEntry(entry.localId);
@@ -189,20 +198,22 @@ export const SyncConflictsPage = () => {
                   <TD>{new Date(entry.createdAt).toLocaleString()}</TD>
                   <TD><StatusBadge entry={entry} now={loadedAt} /></TD>
                   <TD>
-                    <span className="text-xs text-slate-600 break-words" title={entry.lastError}>
-                      {entry.lastError ?? "—"}
+                    <span className="text-xs text-slate-600 break-words" title={entry.quarantineReason ?? entry.lastError}>
+                      {entry.status === "quarantined" ? entry.quarantineReason ?? "Queued for another server." : entry.lastError ?? "—"}
                     </span>
                   </TD>
                   <TD>{entry.attempts}</TD>
                   <TD>
                     <div className="flex justify-end gap-2">
-                      <Button
-                        variant="secondary" size="sm"
-                        disabled={busyId === entry.localId}
-                        onClick={() => void handleRetry(entry)}
-                      >
-                        Retry
-                      </Button>
+                      {entry.status !== "quarantined" && (
+                        <Button
+                          variant="secondary" size="sm"
+                          disabled={busyId === entry.localId}
+                          onClick={() => void handleRetry(entry)}
+                        >
+                          Retry
+                        </Button>
+                      )}
                       <Button
                         variant="danger" size="sm"
                         disabled={busyId === entry.localId}
