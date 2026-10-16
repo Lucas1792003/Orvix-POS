@@ -559,12 +559,25 @@ test("D-race: two concurrent uploads of the same session (real client code) -> o
     // token) varies: seen as 200 + 400 "409 Duplicate" (local function run)
     // and as 200 + 200 within 4 ms (deployed run, 2026-10-13) - the second
     // write landing on the same single object row. Recorded, not hidden.
-    const put200 = puts.filter((p) => p.status === 200).length;
-    expect(put200).toBeGreaterThanOrEqual(1);
-    expect(put200 + puts.filter((p) => /Duplicate|409/.test(p.body)).length).toBe(2);
-    expect(objectsUnder(s)).toBe(1);
+    const putDesc = `PUTs=${puts.map((p) => `${p.status}@${p.at - puts[0].at}ms "${p.body.replace(/\s+/g, " ").slice(0, 90)}"`).join(", ")}; function answers=${fnCalls.map((c) => `${c.kind}@${c.at - (puts[0]?.at ?? c.at)}ms`).join(",")}`;
+    record("phone-upload", "D-race PUTs", "INFO", putDesc);
+    expect(objectsUnder(s), putDesc).toBe(1);
     const objRow = sql1(`SELECT COALESCE(metadata->>'size','-') || ' B, version ' || COALESCE(version,'-') || ', created ' || created_at || ', updated ' || updated_at FROM storage.objects WHERE bucket_id = '${BUCKET}' AND name = '${s.storagePath}';`);
-    expect(completes.filter((c) => c.status === 200)).toHaveLength(1);
+    expect(completes.filter((c) => c.status === 200), putDesc).toHaveLength(1);
+    // PUT pattern: each upload call PUTs once, plus at most ONE retry with a
+    // fresh token after a transport failure / expired token (client.js
+    // attempt(1), the D-stale / D-retry path). Reverse-order run 2026-10-15
+    // saw 3 PUTs (all 200 or duplicate) with every invariant above intact:
+    // one call's response did not reach the page and it retried. Exactly 2
+    // PUTs was stricter than the client's contract.
+    const put200 = puts.filter((p) => p.status === 200).length;
+    expect(put200, putDesc).toBeGreaterThanOrEqual(1);
+    expect(puts.length, putDesc).toBeGreaterThanOrEqual(2);
+    expect(puts.length, putDesc).toBeLessThanOrEqual(4);
+    const unexplained = puts.filter((p) => p.status !== 200 && !/Duplicate|409|already exists/.test(p.body) && !/InvalidJWT|exp|jwt|signature|token/i.test(p.body));
+    expect(unexplained, putDesc).toEqual([]);
+    // every PUT carried a token the function issued just before it
+    expect(puts.length, putDesc).toBeLessThanOrEqual(fnCalls.filter((c) => c.kind === "token").length);
     record("phone-upload", "D-race (2 concurrent uploads)", "PASS",
       `[${MODES}] both calls -> ${results.join(" / ")}; function answers=${fnCalls.map((c) => c.kind).join(",")}; PUTs=${puts.map((p) => `${p.status}${p.status !== 200 ? ` "${p.body.replace(/\s+/g, " ").slice(0, 70)}"` : ""}`).join(", ")}; completes=${completes.map((c) => c.status).join(",")}; object row: ${objRow}; ${db}; ${img}`);
   } finally {
