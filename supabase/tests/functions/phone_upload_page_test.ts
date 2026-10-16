@@ -65,9 +65,11 @@ test("phone-upload-page: GET /phone-upload-page: 200 self-contained text/html wi
   const script = body.slice(body.indexOf(`<script nonce="${nonce}">`) + `<script nonce="${nonce}">`.length, body.lastIndexOf("</script>"));
   new Function(script);
   // it reads the token from the fragment and calls the existing endpoints, same origin
-  for (const s of ["location.hash", "/functions/v1/phone-upload-token", "/rest/v1/rpc/", "\"get_product_image_upload_session_by_token\"", "\"complete_product_image_upload_session\"", "/storage/v1/object/upload/sign/", "\"x-upsert\"", "Retry-After"]) {
+  for (const s of ["location.hash", "/functions/v1/phone-upload-token", "/rest/v1/rpc/", "\"get_product_image_upload_session_by_token\"", "action: \"complete\"", "/storage/v1/object/upload/sign/", "\"x-upsert\"", "Retry-After"]) {
     assertStringIncludes(script, s);
   }
+  // 083 (G5): completion goes through the validating function, never the RPC directly
+  assert(!script.includes("\"complete_product_image_upload_session\""), "the page must not call the completion RPC directly");
 });
 
 test("phone-upload-page: bilingual: English and Myanmar wording embedded, the same keys as the React page", async () => {

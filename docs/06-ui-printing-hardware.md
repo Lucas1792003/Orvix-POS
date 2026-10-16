@@ -207,7 +207,37 @@ the print dialog.
   replacing an image always creates a fresh object, so a changed image is
   never hidden by browser/CDN caching.
 
-### Phone QR upload
+### Current flow on the self-host branch (2026-10-16)
+
+The steps below this section describe **v1.0.15 / hosted**. The branch
+client (ships as 1.0.16) and the self-hosted stack work like this; design
+notes in `selfhost-migration/phase-f/` (`phone-qr-origin.md`,
+`migration-083-g5.md`, `migration-085-png.md`):
+
+1. Desktop (file picker *or* QR) calls
+   `create_product_image_upload_session(p_shop_id, p_product_id)`; the
+   server mints the path `org/<org>/temp/<session>` (client sends no path).
+2. QR = `https://<api origin>/functions/v1/phone-upload-page#<token>` —
+   the page is served by the `phone-upload-page` function on the backend
+   origin (works from the packaged app); the token stays in the fragment.
+3. Right before the upload the phone (or the desktop, acting as its own
+   "phone") asks `phone-upload-token` for a fresh 60 s signed URL
+   (rate-limited, migration 081), then PUTs the compressed image.
+4. `phone-upload-token {token, action: "complete"}` reads the bytes back
+   (magic number, ≤ 100 KB, no HTML/SVG), then completes as service role.
+   Refused objects are deleted. Accepted: JPEG, PNG, WebP (085); both apps
+   re-encode to WebP/JPEG anyway.
+5. The client accepts only a COMPLETED answer whose URL is exactly the
+   server-derived public URL of that path.
+6. The desktop modal polls status every 2 s, one request at a time, and
+   retries transient errors with backoff. While a session is pending,
+   Escape or a backdrop click asks "Stop this phone upload?"; only
+   Close / X / "Stop upload" cancel.
+
+Limits: app compression ≤ 100 KB; bucket ≤ 5 MiB, JPEG/PNG/WebP (083);
+public image responses carry `nosniff` + sandbox CSP (self-hosted gateway rule).
+
+### Phone QR upload (v1.0.15 / hosted)
 
 A QR-based phone upload flow exists for desktop product forms (when the
 desktop user does not have a webcam image):
@@ -243,6 +273,10 @@ Security:
   a recommended follow-up (scheduled job listing `product-images` and
   deleting objects with no referencing `products.image_url` + old
   `product-images/temp/*` whose sessions are expired/canceled).
+  **2026-10-16:** an abandoned-upload sweep script (deployment configuration)
+  covers the abandoned-session part (never the 574 migrated objects);
+  prepared, dry run 0 candidates, not scheduled. Replaced images are
+  still not deleted.
 
 ## Desktop Wrapper (Electron)
 

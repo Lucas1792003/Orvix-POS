@@ -322,10 +322,31 @@ export class MockPostgrest {
  *  whose payload records the path, so tests can check what was signed. */
 export class MockStorage {
   objects = new Set<string>(); // "<bucket>/<path>"
+  /** Stored bytes + storage-api content type (G5/083: GET + DELETE by the completion step). */
+  /** + storage-api's per-upload ETag and Last-Modified (085: the function re-identifies an object before deleting it). */
+  contents = new Map<string, { bytes: Uint8Array; type: string; etag: string; lastModified: string }>();
+  deleted: string[] = [];
   calls: LoggedCall[] = [];
   signed: { bucket: string; path: string; upsert: boolean; token: string }[] = [];
   lifetimeSeconds = 60;
   failSign: number | null = null;
+  failGet: number | null = null;
+  failDelete: number | null = null;
+  /** Called on every object GET before it is answered (tests: change the world mid-request). */
+  onGet: ((key: string, nth: number) => void) | null = null;
+  gets = 0;
+  /** Serve GET bodies as streams whose chunk size differs per GET. */
+  chunked = false;
+  private uploads = 0;
+  put(key: string, bytes: Uint8Array, type: string) {
+    this.objects.add(key);
+    this.uploads++;
+    this.contents.set(key, {
+      bytes, type,
+      etag: `"mock-etag-${this.uploads}"`,
+      lastModified: new Date(Date.UTC(2026, 9, 16, 0, 0, this.uploads)).toUTCString(),
+    });
+  }
   handle(call: LoggedCall): Response {
     this.calls.push(call);
     assert(call.headers["apikey"] === SERVICE_ROLE_KEY, "storage call without the service-role apikey header");
@@ -335,6 +356,48 @@ export class MockStorage {
       const exists = this.objects.has(rest);
       call.status = exists ? 200 : 400;
       return new Response(null, { status: call.status });
+    }
+    if (call.method === "GET") {
+      this.onGet?.(rest, ++this.gets);
+      if (this.failGet) {
+        call.status = this.failGet;
+        return json({ statusCode: String(this.failGet), error: "Error", message: "simulated storage failure" }, this.failGet);
+      }
+      const c = this.contents.get(rest);
+      if (!this.objects.has(rest) || !c) {
+        call.status = 400;
+        return json({ statusCode: "404", error: "not_found", message: "Object not found" }, 400);
+      }
+      call.status = 200;
+      // chunked: like a real network body, each GET arrives in differently sized chunks
+      const body = this.chunked
+        ? new ReadableStream<Uint8Array>({
+          start: (ctl) => {
+            const size = 1000 + 777 * this.gets;
+            for (let at = 0; at < c.bytes.length; at += size) ctl.enqueue(c.bytes.slice(at, at + size));
+            ctl.close();
+          },
+        })
+        : c.bytes.slice();
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": c.type, "Content-Length": String(c.bytes.length), ETag: c.etag, "Last-Modified": c.lastModified },
+      });
+    }
+    if (call.method === "DELETE") {
+      if (this.failDelete) {
+        call.status = this.failDelete;
+        return json({ statusCode: String(this.failDelete), error: "Error", message: "simulated storage failure" }, this.failDelete);
+      }
+      if (!this.objects.has(rest)) {
+        call.status = 400;
+        return json({ statusCode: "404", error: "not_found", message: "Object not found" }, 400);
+      }
+      this.objects.delete(rest);
+      this.contents.delete(rest);
+      this.deleted.push(rest);
+      call.status = 200;
+      return json({ message: "Successfully deleted" }, 200);
     }
     if (call.method === "POST" && rest.startsWith("upload/sign/")) {
       const full = rest.slice("upload/sign/".length);

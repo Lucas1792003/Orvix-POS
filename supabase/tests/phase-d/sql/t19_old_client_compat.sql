@@ -30,6 +30,7 @@
 \set ORPH 'a0000000-0000-4000-8000-0000000000f9'
 \set PUB  'https://pos.test/storage/v1/object/public/product-images/'
 SELECT test.logout() AS zz \gset
+SELECT test.completer() AS completer \gset
 
 -- ============================================================
 -- helpers
@@ -333,8 +334,13 @@ SELECT test.check('t19/phone: the attached token is still the desktop''s (foreig
 -- unprefixed products/<productId>/<ts>.webp
 SELECT test.login(:'AA') AS zz \gset
 SET ROLE authenticated;
-SELECT test.check('t19/phone: old desktop upload to legacy products/<own product>/x.webp is allowed (own org)',
-  test.can_insert_object('products/prod-t19-old/1790000000000.webp', :'AA'));
+-- 084 (G5 follow-up): direct staff uploads are removed for EVERY client; the
+-- old build must be replaced before 084 (G5 follow-up rollout order)
+SELECT CASE WHEN test.m084()
+  THEN test.check('t19/phone 084: old desktop direct upload to legacy products/<own product>/x.webp is REFUSED (update the till before 084)',
+         NOT test.can_insert_object('products/prod-t19-old/1790000000000.webp', :'AA'))
+  ELSE test.check('t19/phone: old desktop upload to legacy products/<own product>/x.webp is allowed (own org)',
+         test.can_insert_object('products/prod-t19-old/1790000000000.webp', :'AA')) END;
 SELECT test.check('t19/phone: old desktop upload to legacy products/<FOREIGN product>/x.webp is refused',
   NOT test.can_insert_object('products/prod-x1/1790000000000.webp', :'AA'));
 SELECT test.check('t19/phone: a legacy unprefixed temp/<session id> write is refused (the session minted org/... instead)',
@@ -353,7 +359,16 @@ SELECT test.check('t19/phone: old phone page gets the session''s org path and th
 INSERT INTO storage.objects (bucket_id, name, owner, owner_id, metadata)
 VALUES ('product-images', :'s1'::jsonb->>'storagePath', NULL, NULL,
         jsonb_build_object('size', 3000, 'mimetype', 'image/webp'));
+-- 083: the old page called the RPC directly as anon; that is refused outright
+-- (completion is service_role-only, through phone-upload-token's byte check)
 SET ROLE anon;
+SELECT test.expect_error('t19/phone: old page''s direct anon completion is refused (until 083: legacy-path mismatch; from 083: permission denied)',
+  format($q$SELECT public.complete_product_image_upload_session('%s', 'temp/%s', '%s', 3000, 'image/webp')$q$,
+         :'s1'::jsonb->>'token', :'s1'::jsonb->>'sessionId',
+         'https://gzqiukxnzfdouwaotelx.supabase.co/storage/v1/object/public/product-images/temp/' || (:'s1'::jsonb->>'sessionId')),
+  CASE WHEN test.m083() THEN 'permission denied' ELSE 'Upload path does not match this session' END);
+RESET ROLE;
+SET ROLE :completer;
 SELECT test.expect_error('t19/phone: old completion with the legacy temp/<id> path -> path mismatch',
   format($q$SELECT public.complete_product_image_upload_session('%s', 'temp/%s', '%s', 3000, 'image/webp')$q$,
          :'s1'::jsonb->>'token', :'s1'::jsonb->>'sessionId',
@@ -376,7 +391,7 @@ SELECT public.get_product_image_upload_session_status(:'s1'::jsonb->>'sessionId'
 RESET ROLE;
 SELECT test.check('t19/phone: the old desktop poll receives only the server-derived URL (what it writes to products.image_url)',
   :'st'::jsonb->>'status' = 'COMPLETED' AND :'st'::jsonb->>'publicUrl' = :'PUB' || (:'s1'::jsonb->>'storagePath'));
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.expect_error('t19/phone: a second (replayed) old completion is refused',
   format($q$SELECT public.complete_product_image_upload_session('%s', '%s', '%s', 3000, 'image/webp')$q$,
          :'s1'::jsonb->>'token', :'s1'::jsonb->>'storagePath', :'PUB' || (:'s1'::jsonb->>'storagePath')),

@@ -88,7 +88,18 @@ Apply in numeric order. The current ordered list:
 | `064_revoke_anon_execute.sql` | `REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM anon, authenticated, PUBLIC` + default-ACL fix for role `postgres`, then explicit grants: `service_role` everything, `authenticated` everything except `complete_stock_transfer` (052) and the idem helpers, `anon` exactly the two token-scoped phone-upload RPCs from `019`. |
 | `065_table_grant_parity.sql` | REVOKE ALL + GRANT per relation so table/view privileges on a fresh install equal the hosted snapshot (`hosted-grants.txt`, 92 rows) instead of whatever default ACL the restore picked up. |
 | `066_create_app_user_org_id.sql` | `create_app_user` sets `users.org_id` to the caller's org — the RPC had failed on every call since `059` made the column NOT NULL (found by `supabase/tests/phase-d/run.sh`). |
-| `067_app_setup_needed.sql` | Phase G (`docs/selfhost-migration/phase-g/login-signup-fix.md`): `app_setup_needed()` — read-only `SECURITY DEFINER STABLE` boolean, `NOT EXISTS (SELECT 1 FROM users)`, granted to `anon`, `authenticated`, `service_role`. Gates the explicit `/setup` first-admin page; the login flow no longer calls `auth.signUp`. After this, `anon` can execute exactly **three** public functions (the two `019` phone-upload RPCs + this one). **Not applied anywhere yet.** |
+| `067_app_setup_needed.sql` | Phase G (`docs/selfhost-migration/phase-g/login-signup-fix.md`): `app_setup_needed()` — read-only `SECURITY DEFINER STABLE` boolean, `NOT EXISTS (SELECT 1 FROM users)`, granted to `anon`, `authenticated`, `service_role`. Gates the explicit `/setup` first-admin page; the login flow no longer calls `auth.signUp`. After this, `anon` can execute exactly **three** public functions (the two `019` phone-upload RPCs + this one; two since `083`). Self-hosted stack only; not on hosted. |
+| `068`–`073` | Organization isolation: `org_id` everywhere (`068`), org-scoped RLS (`069`), RPC org guards `app_require_org` (`070`), org-scoped storage (`071`), `complete_sale` price level within the caller's org (`072`), `guard_user_privilege_columns()` trusts the service role and counts users without RLS (`073`). Design: `selfhost-migration/phase-g/org-isolation-audit.md`. |
+| `074`–`077` | Idempotency replays bound to the caller's org (`074`); completion consistently rejects expired sessions (`075`); `bootstrap_first_admin()` under an install-wide lock is the only first-time setup (`076`); new orgs seeded with Retail/Wholesale/Special price levels (`077`). |
+| `078`–`081` | Storage authorized by org path, legacy objects via path→product/session→org (`078`); uploads only at `org/<org>/temp/<session>` (`079`); completion URL derived server-side from the service-role-only `app_config` row, object must exist (`080`, `selfhost-migration/phase-g/migration-080.md`); DB-backed phone-upload rate limits + per-user session limit (`081`, `selfhost-migration/phase-f/rate-limiting.md`). |
+| `082_close_auth_id_linking.sql` | `create_app_user` links an auth account only if it was just created by `staff-admin` for the caller's org (`app_metadata.created_via`/`org_id`), never signed in, < 15 min old, same email, unlinked, not a platform admin; the caller needs aal2 (TOTP) or a freshly consumed emailed code. `users.auth_id` cannot be set or changed by client writes. Closes audit gaps G1–G4. `selfhost-migration/phase-f/migration-082.md` |
+| `083_product_images_upload_limits.sql` | Bucket `product-images`: `image/jpeg`, `image/png`, `image/webp`, ≤ 5 MiB (guarded: aborts if any existing object would break it; objects fingerprinted unchanged). `complete_product_image_upload_session` becomes **service-role only** — the phone completes through `phone-upload-token` (`action: "complete"`), which checks the bytes first. `selfhost-migration/phase-f/migration-083-g5.md` |
+| `084_product_images_validated_writes_only.sql` | **Prepared, not applied** (needs every till on the validated-upload client): drops staff INSERT/UPDATE storage policies on `product-images`, so every write goes through a validated session. |
+| `085_png_completion.sql` | Completion RPC accepts `image/png` as well as WebP/JPEG (both the caller's type and the stored object's); size rule unchanged (1..102400 bytes); grants as `083`. Independent of `084`. `selfhost-migration/phase-f/migration-085-png.md` |
+
+Applied state: hosted stops at `061`; the self-hosted stack is at `085`
+without `084` (2026-10-16). Per-environment records are kept outside this
+repository.
 
 > **Migration order warning.** Some later migrations depend on identity
 > helpers from `003` and the audit-write lockdown from `013`. Always apply
@@ -149,7 +160,7 @@ the audit row — all in one transaction.
 | `log_audit_event(...)` | Generic audit writer for admin/reference events; forces `actor_id` to `current_app_user()` |
 | `create_product_image_upload_session(...)` + family | QR-based phone product image uploads (see migration 019) |
 | `create_supplier(...)`, `update_supplier(...)` | Supplier create/update; permission-gated, writes a per-field-change audit row. Global entity, no shop scope. Migration `048` |
-| `create_app_user(...)`, `update_app_user(...)`, `deactivate_app_user(p_id, p_is_active)` | User create/update/status change; permission-gated, writes an audit row per call. Does not create the Supabase Auth account — that stays client-side (`supabase.auth.signUp`). Migration `049` |
+| `create_app_user(...)`, `update_app_user(...)`, `deactivate_app_user(p_id, p_is_active)` | User create/update/status change; permission-gated, writes an audit row per call. Does not create the Supabase Auth account. Migration `049`. **Since Phase F** the auth account is created server-side by the `staff-admin` Edge Function (GoTrue admin API, then `create_app_user` as the caller, compensated on failure; the client never calls `auth.signUp`, and the self-hosted stack runs with `DISABLE_SIGNUP=true`); `082` restricts which account `p_auth_id` may link (see above). `selfhost-migration/phase-f/staff-creation.md` |
 | `replace_manager(p_shop_id, p_new_manager_id)` | Atomically swaps a shop's active manager — activates the new one, then deactivates the old one, as two statements inside one transaction, relying on `users_one_active_manager_per_shop` being deferred to transaction end. Migration `049` |
 
 ## RLS Model
@@ -249,11 +260,24 @@ migration `056` it's scoped to own row + same shop + any ADMIN row
 
 - Migration `016_product_images_storage.sql` creates the bucket and four
   `storage.objects` policies scoped to `bucket_id = 'product-images'`.
-- App-side image cap is **100 KB**; bucket file-size limit is 128 KB
-  defense-in-depth. Allowed MIME types: `image/webp`, `image/jpeg`.
-- Phone-upload paths: `product-images/temp/<sessionId>/...` — only
-  reachable through the temporary one-time session token in migration
-  `019`. The phone never needs to log in.
+- App-side image cap is **100 KB** (compressed to WebP/JPEG). Bucket
+  limits as of migration `083` (self-hosted stack, 2026-10-16): `image/jpeg`,
+  `image/png`, `image/webp`, ≤ 5 MiB. (Migration `016` on a fresh install
+  sets `image/webp,image/jpeg`; the production bucket restored from hosted
+  had **no** type or size limit until `083` — audit finding G5.) Completion
+  accepts 1..102400 bytes and WebP/JPEG/PNG (`085`).
+- Paths: legacy `temp/<id>` and `products/<id>/…` (authorized by
+  path→product/session→org, `078`); new uploads only at
+  `org/<org>/temp/<session>` (`079`). Phone uploads use a 60 s signed token
+  issued just in time by `phone-upload-token`; the phone never logs in.
+  Completion runs as service role inside that function after a byte check;
+  a refused object is deleted (`085` function build).
+- Public reads on the self-hosted stack carry `nosniff`, `CSP: default-src 'none';
+  sandbox` and `content-disposition: inline` (gateway rule, 2026-10-16).
+- Staff direct writes are still allowed by policy until `084` is applied
+  (prepared; the branch client already uploads through the validated
+  session flow). Abandoned uploads: a sweep script (deployment
+  configuration), prepared, not scheduled.
 - The **business logo** (Profile page) reuses this same public bucket
   (path `products/brand/...`) via the shared `uploadProductImage` pipeline;
   `business_profile.logo_url` stores the resulting public URL.

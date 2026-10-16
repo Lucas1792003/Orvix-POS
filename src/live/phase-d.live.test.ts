@@ -21,9 +21,14 @@ import {
   sleep, uuid, waitFor, type LiveConfig,
 } from "./liveHelpers";
 
+// 34-byte lossless WebP: the phone object 080 requires before completion; passes 083's byte check.
+import { TINY_WEBP } from "./imageFixtures";
+import {
+  completeThroughFunction, completeThroughRpc, describeCompletion, isInactive, isInvalidLink, isNotUploaded,
+  isPermissionDenied, isPost083, phoneCompleter, schemaVersion,
+} from "./phoneCompletion";
+
 const LIVE = Boolean(process.env.LIVE_SUPABASE_URL);
-// 34-byte lossless WebP (same constant as phase-g3/g4): the phone object 080 requires before completion.
-const TINY_WEBP = Buffer.from("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==", "base64");
 vi.setConfig({ testTimeout: 180_000, hookTimeout: 240_000 });
 
 const SEED_SQL = new URL("../../supabase/tests/phase-d/live/seed.sql", import.meta.url).pathname;
@@ -719,48 +724,71 @@ describe.skipIf(!LIVE)("Phase D live integration (self-hosted stack)", () => {
     check("wrong token", wrong.error !== null && /invalid upload link/i.test(wrong.error.message), wrong.error?.message ?? "no error");
     const short = await rpc(anon, "get_product_image_upload_session_by_token", { p_token: "abc" });
     check("short token", short.error !== null && /invalid upload link/i.test(short.error.message), short.error?.message ?? "no error");
-    const wrongComplete = await rpc(anon, "complete_product_image_upload_session", { p_token: token.slice(0, -4) + "ffff", p_storage_path: sessRow.storage_path, p_public_url: publicUrl(sessRow.storage_path), p_bytes: 1000, p_mime_type: "image/webp" });
-    check("complete with wrong token", wrongComplete.error !== null, wrongComplete.error?.message ?? "no error");
+    // Completion on this schema (src/live/phoneCompletion.ts): < 083 the
+    // phone's anon RPC; >= 083 phone-upload-token {action:"complete"}, and
+    // the RPC refuses anon / authenticated outright (42501).
+    const schema = schemaVersion(cfg);
+    const post083 = isPost083(schema);
+    const phoneComplete = phoneCompleter(cfg, anon, () => post083);
+    notes.push(`schema ${schema}: phone completion via ${post083 ? "the function (RPC service_role only)" : "the anon RPC"}`);
+    const wrongComplete = await phoneComplete({ token: token.slice(0, -4) + "ffff", storagePath: sessRow.storage_path }, { p_bytes: 1000 });
+    check("complete with wrong token", isInvalidLink(wrongComplete), describeCompletion(wrongComplete));
 
     // Expired session (expires_at set in the past via service role)
     const upd = await svc.from("product_image_upload_sessions").update({ expires_at: new Date(Date.now() - 60_000).toISOString() }).eq("id", c.data.sessionId).select("id");
     expect(upd.error).toBeNull();
     const gExp = await rpc(anon, "get_product_image_upload_session_by_token", { p_token: token });
-    const compExp = await rpc(anon, "complete_product_image_upload_session", { p_token: token, p_storage_path: sessRow.storage_path, p_public_url: publicUrl(sessRow.storage_path), p_bytes: 1000, p_mime_type: "image/webp" });
+    const compExp = await phoneComplete({ token, storagePath: sessRow.storage_path }, { p_bytes: 1000 });
     const expRow = await row("product_image_upload_sessions", { id: c.data.sessionId });
-    check("expired: get returns EXPIRED w/o upload token, complete rejected", gExp.data?.status === "EXPIRED" && gExp.data?.uploadToken === null && compExp.error !== null && expRow.status === "EXPIRED", `get.status=${gExp.data?.status} complete="${compExp.error?.message}" db.status=${expRow.status}`);
+    check("expired: get returns EXPIRED w/o upload token, complete rejected", gExp.data?.status === "EXPIRED" && gExp.data?.uploadToken === null && isInactive(compExp) && expRow.status === "EXPIRED", `get.status=${gExp.data?.status} complete=${describeCompletion(compExp)} db.status=${expRow.status}`);
 
     // Canceled session
     const c2 = await rpc(admin, "create_product_image_upload_session", { p_shop_id: ids.shop, p_product_id: ids.prod1 });
     const cancel = await rpc(admin, "cancel_product_image_upload_session", { p_session_id: c2.data.sessionId });
     expect(cancel.error).toBeNull();
     const gCan = await rpc(anon, "get_product_image_upload_session_by_token", { p_token: c2.data.token });
-    const compCan = await rpc(anon, "complete_product_image_upload_session", { p_token: c2.data.token, p_storage_path: c2.data.storagePath, p_public_url: publicUrl(c2.data.storagePath), p_bytes: 1000, p_mime_type: "image/webp" });
-    check("canceled: get shows CANCELED, complete rejected", gCan.data?.status === "CANCELED" && compCan.error !== null, `get.status=${gCan.data?.status} complete="${compCan.error?.message}"`);
+    const compCan = await phoneComplete(c2.data, { p_bytes: 1000 });
+    check("canceled: get shows CANCELED, complete rejected", gCan.data?.status === "CANCELED" && isInactive(compCan), `get.status=${gCan.data?.status} complete=${describeCompletion(compCan)}`);
 
     // Complete twice with a valid token. Since 080 the object must exist
     // first (completion before the upload is refused and the session stays
-    // PENDING); bytes/mime then come from the object's storage metadata.
+    // PENDING); bytes/mime then come from the stored object.
     const c3 = await rpc(admin, "create_product_image_upload_session", { p_shop_id: ids.shop, p_product_id: ids.prod1 });
     const compArgs = { p_token: c3.data.token, p_storage_path: c3.data.storagePath, p_public_url: publicUrl(c3.data.storagePath), p_bytes: 1234, p_mime_type: "image/webp" };
-    const comp0 = await rpc(anon, "complete_product_image_upload_session", compArgs);
+    const comp0 = await phoneComplete(c3.data, { p_bytes: 1234 });
     const c3Pending = (await row("product_image_upload_sessions", { id: c3.data.sessionId })).status;
-    check("080: complete before the upload -> rejected, still PENDING", comp0.error?.message === "Uploaded image was not found in storage" && c3Pending === "PENDING", `"${comp0.error?.message}" status=${c3Pending}`);
+    check("080: complete before the upload -> rejected, still PENDING", isNotUploaded(comp0) && c3Pending === "PENDING", `${describeCompletion(comp0)} status=${c3Pending}`);
     const up = await svc.storage.from("product-images").upload(c3.data.storagePath, TINY_WEBP, { contentType: "image/webp" });
     expect(up.error).toBeNull();
-    const comp1 = await rpc(anon, "complete_product_image_upload_session", compArgs);
-    const comp2 = await rpc(anon, "complete_product_image_upload_session", compArgs);
+    if (post083) {
+      // 083: neither the phone (anon) nor a signed-in ADMIN can call the RPC, even with the exact values
+      const locked = await Promise.all([anon, admin].map((cl) => completeThroughRpc(cl, compArgs)));
+      check("083: completion RPC refuses anon + authenticated (42501)", locked.every(isPermissionDenied) && (await row("product_image_upload_sessions", { id: c3.data.sessionId })).status === "PENDING", locked.map(describeCompletion).join(" / "));
+    }
+    const comp1 = await phoneComplete(c3.data, { p_bytes: 1234 });
+    const comp2 = await phoneComplete(c3.data, { p_bytes: 1234 });
     const c3Row = await row("product_image_upload_sessions", { id: c3.data.sessionId });
-    check("complete once", comp1.error === null && comp1.data.status === "COMPLETED" && c3Row.status === "COMPLETED" && c3Row.bytes === TINY_WEBP.length && c3Row.public_url === publicUrl(c3.data.storagePath), `status=${comp1.data?.status} db.bytes=${c3Row.bytes} (object size ${TINY_WEBP.length}; client claimed 1234) public_url=trusted:${c3Row.public_url === publicUrl(c3.data.storagePath)}`);
-    notes.push(`second complete: ${comp2.error ? `REJECTED ("${comp2.error.message}") - not idempotent, by design (PENDING guard)` : "ACCEPTED (idempotent replay)"}`);
-    check("complete twice -> second rejected or identical", comp2.error !== null || JSON.stringify(comp2.data) === JSON.stringify(comp1.data), comp2.error?.message ?? "identical");
-    // bad inputs on a fresh session: wrong path, oversized, bad mime, data: URL
+    check("complete once", comp1.ok && comp1.data.status === "COMPLETED" && c3Row.status === "COMPLETED" && c3Row.bytes === TINY_WEBP.length && c3Row.public_url === publicUrl(c3.data.storagePath), `status=${comp1.data?.status} db.bytes=${c3Row.bytes} (object size ${TINY_WEBP.length}${post083 ? "" : "; client claimed 1234"}) public_url=trusted:${c3Row.public_url === publicUrl(c3.data.storagePath)}`);
+    notes.push(`second complete: ${!comp2.ok ? `REJECTED (${describeCompletion(comp2)}) - not idempotent, by design (PENDING guard)` : "ACCEPTED (idempotent replay)"}`);
+    check("complete twice -> second rejected as inactive", isInactive(comp2), describeCompletion(comp2));
+    // bad inputs on a fresh session: wrong path, oversized, bad mime, data: URL.
+    // The RPC's own checks run as its allowed caller (anon < 083, service_role = the function >= 083).
     const c4 = await rpc(admin, "create_product_image_upload_session", { p_shop_id: ids.shop, p_product_id: ids.prod1 });
-    const badPath = await rpc(anon, "complete_product_image_upload_session", { ...compArgs, p_token: c4.data.token, p_storage_path: "temp/other" });
-    const badSize = await rpc(anon, "complete_product_image_upload_session", { ...compArgs, p_token: c4.data.token, p_storage_path: c4.data.storagePath, p_public_url: publicUrl(c4.data.storagePath), p_bytes: 200_000 });
-    const badMime = await rpc(anon, "complete_product_image_upload_session", { ...compArgs, p_token: c4.data.token, p_storage_path: c4.data.storagePath, p_public_url: publicUrl(c4.data.storagePath), p_mime_type: "image/png" });
-    const badUrl = await rpc(anon, "complete_product_image_upload_session", { ...compArgs, p_token: c4.data.token, p_storage_path: c4.data.storagePath, p_public_url: "data:image/webp;base64,AAAA" });
-    check("complete validates path/size/mime/url", [badPath, badSize, badMime, badUrl].every((r) => r.error !== null) && (await row("product_image_upload_sessions", { id: c4.data.sessionId })).status === "PENDING", `"${badPath.error?.message}" / "${badSize.error?.message}" / "${badMime.error?.message}" / "${badUrl.error?.message}"`);
+    const checker = post083 ? svc : anon;
+    const badArgs = [
+      { ...compArgs, p_token: c4.data.token, p_storage_path: "temp/other" },
+      { ...compArgs, p_token: c4.data.token, p_storage_path: c4.data.storagePath, p_public_url: publicUrl(c4.data.storagePath), p_bytes: 200_000 },
+      { ...compArgs, p_token: c4.data.token, p_storage_path: c4.data.storagePath, p_public_url: publicUrl(c4.data.storagePath), p_mime_type: "image/png" },
+      { ...compArgs, p_token: c4.data.token, p_storage_path: c4.data.storagePath, p_public_url: "data:image/webp;base64,AAAA" },
+    ];
+    const [badPath, badSize, badMime, badUrl] = await Promise.all(badArgs.map((a) => rpc(checker, "complete_product_image_upload_session", a)));
+    check(`complete validates path/size/mime/url (RPC as ${post083 ? "service_role" : "anon"})`, [badPath, badSize, badMime, badUrl].every((r) => r.error !== null) && (await row("product_image_upload_sessions", { id: c4.data.sessionId })).status === "PENDING", `"${badPath.error?.message}" / "${badSize.error?.message}" / "${badMime.error?.message}" / "${badUrl.error?.message}"`);
+    if (post083) {
+      const lockedBad = await Promise.all(badArgs.flatMap((a) => [anon, admin].map((cl) => completeThroughRpc(cl, a))));
+      // the function takes only the token: it derives c4's own path, which has no object
+      const fn4 = await completeThroughFunction(cfg, c4.data.token, { p_storage_path: "temp/other", p_public_url: "data:image/webp;base64,AAAA", p_bytes: 200_000, p_mime_type: "image/png" });
+      check("083: bad path/size/mime/url -> anon + ADMIN 42501; function completes only the session's own path", lockedBad.every(isPermissionDenied) && isNotUploaded(fn4) && (await row("product_image_upload_sessions", { id: c4.data.sessionId })).status === "PENDING", `${lockedBad.length} x 42501; function (body naming temp/other, a data: URL, 200000 B, image/png) -> ${describeCompletion(fn4)}`);
+    }
 
     // anon cannot call anything else
     // Real parameter names so PostgREST resolves the function and Postgres

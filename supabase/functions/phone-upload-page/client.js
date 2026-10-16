@@ -18,10 +18,11 @@
 //     (multipart, x-upsert: false - same request as supabase-js
 //     uploadToSignedUrl); an expired token / network failure is retried once
 //     with a fresh token; 409 / "already exists" means the object is there;
-//   * completion: rpc complete_product_image_upload_session with the
-//     server's path and <origin>/storage/v1/object/public/product-images/<path>
-//     (079/080: the server re-derives and checks it); on failure the session
-//     is re-read and COMPLETED for the same path counts as success.
+//   * completion: POST /functions/v1/phone-upload-token {token, action:
+//     "complete"} (083/G5: the server checks the stored bytes, then runs
+//     complete_product_image_upload_session with the service role and
+//     derives the URL itself); on failure the session is re-read and
+//     COMPLETED for the same path counts as success.
 // Only the anon key is used (it is public: it ships in every app build).
 // Same origin only (CSP connect-src 'self'): the page is served by the API
 // origin itself, so every call goes to window.location.origin.
@@ -195,20 +196,29 @@ export function phoneUploadPage(win, cfg, deps) {
     return "other";
   }
 
-  function publicUrl(path) {
-    return ORIGIN + "/storage/v1/object/public/" + BUCKET + "/" + path;
-  }
-
+  // 083 (G5): completion goes through phone-upload-token {action:"complete"},
+  // which checks the stored bytes (magic number, size, no markup) before it
+  // completes the session with the service role; a refused object is deleted
+  // there. anon can no longer call complete_product_image_upload_session.
   function complete(sessionToken, storagePath, image) {
     if (!isFinite(image.bytes) || image.bytes <= 0 || image.bytes > MAX_BYTES) {
       return Promise.reject(new Error("Compressed image is over the 100 KB limit and was not uploaded."));
     }
-    return rpc("complete_product_image_upload_session", {
-      p_token: sessionToken,
-      p_storage_path: storagePath,
-      p_public_url: publicUrl(storagePath),
-      p_bytes: image.bytes,
-      p_mime_type: image.mimeType,
+    return win.fetch(ORIGIN + "/functions/v1/phone-upload-token", {
+      method: "POST",
+      headers: apiHeaders(true),
+      body: JSON.stringify({ token: sessionToken, action: "complete" }),
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+    }).then(function (res) {
+      return res.json().catch(function () { return null; }).then(function (b) {
+        if (res.ok && b && b.status === "COMPLETED" && b.storagePath === storagePath) return b;
+        b = b || {};
+        if (res.status === 410 || b.code === "inactive") throw new InactiveError(STATUSES.indexOf(b.status) >= 0 ? b.status : "EXPIRED");
+        throw new Error((typeof b.error === "string" && b.error) || "Upload could not be completed (" + res.status + ").");
+      });
+    }, function () {
+      throw new Error("Could not reach the server. Check the phone's connection and try again.");
     });
   }
 

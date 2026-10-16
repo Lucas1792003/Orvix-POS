@@ -60,7 +60,7 @@ END $$;
 SELECT test.check('t15: anon executes exactly app_setup_needed + the two token-scoped phone RPCs',
   (SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public' AND has_function_privilege('anon', p.oid, 'EXECUTE'))
-  = ARRAY['app_setup_needed', 'complete_product_image_upload_session', 'get_product_image_upload_session_by_token'],
+  = (CASE WHEN test.m083() THEN ARRAY['app_setup_needed', 'get_product_image_upload_session_by_token'] ELSE ARRAY['app_setup_needed', 'complete_product_image_upload_session', 'get_product_image_upload_session_by_token'] END),
   (SELECT string_agg(p.proname, ',' ORDER BY p.proname) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public' AND has_function_privilege('anon', p.oid, 'EXECUTE')));
 SELECT test.check('t15: app_setup_needed() is a zero-argument STABLE boolean probe over users only (no other table, no parameter)',
@@ -166,10 +166,10 @@ SELECT test.expect_error('t15 anon: by-token with the stored HASH instead of the
   format($q$SELECT public.get_product_image_upload_session_by_token(%L)$q$, :'ses_hash'), 'Invalid upload link');
 SELECT test.expect_error('t15 anon: by-token with the session id -> Invalid upload link',
   format($q$SELECT public.get_product_image_upload_session_by_token(%L)$q$, :'ses'::jsonb->>'sessionId'), 'Invalid upload link');
-SELECT test.expect_error('t15 anon: complete with a random token -> Invalid upload link',
+SELECT test.expect_error('t15 anon: complete with a random token -> Invalid upload link (from 083: permission denied, service_role only)',
   format($q$SELECT public.complete_product_image_upload_session(%L, %L, %L, 1000, 'image/webp')$q$,
          md5('x') || md5('y') || md5('z') || md5('w'), :'ses'::jsonb->>'storagePath', :'PUB' || (:'ses'::jsonb->>'storagePath')),
-  'Invalid upload link');
+  CASE WHEN test.m083() THEN 'permission denied' ELSE 'Invalid upload link' END);
 SELECT public.get_product_image_upload_session_by_token(:'ses'::jsonb->>'token') AS bt \gset
 RESET ROLE;
 SELECT test.check('t15 anon: failed token guesses changed nothing on the session row',

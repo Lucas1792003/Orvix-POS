@@ -10,7 +10,9 @@ SELECT test.check('anon can execute exactly the 2 token-scoped phone-upload RPCs
      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public' AND has_function_privilege('anon', p.oid, 'EXECUTE'))
   = (SELECT array_agg(x ORDER BY x) FROM unnest(
-       ARRAY['complete_product_image_upload_session','get_product_image_upload_session_by_token']
+       ARRAY['get_product_image_upload_session_by_token']
+       -- 083: completion only through the phone-upload-token function (service_role)
+       || CASE WHEN test.m083() THEN '{}'::text[] ELSE ARRAY['complete_product_image_upload_session'] END
        || CASE WHEN to_regprocedure('public.app_setup_needed()') IS NOT NULL THEN ARRAY['app_setup_needed'] ELSE '{}'::text[] END) x),
   (SELECT string_agg(p.proname, ',') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public' AND has_function_privilege('anon', p.oid, 'EXECUTE')));
@@ -35,7 +37,9 @@ SELECT test.check('authenticated can execute every public function except comple
                THEN ARRAY['app_upload_session_public_url'] ELSE '{}'::text[] END
        -- 081: phone-upload token limiter (the Edge Function, service_role only)
        || CASE WHEN to_regprocedure('public.claim_phone_upload_token_issue(text)') IS NOT NULL
-               THEN ARRAY['claim_phone_upload_token_issue'] ELSE '{}'::text[] END) x),
+               THEN ARRAY['claim_phone_upload_token_issue'] ELSE '{}'::text[] END
+       -- 083: phone completion through the validating Edge Function (service_role only)
+       || CASE WHEN test.m083() THEN ARRAY['complete_product_image_upload_session'] ELSE '{}'::text[] END) x),
   (SELECT string_agg(p.proname, ',') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public' AND NOT has_function_privilege('authenticated', p.oid, 'EXECUTE')));
 

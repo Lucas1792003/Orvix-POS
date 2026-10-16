@@ -19,6 +19,7 @@ production schema snapshot. Environment:
 |---|---|---|
 | `BASELINE_SQL` | required, no default | path to the scrubbed schema-only dump to restore, e.g. `<workspace>/<ts>/schema.scrubbed.sql` (later: `supabase/baseline/schema-baseline.sql`) |
 | `HOSTED_GRANTS_TXT` | `hosted-grants.txt` next to `BASELINE_SQL` | expected table-grant list for the `065` parity check |
+| `SWEEP_SQL` | unset (t21 sweep checks skipped) | the deployment's read-only abandoned-upload candidate query (`sweep-abandoned-uploads.sql`, not in this repository) |
 | `POS_TEST_IMAGE` | `supabase/postgres:17.6.1.136` | pulled if missing; falls back to `public.ecr.aws/supabase/postgres:17.6.1.159` |
 | `POS_TEST_PORT` | `55432` | bound to 127.0.0.1 only |
 | `POS_TEST_KEEP` | `0` | `1` leaves the container running for inspection (password printed) |

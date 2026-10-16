@@ -33,7 +33,9 @@
 //             pre-deployment mode; needs Docker).
 // Everything else (session RPCs, storage upload, completion, the desktop's
 // status poll) is the real stack. The D-ratelimit-* cases (migration 081)
-// run only when the stack's schema is >= 081 and are skipped otherwise. Real timing. Since 080 every successful
+// run only when the stack's schema is >= 081 and are skipped otherwise; the
+// D-g5-* cases (migration 083: bucket limits, completion through the
+// validating function) only when it is >= 083. Real timing. Since 080 every successful
 // case also saves the product and checks that products.image_url is the
 // SERVER-DERIVED URL (public.app_config origin + /storage/v1/object/public/
 // product-images/<session path>). QA data only; every QA storage object is
@@ -51,6 +53,7 @@ import { DEV_SERVER_URL, liveCfg, qaPassword, qaState, qaTotpSecret, RESULTS_DIR
 import { record } from "./helpers/evidence";
 import { assertConsistency } from "./helpers/consistency";
 import { Terminal } from "./helpers/terminal";
+import { HTML_DOC, JPEG_HTML_POLYGLOT, SVG_DOC, TINY_WEBP } from "../src/live/imageFixtures";
 
 test.describe.configure({ mode: "serial" });
 
@@ -69,8 +72,8 @@ const PAGE_MODE = (process.env.E2E_PHONE_PAGE ?? "deployed").trim();
 if (PAGE_MODE !== "deployed" && PAGE_MODE !== "local") throw new Error(`E2E_PHONE_PAGE must be "deployed" or "local", got "${PAGE_MODE}"`);
 const MODES = `fn ${FN_MODE}, page ${PAGE_MODE}`;
 const QA_OBJECT = new RegExp(`^org/${ids.org}/temp/pimg-[0-9a-f]+$`);
-// Tiny lossless WebP (34 bytes) for the programmatic race (same constant as phase-g3).
-const TINY_WEBP_B64 = "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
+// Tiny lossless WebP (34 bytes) for the programmatic race (src/live/imageFixtures.ts; passes 083's byte check).
+const TINY_WEBP_B64 = TINY_WEBP.toString("base64");
 
 const PHONE_READY = "Choose or take a product photo.";
 const PHONE_DONE = "Photo uploaded. You can return to the computer.";
@@ -197,7 +200,7 @@ async function launchPhone(opts: { holdFirstPutMs?: number; dropFirstUploadRespo
   const P = await Terminal.launchPhone();
   const fnCalls: FnCall[] = [];
   const puts: Put[] = [];
-  const completes: { at: number; status: number }[] = [];
+  const completes: { at: number; status: number; text?: string }[] = [];
   let dropped = false;
   let held = false;
   if (PAGE_MODE === "local") {
@@ -211,12 +214,18 @@ async function launchPhone(opts: { holdFirstPutMs?: number; dropFirstUploadRespo
       await route.fulfill({ response: r });
     });
   }
+  // 083 (G5): the page completes through the same function ({action:"complete"});
+  // those calls go to the `completes` ledger, token requests to `fnCalls`.
+  const isCompletion = (postData: string | null) => {
+    try { return (JSON.parse(postData ?? "null") as { action?: string } | null)?.action === "complete"; } catch { return false; }
+  };
   if (FN_MODE === "local") {
     await P.context.route(`${cfg.url}${FN_PATH}`, async (route: Route) => {
       const r = await route.fetch({ url: local!.urlFor("phone-upload-token") });
       if (route.request().method() === "OPTIONS") return route.fulfill({ response: r });
       const text = await r.text();
-      fnCalls.push(fnCall(r.status(), text));
+      if (isCompletion(route.request().postData())) completes.push({ at: Date.now(), status: r.status(), text });
+      else fnCalls.push(fnCall(r.status(), text));
       await route.fulfill({ response: r, body: text });
     });
   } else {
@@ -225,7 +234,9 @@ async function launchPhone(opts: { holdFirstPutMs?: number; dropFirstUploadRespo
     P.context.on("response", (res) => {
       if (res.url() !== `${cfg.url}${FN_PATH}` || res.request().method() !== "POST") return;
       const status = res.status();
-      void res.text().then((text) => fnCalls.push(fnCall(status, text)), () => fnCalls.push(fnCall(status, "")));
+      const completion = isCompletion(res.request().postData());
+      const push = (text: string) => (completion ? completes.push({ at: Date.now(), status, text }) : fnCalls.push(fnCall(status, text)));
+      void res.text().then(push, () => push(""));
     });
   }
   await P.context.route(`${cfg.url}/storage/v1/object/upload/sign/**`, async (route: Route) => {
@@ -243,6 +254,7 @@ async function launchPhone(opts: { holdFirstPutMs?: number; dropFirstUploadRespo
     puts.push({ at: Date.now(), status: r.status(), body });
     return route.fulfill({ response: r, body });
   });
+  // a page from before the 083 function deploy still calls the RPC directly
   await P.context.route(`${cfg.url}/rest/v1/rpc/complete_product_image_upload_session`, async (route: Route) => {
     const r = await route.fetch();
     completes.push({ at: Date.now(), status: r.status() });
@@ -270,8 +282,9 @@ async function phonePicks(P: Terminal): Promise<number> {
 
 /** The phone reports the upload done; otherwise say what the phone, the
  *  session row and the desktop (modal status, its create / cancel / status
- *  requests since the QR) show. Seen 2026-10-15 in D300: the phone was told
- *  "cancelled on the computer" at +300 s. */
+ *  requests since the QR, and every "[phone-upload]" close request with its
+ *  trigger) show. Seen 2026-10-15 in D300: the phone was told "cancelled on
+ *  the computer" at +300 s (app-bugfixes.md, "D300 analysis"). */
 async function phoneShowsDone(P: Terminal, s: Sess, timeout: number): Promise<void> {
   try {
     await expect(P.page.getByText(PHONE_DONE).first()).toBeVisible({ timeout });
@@ -282,7 +295,9 @@ async function phoneShowsDone(P: Terminal, s: Sess, timeout: number): Promise<vo
       .map((r) => `${r.method}@${Math.round((r.at - s.shownAt) / 1000)}s:${r.status ?? "no-response"}`);
     const polls = rel(/get_product_image_upload_session_status/);
     const shot = await A.screenshot(`d-phone-not-done-desktop-${s.sessionId.slice(-6)}`).catch(() => "?");
-    const diag = `phone "${phone}"; server row ${sessionRow(s.sessionId).split("|")[0]}; desktop status "${status}"; route=${A.currentRoute()}; create: [${rel(/create_product_image_upload_session/).join(",")}]; cancel: [${rel(/cancel_product_image_upload_session/).join(",")}]; status polls: ${polls.length} last [${polls.slice(-3).join(",")}]; desktop screenshot ${path.basename(shot)}; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
+    const confirmShown = await A.page.getByText("Stop this phone upload?").isVisible().catch(() => false);
+    const markers = A.phoneUploadMarkersSince(s.shownAt - 15_000);
+    const diag = `phone "${phone}"; server row ${sessionRow(s.sessionId).split("|")[0]}; desktop status "${status}"${confirmShown ? " (stop-upload confirmation shown)" : ""}; desktop close requests: [${markers.join(" || ") || "none"}]; route=${A.currentRoute()}; create: [${rel(/create_product_image_upload_session/).join(",")}]; cancel: [${rel(/cancel_product_image_upload_session/).join(",")}]; status polls: ${polls.length} last [${polls.slice(-3).join(",")}]; desktop screenshot ${path.basename(shot)}; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
     record("phone-upload", "phone did not finish", "INFO", diag);
     throw new Error(`${(e as Error).message.split("\n")[0]} — ${diag}`);
   }
@@ -300,7 +315,7 @@ async function desktopShowsImage(s: Sess): Promise<string> {
     const status = await A.page.locator("div", { hasText: /^Status$/ }).locator("xpath=following-sibling::div[1]").first().innerText({ timeout: 2_000 }).catch(() => "?");
     const statusReqs = A.requestsMatching(/get_product_image_upload_session_status/, s.shownAt).map((r) => r.status ?? "no-response");
     const reconnecting = await A.page.getByText(/reconnecting/i).isVisible().catch(() => false);
-    const diag = `desktop status "${status}"${reconnecting ? " (reconnecting shown)" : ""}; server row ${sessionRow(s.sessionId)}; status polls since QR: ${statusReqs.length} [${[...new Set(statusReqs)].join(",")}]; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
+    const diag = `desktop status "${status}"${reconnecting ? " (reconnecting shown)" : ""}; desktop close requests: [${A.phoneUploadMarkersSince(s.shownAt - 15_000).join(" || ") || "none"}]; server row ${sessionRow(s.sessionId)}; status polls since QR: ${statusReqs.length} [${[...new Set(statusReqs)].join(",")}]; console: ${A.consoleErrors.slice(-4).join(" || ")}`;
     record("phone-upload", "desktop did not show the upload", "INFO", diag);
     throw new Error(`${(e as Error).message.split("\n")[0]} — ${diag}`);
   }
@@ -376,7 +391,7 @@ test.beforeAll(async () => {
   record("phone-upload", "storage baseline", "INFO", `${storageBefore}; ${orphansBefore}`);
 
   schemaVersion = sql1(`SELECT max(version) FROM supabase_migrations.schema_migrations;`);
-  record("phone-upload", "schema", "INFO", `schema ${schemaVersion}; 081 rate-limit cases ${schemaVersion >= "081" ? "RUN" : "SKIPPED (not deployed)"}`);
+  record("phone-upload", "schema", "INFO", `schema ${schemaVersion}; 081 rate-limit cases ${schemaVersion >= "081" ? "RUN" : "SKIPPED (not deployed)"}; 083 G5 cases ${schemaVersion >= "083" ? "RUN (completion through the function only)" : "SKIPPED (not deployed)"}`);
   trustedBase = sql1(`SELECT value FROM public.app_config WHERE key = 'supabase_public_url';`);
   expect(trustedBase, "080 app_config.supabase_public_url must be set").toMatch(/^https:\/\/[a-z0-9.-]+(:\d+)?$/);
   expect(trustedBase, "the stack's trusted origin is the origin the apps are built for").toBe(cfg.url);
@@ -474,6 +489,11 @@ for (const delayS of [30, 65, 120, 300]) {
       const tokenAgeAtPut = puts[0].at - fnCalls[0].at;
       const line = `| ${delayS} s | phone opened +${secs(openedAfter)} s | file picked +${secs(pickedAt - s.shownAt)} s | token issued +${secs(tokenAt)} s | PUT 200 +${secs(puts[0].at - s.shownAt)} s (token age ${tokenAgeAtPut} ms) | complete 200 | COMPLETED | desktop image ${size} |`;
       timings.push(line);
+      // Any close request on the desktop during the wait (e.g. an Escape or
+      // backdrop click that only raised the stop-upload confirmation) is
+      // kept as evidence even though the case passed.
+      const closeRequests = A.phoneUploadMarkersSince(s.shownAt - 15_000);
+      if (closeRequests.length) record("phone-upload", `D${delayS} desktop close requests`, "INFO", closeRequests.join(" || "));
       record("phone-upload", `D${delayS} upload at +${delayS} s`, "PASS", `[${MODES}] ${line} ${db}; ${img}; function answer keys {${fnCalls[0].keys}} path=session path, no ids`);
     } finally {
       await P.close();
@@ -657,6 +677,9 @@ test("D-cancelled: desktop closes the QR (cancel) -> phone refused with a clear 
     await A.page.getByRole("button", { name: "Close", exact: true }).click();
     expect((await cancelled).status()).toBeLessThan(300);
     await expect(A.page.getByText("Upload from phone")).toBeHidden();
+    // the desktop names the trigger of its cancel (lib/phoneUploadClose.ts)
+    const closeRequests = A.phoneUploadMarkersSince(s.shownAt - 15_000);
+    expect(closeRequests.some((m) => m.startsWith("trigger=close-button decision=cancel+close")), closeRequests.join(" || ")).toBe(true);
     expect(sessionRow(s.sessionId).split("|")[0]).toBe("CANCELED");
     await phonePicks(P);
     await expect(P.page.getByText(PHONE_CANCELLED)).toBeVisible({ timeout: 30_000 });
@@ -667,7 +690,7 @@ test("D-cancelled: desktop closes the QR (cancel) -> phone refused with a clear 
     expect(sessionRow(s.sessionId).split("|")[0]).toBe("CANCELED");
     expect(objectsUnder(s)).toBe(0);
     expect(productImageUrl()).toBe(imageBefore);
-    record("phone-upload", "D-cancelled session refused", "PASS", `[${MODES}] products.image_url unchanged; desktop Close -> cancel RPC, modal gone; phone: "${PHONE_CANCELLED}"; function 410 inactive/CANCELED, no token; PUTs=0, completes=0; row CANCELED; objects=0`);
+    record("phone-upload", "D-cancelled session refused", "PASS", `[${MODES}] products.image_url unchanged; desktop Close -> cancel RPC (marker trigger=close-button), modal gone; phone: "${PHONE_CANCELLED}"; function 410 inactive/CANCELED, no token; PUTs=0, completes=0; row CANCELED; objects=0`);
   } finally {
     await P.close();
   }
@@ -744,5 +767,111 @@ test("D-ratelimit-used-up [081]: the session reached its lifetime cap -> 429 unt
     record("phone-upload", "D-ratelimit-used-up [081]", "PASS", `[${MODES}] counter at 20 -> function 429 retry_after=${JSON.parse(fnCalls[0].text).retry_after_seconds} s (until expiry), no automatic retry; phone: "${PHONE_LINK_USED_UP}"; PUTs=0, completes=0, objects=0; desktop closed (cancelled)`);
   } finally {
     await P.close();
+  }
+});
+
+// --------------------------------------------------------------------------
+// 083 / G5 (docs/selfhost-migration/phase-f/migration-083-g5.md). Run ONLY
+// when the stack's schema is >= 083 (bucket limits applied, completion RPC
+// service_role-only) - which also implies the validating phone-upload-token
+// and the new page are deployed (deploy order: functions first). QA session
+// objects only; a refused object is deleted by the function itself.
+// the 085 function's wording, and the 083 function's (either build may be deployed)
+const G5_REFUSED = [
+  "The uploaded file is not a valid JPEG, PNG or WebP photo under 100 KB. Please choose another photo.",
+  "The uploaded file is not a valid JPEG or WebP photo under 100 KB. Please choose another photo.",
+];
+
+/** The phone page's own upload code with an arbitrary blob (as the D-race case). */
+const pageUpload = (P: Terminal, b64: string, type: string) =>
+  P.page.evaluate(async ([data, t]) => {
+    const page = (window as any).shwePhaLaPhoneUpload;
+    const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    try {
+      const r = await page.uploadImage({ blob: new Blob([bytes], { type: t }), bytes: bytes.length, mimeType: t });
+      return `ok:${r.status}`;
+    } catch (e) {
+      return `rejected:${String((e as Error)?.message)}`;
+    }
+  }, [b64, type] as const);
+
+test("D-g5-bucket [083]: product-images allows only JPEG/PNG/WebP up to 5 MiB; anon cannot call the completion RPC", async () => {
+  test.skip(schemaVersion < "083", `schema ${schemaVersion} < 083: G5 limits not deployed`);
+  const bucket = sql1(`SELECT public || '|' || file_size_limit || '|' || allowed_mime_types::text FROM storage.buckets WHERE id = '${BUCKET}';`);
+  expect(bucket).toBe("true|5242880|{image/jpeg,image/png,image/webp}");
+  const s = await openQr();
+  try {
+    const r = await fetch(`${cfg.url}/rest/v1/rpc/complete_product_image_upload_session`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cfg.anonKey}`, apikey: cfg.anonKey, "content-type": "application/json" },
+      body: JSON.stringify({ p_token: s.token, p_storage_path: s.storagePath, p_public_url: publicUrl(s.storagePath), p_bytes: 100, p_mime_type: "image/jpeg" }),
+    });
+    const text = await r.text();
+    expect(r.status).toBeGreaterThanOrEqual(400);
+    expect(text).toMatch(/permission denied/i);
+    expect(sessionRow(s.sessionId).split("|")[0]).toBe("PENDING");
+    record("phone-upload", "D-g5-bucket [083]", "PASS", `bucket public|limit|types = ${bucket}; anon POST rpc/complete_product_image_upload_session -> ${r.status} permission denied; QA session still PENDING`);
+  } finally {
+    await A.page.getByRole("button", { name: "Close", exact: true }).click();
+  }
+});
+
+test("D-g5-html-as-jpeg [083]: HTML bytes declared image/jpeg are stored by the bucket, refused at completion (422) and DELETED; the phone then uploads a real photo", async () => {
+  test.skip(schemaVersion < "083", `schema ${schemaVersion} < 083: G5 limits not deployed`);
+  test.setTimeout(180_000);
+  const s = await openQr();
+  const { P, fnCalls, puts, completes } = await launchPhone();
+  try {
+    await phoneOpens(P, s);
+    // shared with the live suites (src/live/imageFixtures.ts; each proven against imageCheck.ts by imageFixtures.test.ts)
+    const cases = [
+      ["html", HTML_DOC],
+      ["jpeg+html polyglot", JPEG_HTML_POLYGLOT],
+      ["webp bytes declared jpeg", TINY_WEBP],
+    ] as const;
+    for (const [label, bytes] of cases) {
+      const out = await pageUpload(P, bytes.toString("base64"), "image/jpeg");
+      expect(G5_REFUSED.map((m) => `rejected:${m}`), label).toContain(out);
+      expect(objectsUnder(s), `${label}: the function deleted the refused object`).toBe(0);
+      expect(sessionRow(s.sessionId).split("|")[0], label).toBe("PENDING");
+    }
+    // the deployed-mode ledger is fed from response events: wait until every answer is in
+    await expect.poll(() => completes.length, { timeout: 10_000 }).toBe(cases.length);
+    expect(puts.map((p) => p.status)).toEqual(cases.map(() => 200));
+    expect(completes.map((c) => c.status)).toEqual(cases.map(() => 422));
+    expect(completes.every((c) => (c.text ?? "").includes('"invalid_image"'))).toBe(true);
+    // the same QR still works with a real photo through the UI
+    await phonePicks(P);
+    await phoneShowsDone(P, s, 60_000);
+    await desktopShowsImage(s);
+    const db = await assertCompletedOnce(s);
+    const img = await saveProductAndCheckImageUrl(s);
+    await expect.poll(() => completes.length, { timeout: 10_000 }).toBe(cases.length + 1);
+    expect(completes.map((c) => c.status)).toEqual([...cases.map(() => 422), 200]);
+    record("phone-upload", "D-g5-html-as-jpeg [083]", "PASS", `[${MODES}] ${cases.map(([l]) => l).join(", ")} declared image/jpeg: PUT 200 (bucket checks the declared type) -> complete 422 invalid_image, object deleted, session PENDING; then a real photo: tokens=${fnCalls.length}, complete 200; ${db}; ${img}`);
+  } finally {
+    await P.close();
+  }
+});
+
+test("D-g5-declared-types [083]: text/html, image/svg+xml and application/octet-stream uploads are refused by storage; nothing stored, nothing completed", async () => {
+  test.skip(schemaVersion < "083", `schema ${schemaVersion} < 083: G5 limits not deployed`);
+  test.setTimeout(120_000);
+  const s = await openQr();
+  const { P, puts, completes } = await launchPhone();
+  try {
+    await phoneOpens(P, s);
+    const body = SVG_DOC.toString("base64");
+    const outs: string[] = [];
+    for (const type of ["text/html", "image/svg+xml", "application/octet-stream"]) outs.push(await pageUpload(P, body, type));
+    for (const o of outs) expect(o).toMatch(/^rejected:Image upload failed/);
+    expect(puts.every((p) => p.status >= 400)).toBe(true);
+    expect(completes).toHaveLength(0);
+    expect(objectsUnder(s)).toBe(0);
+    expect(sessionRow(s.sessionId).split("|")[0]).toBe("PENDING");
+    record("phone-upload", "D-g5-declared-types [083]", "PASS", `[${MODES}] PUTs=${puts.map((p) => `${p.status} "${p.body.replace(/\s+/g, " ").slice(0, 60)}"`).join(", ")}; completes=0; objects=0; session PENDING`);
+  } finally {
+    await P.close();
+    await A.page.getByRole("button", { name: "Close", exact: true }).click().catch(() => undefined);
   }
 });
