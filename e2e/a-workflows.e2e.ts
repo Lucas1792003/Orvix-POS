@@ -5,7 +5,7 @@
 import { test, expect } from "@playwright/test";
 import { rmSync } from "node:fs";
 import path from "node:path";
-import { authSessions, count, inv, keyRows, row, rows, runSql, userClient, waitFor } from "./helpers/db";
+import { authSessions, closeOpenShifts, count, assertQaBarcode, ensureStockAtLeast, inv, keyRows, row, rows, runSql, setUserActive, userClient, waitFor } from "./helpers/db";
 import { RESULTS_DIR, qaPassword, qaState, qaTotpSecret } from "./helpers/env";
 import { record } from "./helpers/evidence";
 import { assertConsistency } from "./helpers/consistency";
@@ -28,8 +28,7 @@ let adminShiftId = "";
 async function ensureB(): Promise<Terminal> {
   if (B) return B;
   B = await Terminal.launchBrowser();
-  await B.login(emails.cashB, pw);
-  await B.waitForRoute("/app/pos");
+  await B.signIn(emails.cashB, pw, "/app/pos");
   await B.waitForApp();
   await B.gotoPos();
   await B.waitForRealtimeReady();
@@ -40,6 +39,12 @@ async function ensureB(): Promise<Terminal> {
 test.beforeAll(async () => {
   // A fresh till for this spec (B/C relaunch their own profiles deliberately).
   rmSync(path.join(RESULTS_DIR, "userdata-a"), { recursive: true, force: true });
+  // Own preconditions: no shift left open by an earlier spec (A3/A8 open
+  // their own and assert on them), cashier A active.
+  setUserActive(ids.cashA, true);
+  const closed = await closeOpenShifts([ids.cashA, ids.cashB, ids.admin], { email: emails.mgr, password: pw }, "spec A");
+  record("A", "precondition: no open shift for admin / cashiers A/B", "INFO", closed.length ? closed.join("; ") : "none open");
+  record("A", "precondition: QA Product One barcode", "INFO", await assertQaBarcode(st));
   A = await Terminal.launchElectron(path.join(RESULTS_DIR, "userdata-a"));
 });
 
@@ -98,8 +103,7 @@ test("A1 admin login: password + TOTP (wrong code refused), shop selection, logo
 
 test("A2 manager and cashier permissions: routes/nav gated, forbidden RPCs refused server-side", async () => {
   // Manager
-  await A.login(emails.mgr, pw);
-  await A.waitForRoute("/app");
+  await A.signIn(emails.mgr, pw, "/app");
   await A.waitForApp();
   const mgrNav = await A.navLabels();
   expect(mgrNav).toEqual(expect.arrayContaining(["Purchases", "Inventory", "Shifts"]));
@@ -119,8 +123,7 @@ test("A2 manager and cashier permissions: routes/nav gated, forbidden RPCs refus
   await A.logout();
 
   // Cashier
-  await A.login(emails.cashA, pw);
-  await A.waitForRoute("/app/pos");
+  await A.signIn(emails.cashA, pw, "/app/pos");
   await A.waitForApp();
   const cashNav = await A.navLabels();
   expect(cashNav).toEqual(expect.arrayContaining(["Point of Sale", "Shifts", "Inventory"]));
@@ -145,6 +148,20 @@ test("A2 manager and cashier permissions: routes/nav gated, forbidden RPCs refus
     `manager nav=[${mgrNav.join("|")}] (no Users); /app/admin/users -> ${"/app/pos"}; create_app_user as manager -> HTTP ${mgrCreate.status} "${mgrCreate.body?.message}", users row absent; cashier nav=[${cashNav.join("|")}] (no Purchases); /app/purchases -> /app/pos; Inventory page has 0 Adjust buttons; adjust_stock as cashier -> HTTP ${cashAdjust.status} "${cashAdjust.body?.message}", stock unchanged (${q0}), 0 movements`);
 });
 
+/** A receipt number is the next one of its shop/day bucket. Numbers restart
+ *  at 0001 each receipt day, so "all of the shop's sales + 1" is wrong when
+ *  the run crosses the day boundary with sales on both sides (seen
+ *  2026-10-15 in the reverse-order run: F/C/B sold before 00:00 UTC, A after).
+ *  With `prev` from the same bucket, it must also directly follow it. */
+async function expectNextInDayBucket(receiptNo: string, prev?: string): Promise<void> {
+  const m = receiptNo.match(new RegExp(`^${ids.shopCode}-(\\d{8})-(\\d{4})$`));
+  expect(m, `receipt ${receiptNo}`).toBeTruthy();
+  const bucket = `${ids.shopCode}-${m![1]}-`;
+  const inBucket = await rows("sales", { shop_id: ids.shop }, (q: any) => q.like("receipt_no", `${bucket}%`));
+  expect(Number(m![2]), `receipt ${receiptNo} is the newest of ${inBucket.length} in its day bucket`).toBe(inBucket.length);
+  if (prev?.startsWith(bucket)) expect(Number(m![2])).toBe(Number(prev.slice(-4)) + 1);
+}
+
 test("A3 cashier: open shift, barcode scan (F4), checkout (F2), receipt + print path (F3) with no printer", async () => {
   await A.openShift(0);
   const shift = await row("shifts", { cashier_id: ids.cashA, ended_at: null });
@@ -162,15 +179,15 @@ test("A3 cashier: open shift, barcode scan (F4), checkout (F2), receipt + print 
   await A.toast("Added QA Product One - pcs");
   await expect(A.page.locator("text=1 item")).toBeVisible();
 
-  const seqBefore = await count("sales", { shop_id: ids.shop });
+  const shiftSalesBefore = await count("sales", { shift_id: shift.id });
   const { receiptNo } = await A.posCheckout(1000);
-  expect(receiptNo).toMatch(new RegExp(`^${ids.shopCode}-\\d{8}-${String(seqBefore + 1).padStart(4, "0")}$`));
+  await expectNextInDayBucket(receiptNo);
   const sale = await row("sales", { receipt_no: receiptNo });
   expect(sale).toMatchObject({ shop_id: ids.shop, shift_id: shift.id, cashier_id: ids.cashA, total_mmk: 1000, paid_mmk: 1000, status: "NORMAL" });
   expect(await count("sale_items", { sale_id: sale.id })).toBe(1);
   expect(await count("inventory_movements", { reference_id: sale.id, type: "SALE_OUT" })).toBe(1);
   expect(await inv(ids.shop, ids.prod1)).toBe(q0 - 1);
-  expect(await count("sales", { shift_id: shift.id })).toBe(seqBefore + 1);
+  expect(await count("sales", { shift_id: shift.id })).toBe(shiftSalesBefore + 1);
 
   // F3: silent print path. No printer is connected to this Mac. The
   // documented behaviour (src/lib/print.ts) is: Electron silent print fails
@@ -191,7 +208,7 @@ test("A3 cashier: open shift, barcode scan (F4), checkout (F2), receipt + print 
   await expect(A.page.locator("text=1 item")).toBeVisible();
   const second = await A.posCheckout(2000, { print: true });
   expect(second.toast).toContain("printing");
-  expect(second.receiptNo).toMatch(new RegExp(`^${ids.shopCode}-\\d{8}-${String(seqBefore + 2).padStart(4, "0")}$`));
+  await expectNextInDayBucket(second.receiptNo, receiptNo);
   // The hidden 80 mm receipt is portaled into <body> for ~500 ms before printing.
   const receiptSeen = await waitFor(async () => {
     const txt = await A.page.locator("body > .print-only-host .receipt").first().textContent().catch(() => null);
@@ -214,10 +231,12 @@ test("A4 inventory adjust (manager) -> movement row; Realtime refresh on termina
   await ensureB();
   const qB0 = await inv(ids.shop, ids.prod2);
   await expect.poll(() => B.posStockText("QA Product Two")).toBe(`${qB0} in stock`);
+  // Relative: other specs (B) may already have made manager adjustments on prod2.
+  const auditMatch = { entity_id: ids.prod2, action_type: "STOCK_ADJUSTMENT", actor_id: ids.mgr };
+  const audit0 = await count("audit_logs", auditMatch);
 
   await A.logout();
-  await A.login(emails.mgr, pw);
-  await A.waitForRoute("/app");
+  await A.signIn(emails.mgr, pw, "/app");
   await A.waitForApp();
   await A.navigate("/app/inventory");
   await A.page.getByPlaceholder("Search product").fill("QA Product Two");
@@ -236,14 +255,14 @@ test("A4 inventory adjust (manager) -> movement row; Realtime refresh on termina
   expect(move).toBeTruthy();
   expect(move).toMatchObject({ type: "ADJUSTMENT", qty_change: 5, qty_before: qB0, qty_after: qB0 + 5, created_by: ids.mgr });
   expect(await inv(ids.shop, ids.prod2)).toBe(qB0 + 5);
-  expect(await count("audit_logs", { entity_id: ids.prod2, action_type: "STOCK_ADJUSTMENT", actor_id: ids.mgr })).toBe(1);
+  expect(await count("audit_logs", auditMatch)).toBe(audit0 + 1);
 
   await expect.poll(() => B.posStockText("QA Product Two"), { timeout: 20_000 }).toBe(`${qB0 + 5} in stock`);
   const latency = Date.now() - t0;
   const marker = await B.page.evaluate(() => (window as any).__e2eMarker);
   expect(marker).toBe("no-reload");
   record("A", "inventory adjust -> movement; Realtime refresh on other terminal", "PASS",
-    `manager adjusted prod2 +5 via UI: movement ${move.id} (${move.qty_before}->${move.qty_after}), audit STOCK_ADJUSTMENT=1, inventory ${qB0}->${qB0 + 5}; terminal B (cashier B, Chromium, no reload — marker kept) showed "${qB0 + 5} in stock" ${latency} ms after save`);
+    `manager adjusted prod2 +5 via UI: movement ${move.id} (${move.qty_before}->${move.qty_after}), audit STOCK_ADJUSTMENT +1 (${audit0}->${audit0 + 1}), inventory ${qB0}->${qB0 + 5}; terminal B (cashier B, Chromium, no reload — marker kept) showed "${qB0 + 5} in stock" ${latency} ms after save`);
 });
 
 test("A5 purchase order: create -> self-approval blocked -> approve -> receive -> supplier payment", async () => {
@@ -291,8 +310,7 @@ test("A5 purchase order: create -> self-approval blocked -> approve -> receive -
 
   // Manager receives
   await A.logout();
-  await A.login(emails.mgr, pw);
-  await A.waitForRoute("/app");
+  await A.signIn(emails.mgr, pw, "/app");
   await A.waitForApp();
   const qBefore = await inv(ids.shop, ids.prod2);
   await A.navigate("/app/purchases");
@@ -311,7 +329,21 @@ test("A5 purchase order: create -> self-approval blocked -> approve -> receive -
   await A.page.getByRole("button", { name: "Purchase Orders" }).click();
   await A.page.getByRole("button", { name: "Record payment" }).first().click();
   const payModal = A.page.locator(".fixed.inset-0.z-50");
-  await payModal.locator('input[inputmode="numeric"]').first().fill("20000");
+  // The modal seeds "Amount" with the outstanding balance in an effect that
+  // re-runs whenever the PO object in the store is replaced (the receive
+  // just above is still arriving through Realtime / delta sync), and a
+  // re-seed after our fill clobbers it (seen 2026-10-14: field held
+  // "4800020000", Record payment disabled). Wait for the seed, then fill
+  // until the field holds exactly our amount and keeps it.
+  const amountBox = payModal.locator('input[inputmode="numeric"]').first();
+  const amountNow = async () => (await amountBox.inputValue()).replace(/[^\d]/g, "");
+  await expect.poll(amountNow, { timeout: 10_000 }).toBe("48000");
+  for (let i = 0; i < 5; i++) {
+    await amountBox.fill("20000");
+    await A.page.waitForTimeout(750);
+    if ((await amountNow()) === "20000") break;
+  }
+  expect(await amountNow()).toBe("20000");
   await payModal.getByPlaceholder(/reference/i).fill("QA-UI-REF-1").catch(() => undefined);
   await A.toastsNow();
   await payModal.getByRole("button", { name: "Record payment" }).click();
@@ -334,19 +366,22 @@ test("A6 staff management: create a QA cashier via the Users page -> public.user
   const staffEmail = `qa-staff-ui-${st.ts}-${Date.now()}@qa.invalid`;
   await A.page.getByPlaceholder("Full name").fill("QA Staff UI");
   await A.page.getByPlaceholder("staff@yourcompany.com").fill(staffEmail);
-  await A.page.getByPlaceholder("Password (min 6 characters)").fill(pw);
+  await A.page.getByPlaceholder("Password (min 8 characters)").fill(pw);
   await A.page.locator("select").nth(1).selectOption("CASHIER");
   await A.page.locator("select").nth(2).selectOption(ids.shop);
   await A.page.getByRole("button", { name: "Create account" }).click();
   await expect(A.page.getByText("created. They can now log in with")).toBeVisible({ timeout: 30_000 });
-  const staffId = `user-${staffEmail.replace(/[^a-z0-9]/gi, "-").toLowerCase()}`;
-  const staff = await row("users", { id: staffId });
+  // Phase F: created server-side by the staff-admin function; the row id is
+  // derived from the request's idempotency key (user-<32 hex>).
+  const staff = await row("users", { email: staffEmail.toLowerCase() });
+  const staffId: string = staff.id;
+  expect(staffId).toMatch(/^user-[0-9a-f]{32}$/);
   expect(staff).toMatchObject({ org_id: ids.org, role: "CASHIER", shop_id: ids.shop, is_active: true, email: staffEmail });
   expect(staff.auth_id).toBeTruthy();
   const authRow = runSql(`SELECT count(*) FROM auth.users WHERE id = '${staff.auth_id}' AND email = '${staffEmail}';`).trim();
   expect(authRow).toBe("1");
   expect(await count("audit_logs", { entity_id: staffId, action_type: "USER_CREATED", actor_id: ids.admin })).toBe(1);
-  // the admin session survived the sign-up detour (still ADMIN in the shell)
+  // the admin session is untouched (no client-side sign-up any more; still ADMIN in the shell)
   await expect(A.page.locator("aside.sidebar .user-role")).toHaveText("ADMIN");
   // and the new cashier can really sign in
   const staffClient = await userClient(staffEmail, pw);
@@ -354,13 +389,12 @@ test("A6 staff management: create a QA cashier via the Users page -> public.user
   expect(me.data).toMatchObject({ id: staffId, org_id: ids.org });
   await staffClient.auth.signOut();
   record("A", "staff creation via Users page", "PASS",
-    `created ${staffId}: org_id=${staff.org_id} role=CASHIER shop=${staff.shop_id} auth_id linked (auth.users row=1); USER_CREATED audit=1; admin session intact after sign-up detour; new cashier signs in and resolves own row`);
+    `created ${staffId}: org_id=${staff.org_id} role=CASHIER shop=${staff.shop_id} auth_id linked (auth.users row=1); USER_CREATED audit=1; admin session intact (server-side creation); new cashier signs in and resolves own row`);
 });
 
 test("A7 Realtime across terminals: a sale on A changes the stock shown on B without reload", async () => {
   await A.logout();
-  await A.login(emails.cashA, pw);
-  await A.waitForRoute("/app/pos");
+  await A.signIn(emails.cashA, pw, "/app/pos");
   await A.waitForApp();
   await A.gotoPos();
   await ensureB();
@@ -382,6 +416,11 @@ test("A7 Realtime across terminals: a sale on A changes the stock shown on B wit
 });
 
 test("A8 sync badges + Sync Conflicts page: pending count, transient vs permanent, Retry, Dismiss", async () => {
+  // Own precondition: prod3 in stock for the two offline sales below (another
+  // spec — B8's last-unit race — may have run first and left fewer). Before
+  // the admin sign-in, so the till's full load already has the figure.
+  const topUp = await ensureStockAtLeast(ids.shop, ids.prod3, 10, { id: ids.mgr, email: emails.mgr, password: pw }, "QA: A8 precondition, prod3 in stock");
+  record("A", "precondition: prod3 >= 10 on hand", "INFO", topUp ? `topped up +${topUp}` : "already enough");
   await A.logout();
   lastTotp = await A.loginAdminWithTotp(emails.admin, pw, secret, lastTotp);
   await A.waitForApp();
@@ -483,8 +522,7 @@ test("A8 sync badges + Sync Conflicts page: pending count, transient vs permanen
 
 test("A9 close shift: variance reason gate, then close (cashier A)", async () => {
   await A.logout();
-  await A.login(emails.cashA, pw);
-  await A.waitForRoute("/app/pos");
+  await A.signIn(emails.cashA, pw, "/app/pos");
   await A.waitForApp();
   const shift = await row("shifts", { cashier_id: ids.cashA, ended_at: null });
   const cashSales = (await rows("sales", { shift_id: shift.id, payment_method: "CASH", status: "NORMAL" }))

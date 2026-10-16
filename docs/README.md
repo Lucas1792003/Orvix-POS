@@ -70,6 +70,11 @@ outside this public repository.
 | [phase-g/realtime-reconciliation.md](./selfhost-migration/phase-g/realtime-reconciliation.md) | Realtime gap reconciliation |
 | [phase-f/rate-limiting.md](./selfhost-migration/phase-f/rate-limiting.md) | Phone-upload rate limits (081, prepared) |
 | [phase-f/queue-export.md](./selfhost-migration/phase-f/queue-export.md) | Encrypted Export Pending Transactions and the queue recovery tool |
+| [phase-f/phone-qr-origin.md](./selfhost-migration/phase-f/phone-qr-origin.md) | Phone-upload QR for the packaged Electron app (`phone-upload-page` function) |
+| [phase-f/staff-creation.md](./selfhost-migration/phase-f/staff-creation.md) | Server-side staff creation (`staff-admin` function); public sign-up off |
+| [phase-f/migration-082.md](./selfhost-migration/phase-f/migration-082.md) | Close the "link any auth account" path (082, prepared) |
+| [phase-f/electron-compatibility.md](./selfhost-migration/phase-f/electron-compatibility.md) | Electron client × backend compatibility at schema 081 |
+| [phase-f/app-bugfixes.md](./selfhost-migration/phase-f/app-bugfixes.md) | Barcode-loss and QR status-polling fixes found by the e2e suite |
 
 ## Code Layout (one-screen orientation)
 
@@ -92,7 +97,8 @@ outside this public repository.
   `useTranslation`.
 - **`supabase/`** — `schema.sql`, ordered `migrations/`, and Edge
   Functions in `functions/` (`email-sales-report`, `admin-2fa`,
-  `phone-upload-token`, `platform-console`). `rotate-audit-log` and
+  `phone-upload-token`, `phone-upload-page`, `staff-admin`,
+  `platform-console`). `rotate-audit-log` and
   `weekly-sales-report` were removed on 2026-10-13.
 
 ## Where Did The Old Docs Go?

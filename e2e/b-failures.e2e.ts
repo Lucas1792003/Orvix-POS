@@ -7,7 +7,7 @@
 import { test, expect } from "@playwright/test";
 import { rmSync } from "node:fs";
 import path from "node:path";
-import { count, deleteAuthSessions, inv, keyRows, latestSale, row, rows, sleep, svc, userClient } from "./helpers/db";
+import { closeOpenShifts, count, assertQaBarcode, ensureStockAtLeast, deleteAuthSessions, inv, keyRows, latestSale, row, rows, setUserActive, sleep, svc, userClient } from "./helpers/db";
 import { RESULTS_DIR, liveCfg, qaPassword, qaState } from "./helpers/env";
 import { record } from "./helpers/evidence";
 import { assertConsistency } from "./helpers/consistency";
@@ -27,8 +27,7 @@ let B: Terminal | undefined;
 async function cashierAtPos(t: Terminal): Promise<void> {
   const session = await t.storedSession().catch(() => null);
   if (!session) {
-    await t.login(emails.cashA, pw);
-    await t.waitForRoute("/app/pos");
+    await t.signIn(emails.cashA, pw, "/app/pos");
   }
   await t.waitForApp();
   if (!(await row("shifts", { cashier_id: ids.cashA, ended_at: null }))) await t.openShift(0);
@@ -37,6 +36,11 @@ async function cashierAtPos(t: Terminal): Promise<void> {
 
 test.beforeAll(async () => {
   rmSync(USERDATA, { recursive: true, force: true });
+  // Own preconditions: both cashiers active, neither holding a shift opened by an earlier spec.
+  setUserActive(ids.cashA, true);
+  const closed = await closeOpenShifts([ids.cashA, ids.cashB], { email: emails.mgr, password: pw }, "spec B");
+  record("B", "precondition: no open shift for cashiers A/B", "INFO", closed.length ? closed.join("; ") : "none open");
+  record("B", "precondition: QA Product One barcode", "INFO", await assertQaBarcode(st));
   A = await Terminal.launchElectron(USERDATA);
   await cashierAtPos(A);
 });
@@ -354,8 +358,7 @@ test("B8 two terminals submit the last units simultaneously -> stock never negat
   expect(await inv(ids.shop, ids.prod3)).toBe(1);
   const Bt = await Terminal.launchBrowser();
   B = Bt;
-  await Bt.login(emails.cashB, pw);
-  await Bt.waitForRoute("/app/pos");
+  await Bt.signIn(emails.cashB, pw, "/app/pos");
   await Bt.waitForApp();
   if (!(await row("shifts", { cashier_id: ids.cashB, ended_at: null }))) await Bt.openShift(0);
   await Bt.gotoPos();
@@ -394,6 +397,10 @@ test("B8 two terminals submit the last units simultaneously -> stock never negat
   expect(await Bt.outbox()).toHaveLength(0);
   await A.posClearCart();
   await Bt.posClearCart();
+  // Leave the shop as found: give back the units this test took away (a
+  // real manager adjustment), so no later spec inherits an empty prod3.
+  const restored = await ensureStockAtLeast(ids.shop, ids.prod3, current, { id: ids.mgr, email: emails.mgr, password: pw }, "QA: restore prod3 after the last-unit race");
+  record("B", "last-unit race: stock restored", "INFO", `prod3 0 -> ${current} (+${restored}, manager adjustment)`);
   record("B", "two terminals race for the last unit", "PASS",
     `prod3 set to 1 (manager adjustment); A (Electron) and B (Chromium) confirmed 3000 MMK simultaneously: 1 "Sale recorded", 1 "${losers[0]}"; DB stock 0 (never negative), sales ${salesBefore}->${salesBefore + 1}; both terminals converged on 0 via Realtime; no queued entries`);
 });
@@ -462,8 +469,7 @@ test("B11 Realtime disconnected and reconnected -> channel resubscribes and late
   await A.gotoPos();
   if (!B) {
     B = await Terminal.launchBrowser();
-    await B.login(emails.cashB, pw);
-    await B.waitForRoute("/app/pos");
+    await B.signIn(emails.cashB, pw, "/app/pos");
     await B.waitForApp();
   }
   const Bt = B;
@@ -520,8 +526,7 @@ test("B11b Realtime gap reconciled on rejoin: stock changed while the socket was
   await A.gotoPos();
   if (!B) {
     B = await Terminal.launchBrowser();
-    await B.login(emails.cashB, pw);
-    await B.waitForRoute("/app/pos");
+    await B.signIn(emails.cashB, pw, "/app/pos");
     await B.waitForApp();
   }
   const Bt = B;
@@ -589,8 +594,7 @@ test("B13 server outage for minutes while TWO tills keep selling (online, API re
   await A.page.keyboard.press("Escape").catch(() => undefined);
   if (!B) {
     B = await Terminal.launchBrowser();
-    await B.login(emails.cashB, pw);
-    await B.waitForRoute("/app/pos");
+    await B.signIn(emails.cashB, pw, "/app/pos");
     await B.waitForApp();
   }
   const Bt = B;

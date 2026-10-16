@@ -27,7 +27,7 @@ import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
-import { count, inv, keyRows, row, rows } from "./helpers/db";
+import { closeOpenShifts, count, assertQaBarcode, inv, keyRows, rows } from "./helpers/db";
 import { PROJECT_ROOT, RESULTS_DIR, liveCfg, qaPassword, qaState } from "./helpers/env";
 import { record } from "./helpers/evidence";
 import { assertConsistency } from "./helpers/consistency";
@@ -99,15 +99,14 @@ test.beforeAll(async () => {
   rmSync(USERDATA, { recursive: true, force: true });
   rmSync(EXPORT_DIR, { recursive: true, force: true });
   mkdirSync(EXPORT_DIR, { recursive: true });
+  // F needs the shift to be opened OFFLINE by this spec: cashier A must hold
+  // no open shift (an earlier spec may have left one) before the till loads.
+  const closed = await closeOpenShifts([ids.cashA], { email: emails.mgr, password: pw }, "spec F");
+  record("F", "precondition: no open shift for cashier A", "INFO", closed.length ? closed.join("; ") : "none open");
+  record("F", "precondition: QA Product One barcode", "INFO", await assertQaBarcode(st));
   A = await Terminal.launchElectron(USERDATA);
-  await A.login(emails.cashA, pw);
-  await A.waitForRoute("/app/pos");
+  await A.signIn(emails.cashA, pw, "/app/pos");
   await A.waitForApp();
-  // F needs the shift to be opened OFFLINE: close a leftover open shift first.
-  if (await row("shifts", { cashier_id: ids.cashA, ended_at: null })) {
-    const expected = await A.expectedCashShown();
-    expect(await A.closeShift(expected, "e2e F: close leftover shift")).toBeNull();
-  }
 });
 
 test.afterAll(async () => {
