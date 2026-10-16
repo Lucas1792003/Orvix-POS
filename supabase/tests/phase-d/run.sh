@@ -289,6 +289,29 @@ if [ "$((10#$MAX_MIG))" -ge 81 ]; then
 else
   log "skipping t17_rate_limits (migrations capped at $MAX_MIG < 081)"
 fi
+# 082: who may link a login account (users.auth_id). Part A, then 082 is
+# re-applied to the populated database (its DO block asserts no users row
+# changes), then part B compares every row with the part-A digest.
+if [ "$((10#$MAX_MIG))" -ge 82 ]; then
+  run_sql_test "$SQL/t18_auth_link.sql"
+  log "re-applying 082 to the populated database (must not modify any existing users row)"
+  if pg_psql -f "$REPO/supabase/migrations/082_close_auth_id_linking.sql" > "$WORK/mig3_082.log" 2>&1; then
+    grep -h -E '082: public.users unchanged' "$WORK/mig3_082.log" | sed 's/^.*NOTICE: */INFO /'
+  else
+    tail -20 "$WORK/mig3_082.log"; fail "re-apply of 082 on populated data"
+  fi
+  run_sql_test "$SQL/t18_auth_link_b.sql"
+else
+  log "skipping t18_auth_link (migrations capped at $MAX_MIG < 082)"
+fi
+# Old client (v1.0.15) payloads against 081: keyed RPCs without a key,
+# direct table writes without org_id, the pre-079 phone-upload flow.
+# docs/selfhost-migration/phase-f/electron-compatibility.md
+if [ "$((10#$MAX_MIG))" -ge 81 ]; then
+  run_sql_test "$SQL/t19_old_client_compat.sql"
+else
+  log "skipping t19_old_client_compat (migrations capped at $MAX_MIG < 081)"
+fi
 # Concurrent first-time setup (076). MUST RUN LAST: t12_bootstrap_prep
 # empties public.users (TRUNCATE ... CASCADE) to recreate a fresh install in
 # this throwaway database. Two sessions call bootstrap_first_admin(); A holds
@@ -311,6 +334,10 @@ if [ "$((10#$MAX_MIG))" -ge 76 ]; then
     grep -E '^(PASS|FAIL)' "$WORK/t12c.log"
   else
     cat "$WORK/t12c.log"; fail "t12 bootstrap check"
+  fi
+  # 082: bootstrap still links the operator's own account; no direct re-link.
+  if [ "$((10#$MAX_MIG))" -ge 82 ]; then
+    run_sql_test "$SQL/t18_bootstrap.sql"
   fi
 else
   log "skipping t12 bootstrap concurrency (migrations capped at $MAX_MIG < 076)"

@@ -45,6 +45,28 @@ BEGIN
   ELSE
     RAISE NOTICE 'storage.objects already present';
   END IF;
+  -- 082: create_app_user reads auth.mfa_factors (verified TOTP -> aal2) and
+  -- auth.jwt() (aal / amr claims). GoTrue creates both on a real stack; the
+  -- bare image has neither. Same shapes as the live stack (status/factor_type
+  -- are enums there - 082 compares them as text). auth.jwt() is the live body.
+  IF to_regclass('auth.mfa_factors') IS NULL THEN
+    CREATE TABLE auth.mfa_factors (
+      id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id     uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+      factor_type text NOT NULL,
+      status      text NOT NULL,
+      created_at  timestamptz NOT NULL DEFAULT now(),
+      updated_at  timestamptz NOT NULL DEFAULT now());
+    GRANT SELECT ON auth.mfa_factors TO postgres;
+    RAISE NOTICE 'created auth.mfa_factors shim';
+  END IF;
+  IF to_regprocedure('auth.jwt()') IS NULL THEN
+    CREATE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS $f$
+      SELECT coalesce(nullif(current_setting('request.jwt.claim', true), ''),
+                      nullif(current_setting('request.jwt.claims', true), ''))::jsonb $f$;
+    GRANT EXECUTE ON FUNCTION auth.jwt() TO postgres, anon, authenticated, service_role;
+    RAISE NOTICE 'created auth.jwt() shim';
+  END IF;
 END $$;
 
 -- Sanity: the platform roles the dump grants to must exist.

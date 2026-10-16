@@ -85,6 +85,8 @@ describe("validateSetupForm()", () => {
   it("requires email, password and a minimum password length", () => {
     expect(validateSetupForm({ ...ok, email: "" })).toMatch(/required/);
     expect(validateSetupForm({ ...ok, password: "" })).toMatch(/required/);
-    expect(validateSetupForm({ ...ok, password: "abc" })).toMatch(/at least 6/);
+    // 8 = the staff-admin function's PASSWORD_MIN (above GoTrue's default 6)
+    expect(validateSetupForm({ ...ok, password: "abc1234" })).toMatch(/at least 8/);
+    expect(validateSetupForm({ ...ok, password: "x".repeat(73) })).toMatch(/at most 72/);
   });
 });

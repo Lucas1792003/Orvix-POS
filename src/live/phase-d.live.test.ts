@@ -17,7 +17,7 @@ import "fake-indexeddb/auto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
-  Evidence, liveConfig, makeClient, randomPassword, rawRpc, runSql, runSqlFile, signUpUser, signedInClient,
+  Evidence, liveConfig, makeClient, randomPassword, rawRpc, runSql, runSqlFile, createAuthUser, signedInClient,
   sleep, uuid, waitFor, type LiveConfig,
 } from "./liveHelpers";
 
@@ -105,11 +105,11 @@ describe.skipIf(!LIVE)("Phase D live integration (self-hosted stack)", () => {
     anon = makeClient(cfg, cfg.anonKey);
 
     if (!process.env.LIVE_QA_TS) {
-      // Auth side first (GoTrue signup, autoconfirm on), then the SQL seed.
-      authIds.admin = await signUpUser(cfg, emails.admin, password);
-      authIds.mgr = await signUpUser(cfg, emails.mgr, password);
-      authIds.cashA = await signUpUser(cfg, emails.cashA, password);
-      authIds.cashB = await signUpUser(cfg, emails.cashB, password);
+      // Auth side first (GoTrue admin API, email confirmed), then the SQL seed.
+      authIds.admin = await createAuthUser(cfg, emails.admin, password);
+      authIds.mgr = await createAuthUser(cfg, emails.mgr, password);
+      authIds.cashA = await createAuthUser(cfg, emails.cashA, password);
+      authIds.cashB = await createAuthUser(cfg, emails.cashB, password);
       const out = runSqlFile(cfg, SEED_SQL, {
         ts, auth_admin: authIds.admin, auth_mgr: authIds.mgr, auth_casha: authIds.cashA, auth_cashb: authIds.cashB,
       });
@@ -620,7 +620,11 @@ describe.skipIf(!LIVE)("Phase D live integration (self-hosted stack)", () => {
 
   it("11. staff-user creation: admin create_app_user (+replay), cashier denied, p_org_id rejected", async () => {
     const staffEmail = `qa-staff-${ts}@qa.invalid`;
-    const staffAuth = await signUpUser(cfg, staffEmail, password);
+    // 082: link only a staff-admin-marked account of the caller's org, and only
+    // from an ADMIN session that entered an emailed code after signing in
+    // (the QA admin has no TOTP) - the same state staff-admin leaves.
+    const staffAuth = await createAuthUser(cfg, staffEmail, password, { created_via: "staff-admin", org_id: ids.org });
+    runSql(cfg, `INSERT INTO admin_login_codes (auth_id, code_hash, expires_at, consumed_at) VALUES ('${authIds.admin}', repeat('0', 64), now() + interval '10 minutes', now());`);
     const staffId = `qa-user-staff-${ts}`;
     const ku = uuid();
     const args = { p_id: staffId, p_name: "QA Staff", p_email: staffEmail, p_role: "CASHIER", p_shop_id: ids.shop, p_auth_id: staffAuth, p_granted_permissions: null, p_revoked_permissions: null, p_idempotency_key: ku };

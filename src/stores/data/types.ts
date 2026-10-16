@@ -6,7 +6,6 @@ import type {
   Category,
   Inventory,
   InventoryMovement,
-  Permission,
   Product,
   ProductBarcode,
   ProductUnit,
@@ -14,7 +13,6 @@ import type {
   PurchaseOrder,
   PurchaseOrderItem,
   Refund,
-  Role,
   Sale,
   SaleItem,
   Shift,
@@ -31,6 +29,7 @@ import type {
   UnitType,
   User,
 } from "../../types";
+import type { BarcodeSavePlan } from "../../features/catalog/productBarcodeForm";
 
 // ============================================
 // Input Types for Actions
@@ -107,16 +106,10 @@ export interface AdjustStockInput {
 // State Slices
 // ============================================
 
-export interface CreateUserInput {
-  id: string;
-  name: string;
-  email?: string;
-  role: Role;
-  shopId?: string;
-  authId?: string;
-  grantedPermissions?: Permission[];
-  revokedPermissions?: Permission[];
-}
+// Staff creation goes through the staff-admin Edge Function (auth account +
+// users row server-side); see src/lib/staffAdmin.ts.
+import type { CreateStaffInput } from "../../lib/staffAdmin";
+export type { CreateStaffInput };
 
 export interface ShopState {
   shops: Shop[];
@@ -127,7 +120,7 @@ export interface ShopState {
   addShop: (shop: Shop) => Promise<void>;
   updateShop: (shop: Shop) => Promise<void>;
   deleteShop: (shopId: string) => Promise<void>;
-  addUser: (input: CreateUserInput) => Promise<User>;
+  createStaffUser: (input: CreateStaffInput) => Promise<User>;
   updateUser: (user: User) => Promise<void>;
   deactivateUser: (userId: string, isActive: boolean) => Promise<void>;
   replaceManager: (shopId: string, newManagerId: string) => Promise<void>;
@@ -181,7 +174,9 @@ export interface ProductState {
   /** Many-to-many supplier⇄product links (which products each supplier sells). */
   supplierProducts: SupplierProduct[];
   addProduct: (product: Product, barcodes: ProductBarcode[]) => Promise<void>;
-  updateProduct: (product: Product, barcodes: ProductBarcode[]) => Promise<void>;
+  /** Omit `barcodes` to leave the product's barcodes untouched (product
+   *  form); pass the full list to replace them (CSV import). */
+  updateProduct: (product: Product, barcodes?: ProductBarcode[]) => Promise<void>;
   /**
    * Hard delete a product. Removes the row from `products` and any
    * inventory rows for it (the `inventory.product_id` FK has no CASCADE).
@@ -190,12 +185,13 @@ export interface ProductState {
    */
   deleteProduct: (productId: string) => Promise<void>;
   /**
-   * Async barcode reconcile that throws on DB failure (incl. the unique
-   * `product_barcodes_unique_normalized_value` index). Used by the
-   * product form to surface duplicate-barcode errors inline instead of
-   * the fire-and-forget toast `addProduct`/`updateProduct` emit.
+   * Apply the product form's barcode diff (planProductBarcodeSave): delete
+   * only the named rows of this product, then insert the new ones. Throws
+   * on DB failure (incl. the unique `product_barcodes_unique_normalized_value`
+   * index) so the form can surface duplicate-barcode errors inline. Never
+   * touches rows the plan does not name.
    */
-  replaceProductBarcodes: (productId: string, barcodes: ProductBarcode[]) => Promise<void>;
+  applyProductBarcodeChanges: (productId: string, plan: BarcodeSavePlan) => Promise<void>;
   replaceProductUnits: (productId: string, units: ProductUnit[]) => Promise<void>;
   /**
    * Reconcile the supplier links for a product (delete-then-insert). Throws on

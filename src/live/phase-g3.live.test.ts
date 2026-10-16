@@ -29,7 +29,7 @@ import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
-  Evidence, liveConfig, makeClient, randomPassword, runSql, signUpUser, signedInClient,
+  Evidence, liveConfig, makeClient, randomPassword, runSql, createAuthUser, signedInClient,
   sleep, uuid, type LiveConfig,
   requiredEnv,
 } from "./liveHelpers";
@@ -127,7 +127,7 @@ ROLLBACK;`);
     o.name = `QA G3 Org ${o.key.toUpperCase()} ${ts}`;
     o.adminId = `qa-g3${o.key}-admin-${ts}`;
     o.email = `qa-g3${o.key}-admin-${ts}@qa.invalid`;
-    o.adminAuth = await signUpUser(cfg, o.email, password);
+    o.adminAuth = await createAuthUser(cfg, o.email, password);
     const oi = await svc.from("organizations").insert({ id: o.orgId, name: o.name }).select("id");
     if (oi.error) throw new Error(`service-role org insert ${o.orgId}: ${oi.error.message}`);
     const ui = await svc.from("users").insert({ id: o.adminId, name: `QA G3 ${o.key.toUpperCase()} Admin`, email: o.email, role: "ADMIN", org_id: o.orgId, auth_id: o.adminAuth, is_active: true, created_at: new Date().toISOString() });
