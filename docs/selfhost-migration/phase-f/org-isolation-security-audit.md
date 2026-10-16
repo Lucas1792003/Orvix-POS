@@ -195,6 +195,16 @@ DEFINER RPCs stay trusted. Deploy 082 together with the staff-admin function
 version that writes the marker (see
 [`migration-082.md`](migration-082.md)). No other fix is required by this audit.
 
+### G5 (coordinator finding, 2026-10-16) — public image bucket accepts any file type and size
+
+| # | Object | Gap | Severity | Status |
+|---|---|---|---|---|
+| G5 | `storage.buckets` `product-images` (production) | Bucket is **public** with `allowed_mime_types = NULL` and `file_size_limit = NULL` (read-only check on production). A fresh install from migration 016 sets an image MIME allow-list, so production drifted (the parity check reports it as a non-schema note). Anyone who can write to an allowed path — org staff via the storage policies, or a phone holding a 60-second signed upload URL for its exact session path — can store **HTML/SVG/any type of any size**, which is then served publicly from the **same HTTPS origin** that now also serves the phone-upload page. | **medium** | open at 081 and 082 |
+
+Evidence: production objects today are only images (561 `image/webp`, 13 `image/jpeg`); no abuse observed. Org isolation is not broken by this (paths stay org-scoped); the risk is same-origin hosting of attacker-chosen content (phishing / script on the backend origin; the phone page's only credential is the public anon key) and disk filling.
+
+**Proposed fix (not implemented; needs approval):** a small migration (083 or folded into the next storage migration) setting `allowed_mime_types = '{image/jpeg,image/png,image/webp}'` and `file_size_limit` (e.g. 5 MB, above the client's resized uploads) on `product-images`, plus an audit assertion that an `text/html` / `image/svg+xml` / oversize upload is refused; optionally a gateway response header `Content-Security-Policy: sandbox` and `X-Content-Type-Options: nosniff` on `/storage/v1/object/public/`. Verify the 574 existing objects are all within the new rules before applying (they are: webp/jpeg, ~5.3 MB total).
+
 ## 7. Evidence
 
 Per-run artifacts under `tools/security-audit/results/<timestamp>/` (git-ignored
