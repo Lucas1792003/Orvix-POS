@@ -1,6 +1,7 @@
 // Area "phone": QR phone-upload isolation (migrations 079/080/081).
 import type { World } from "./seed";
 import { capture, check, fn, gap, http, record, rpc, sql, q, uuid, ANON, MAX_MIG } from "./lib";
+import { fixtures, removeObject } from "./storage";
 
 const ALLOWED_FIELDS = ["sessionId", "storagePath", "publicUrl", "bytes", "mimeType", "uploadToken", "expiresAt", "status"].sort();
 
@@ -64,4 +65,108 @@ export async function phoneSuite(w: World) {
   } else {
     record("phone", "081 rate-limit checks skipped (migration < 081)", "SKIP", ["table:public.phone_upload_org_rate"]);
   }
+
+  await phoneUploadContent(w);
+}
+
+// ---------------------------------------------------------------- G5 / 083
+// The phone's real flow on the real storage-api: token just in time ->
+// multipart PUT to the signed upload URL (x-upsert false) -> completion via
+// phone-upload-token {action:"complete"}, which reads the object back, checks
+// the bytes and deletes a refused object. 083 also takes EXECUTE on the
+// completion RPC away from anon / authenticated.
+const enc = (p: string) => p.split("/").map(encodeURIComponent).join("/");
+
+async function phoneUploadContent(w: World) {
+  const admin = w.adminA2, A = w.A;
+  const G5 = MAX_MIG >= 83;
+  const newSession = async () => {
+    const r = await rpc(admin, "create_product_image_upload_session", { p_shop_id: A.shops[0], p_product_id: A.products[0] });
+    if (r.status >= 300) throw new Error(`create session: ${r.status}`);
+    return { id: String(r.json.sessionId ?? r.json.id), token: String(r.json.token), path: String(r.json.storagePath) };
+  };
+  const signedPut = async (s: { token: string }, body: Buffer, type: string) => {
+    const t = await fn(ANON, "phone-upload-token", { token: s.token });
+    if (t.status !== 200 || !t.json?.token) return { status: -t.status, text: t.text, path: "" };
+    const form = new FormData();
+    form.append("cacheControl", "31536000");
+    form.append("", new Blob([body], { type }));
+    const r = await http("PUT", `/storage/v1/object/upload/sign/product-images/${enc(t.json.path)}?token=${encodeURIComponent(t.json.token)}`,
+      { token: ANON, raw: form, headers: { "x-upsert": "false" } });
+    return { status: r.status, text: r.text, path: t.json.path as string, uploadToken: t.json.token as string };
+  };
+  const complete = (s: { token: string }) => fn(ANON, "phone-upload-token", { token: s.token, action: "complete" });
+  const objectRows = (path: string) => sql(`SELECT count(*) FROM storage.objects WHERE bucket_id='product-images' AND name=${q(path)}`);
+  const statusOf = (id: string) => sql(`SELECT status FROM product_image_upload_sessions WHERE id=${q(id)}`);
+  const covers = ["edge-fn:phone-upload-token", "rpc:public.complete_product_image_upload_session", "storage-policy:product_images_insert"];
+
+  // valid JPEG / WebP: signed upload accepted, completion validates and completes
+  for (const [label, body, type] of [["JPEG", fixtures.jpeg(), "image/jpeg"], ["WebP", fixtures.webp(), "image/webp"]] as const) {
+    const s = await newSession();
+    const up = await signedPut(s, body, type);
+    const c = await complete(s);
+    capture(`phone g5 complete ${label}`, c.text, [A.id, s.id, s.path]);
+    check("phone", `G5 phone: a ${label} via the signed URL completes through the function (200 COMPLETED, object kept)`,
+      up.status < 300 && c.status === 200 && c.json?.status === "COMPLETED" && statusOf(s.id) === "COMPLETED" && objectRows(s.path) === "1",
+      covers, `put ${up.status}, complete ${c.status} ${c.text.slice(0, 120)}`);
+    // signed URL limits: the same token cannot write the path again (upsert false)
+    if (up.uploadToken) {
+      const form = new FormData();
+      form.append("", new Blob([fixtures.html()], { type: "image/jpeg" }));
+      const again = await http("PUT", `/storage/v1/object/upload/sign/product-images/${enc(up.path)}?token=${encodeURIComponent(up.uploadToken)}`,
+        { token: ANON, raw: form, headers: { "x-upsert": "true" } });
+      check("phone", `G5 phone: the ${label}'s signed URL cannot overwrite the completed object (upsert false is in the token)`,
+        again.status >= 400 && objectRows(up.path) === "1", covers, `status ${again.status}`);
+    }
+  }
+
+  // types the bucket refuses at upload (signed URL): nothing stored, session not completed
+  const big = Buffer.concat([fixtures.jpeg(0), Buffer.alloc(5242881, 0x44)]);
+  for (const [label, body, type] of [
+    ["text/html", fixtures.html(), "text/html"],
+    ["image/svg+xml", fixtures.svg(), "image/svg+xml"],
+    ["application/octet-stream", fixtures.jpeg(), "application/octet-stream"],
+    ["over 5 MiB (declared image/jpeg)", big, "image/jpeg"],
+  ] as const) {
+    const s = await newSession();
+    const up = await signedPut(s, body, type);
+    const stored = up.path ? objectRows(up.path) !== "0" : false;
+    gap("phone", `G5 phone: signed upload declared ${label} is refused by storage-api, nothing stored`, up.status >= 400 && !stored,
+      covers, "medium", `status ${up.status}, stored ${stored}`);
+    const c = await complete(s);
+    check("phone", `G5 phone: ${label} - completion refused, object gone, session still PENDING`,
+      c.status >= 400 && statusOf(s.id) === "PENDING" && (!up.path || objectRows(up.path) === "0"), covers,
+      `complete ${c.status} ${c.json?.code ?? ""}`);
+  }
+
+  // stored by the bucket (declared image/jpeg) but refused by the function's byte check
+  for (const [label, body] of [[".jpg with HTML content", fixtures.html()], ["JPEG-header + HTML polyglot", fixtures.polyglot()], ["WebP bytes declared image/jpeg", fixtures.webp()]] as const) {
+    const s = await newSession();
+    const up = await signedPut(s, body, "image/jpeg");
+    const storedBefore = up.path ? objectRows(up.path) : "?";
+    const c = await complete(s);
+    capture(`phone g5 complete ${label}`, c.text, [A.id, s.id, s.path]);
+    check("phone", `G5 phone: ${label} (declared image/jpeg) -> 422 invalid_image, the object is DELETED, the session is not completed`,
+      up.status < 300 && storedBefore === "1" && c.status === 422 && c.json?.code === "invalid_image"
+        && objectRows(up.path) === "0" && statusOf(s.id) === "PENDING",
+      covers, `put ${up.status} stored ${storedBefore}, complete ${c.status} ${c.json?.code ?? ""}, after ${up.path ? objectRows(up.path) : "?"} ${statusOf(s.id)}`);
+  }
+
+  // the old direct path: anon (and an org admin) calling the completion RPC
+  {
+    const s = await newSession();
+    const up = await signedPut(s, fixtures.polyglot(), "image/jpeg");
+    for (const [who, token] of [["anon", null], ["org ADMIN (authenticated)", admin]] as const) {
+      const r = await rpc(token, "complete_product_image_upload_session", {
+        p_token: s.token, p_storage_path: up.path, p_public_url: `http://127.0.0.1/storage/v1/object/public/product-images/${up.path}`,
+        p_bytes: 100, p_mime_type: "image/jpeg" });
+      capture(`phone g5 direct rpc ${who}`, r.text, [A.id, s.id, s.path]);
+      gap("phone", `G5 phone: ${who} cannot call complete_product_image_upload_session directly (bypassing the byte check)`,
+        r.status >= 400 && statusOf(s.id) === "PENDING", ["rpc:public.complete_product_image_upload_session"], "medium",
+        `status ${r.status}, session ${statusOf(s.id)}`);
+      if (statusOf(s.id) !== "PENDING") break;
+    }
+    if (up.path) await removeObject(up.path);
+  }
+  if (!G5) record("phone", "G5 bucket / grant assertions above are GAPs below migration 083 (production 081/082)", "INFO", []);
 }

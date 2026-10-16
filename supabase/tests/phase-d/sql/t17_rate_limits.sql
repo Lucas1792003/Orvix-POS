@@ -55,7 +55,7 @@ SELECT test.check('t17/081: claim_ is executable by service_role ONLY (not PUBLI
 SELECT test.check('t17/081: anon still executes exactly 3 public functions (app_setup_needed + the two token-scoped phone RPCs)',
   (SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public' AND has_function_privilege('anon', p.oid, 'EXECUTE'))
-  = ARRAY['app_setup_needed', 'complete_product_image_upload_session', 'get_product_image_upload_session_by_token']);
+  = (CASE WHEN test.m083() THEN ARRAY['app_setup_needed', 'get_product_image_upload_session_by_token'] ELSE ARRAY['app_setup_needed', 'complete_product_image_upload_session', 'get_product_image_upload_session_by_token'] END));
 SELECT test.check('t17/081: phone_upload_org_rate has NO table privileges for anon / authenticated / service_role / PUBLIC, RLS on, owner postgres',
   NOT EXISTS (SELECT 1 FROM information_schema.role_table_grants
                WHERE table_schema = 'public' AND table_name = 'phone_upload_org_rate'

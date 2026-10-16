@@ -15,6 +15,9 @@
 \set PUBPATH '/storage/v1/object/public/product-images/'
 \set TRUSTED 'https://pos.test/storage/v1/object/public/product-images/'
 SELECT test.logout() AS zz \gset
+-- 083 (G5): the RPC is service_role-only; the phone completes through the
+-- phone-upload-token Edge Function, simulated here by calling as service_role
+SELECT test.completer() AS completer, test.m083() AS m083 \gset
 
 -- the phone's upload (storage superuser), with storage-api metadata
 CREATE OR REPLACE FUNCTION test.t16_put(p_bucket text, p_name text, p_size bigint, p_mime text) RETURNS void
@@ -37,7 +40,7 @@ BEGIN
   EXCEPTION WHEN OTHERS THEN RETURN SQLERRM;
   END;
 END $$;
-GRANT EXECUTE ON FUNCTION test.t16_err(text, text, text) TO anon;
+GRANT EXECUTE ON FUNCTION test.t16_err(text, text, text) TO anon, service_role;
 
 -- ============================================================
 -- 0. Static: grants, config table, helper
@@ -49,8 +52,9 @@ SELECT test.check('t16/080: complete_/status/_by_token bodies carry 080; signatu
      'public.get_product_image_upload_session_by_token(text)'::regprocedure)) = 3
   AND (SELECT bool_and(prosecdef) FROM pg_proc WHERE proname IN
        ('complete_product_image_upload_session','get_product_image_upload_session_status','get_product_image_upload_session_by_token')));
-SELECT test.check('t16/080: grants unchanged - anon executes complete_ and _by_token, not status',
-  has_function_privilege('anon', 'public.complete_product_image_upload_session(text,text,text,integer,text)', 'EXECUTE')
+SELECT test.check('t16/080: grants - anon executes complete_ (until 083; service_role only from 083) and _by_token, not status',
+  has_function_privilege('anon', 'public.complete_product_image_upload_session(text,text,text,integer,text)', 'EXECUTE') = NOT :'m083'::boolean
+  AND has_function_privilege('service_role', 'public.complete_product_image_upload_session(text,text,text,integer,text)', 'EXECUTE')
   AND has_function_privilege('anon', 'public.get_product_image_upload_session_by_token(text)', 'EXECUTE')
   AND NOT has_function_privilege('anon', 'public.get_product_image_upload_session_status(text)', 'EXECUTE')
   AND has_function_privilege('authenticated', 'public.get_product_image_upload_session_status(text)', 'EXECUTE'));
@@ -144,7 +148,7 @@ SELECT test.t16_put('product-images', :'p_v1', 3210, 'image/webp'),
 -- ============================================================
 -- 2. Valid upload -> COMPLETED with the derived URL; values from storage
 -- ============================================================
-SET ROLE anon;
+SET ROLE :completer;
 -- client claims 4000 bytes / image/jpeg; storage-api metadata says 3210 / image/webp
 SELECT public.complete_product_image_upload_session(:'t_v1', :'p_v1', 'https://pos.test' || :'PUBPATH' || :'p_v1', 4000, 'image/jpeg') AS done_v1 \gset
 SELECT public.get_product_image_upload_session_by_token(:'t_v1') AS bt_v1 \gset
@@ -176,7 +180,7 @@ SELECT test.check('t16/080: products.image_url written from the poll is the trus
 -- 3. Repeated completion -> rejected; nothing duplicated or changed
 -- ============================================================
 SELECT (SELECT row_to_json(s)::text FROM product_image_upload_sessions s WHERE id = :'v1'::jsonb->>'sessionId') AS v1_row \gset
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.expect_error('t16/080: repeated completion (same token, same values) is rejected',
   format($q$SELECT public.complete_product_image_upload_session(%L, %L, %L, 4000, 'image/webp')$q$,
          :'t_v1', :'p_v1', 'https://pos.test' || :'PUBPATH' || :'p_v1'),
@@ -194,7 +198,7 @@ SELECT test.check('t16/080: after repeated completions the session row is byte-i
 -- ============================================================
 -- 4. External host with the matching path -> host IGNORED, trusted URL stored
 -- ============================================================
-SET ROLE anon;
+SET ROLE :completer;
 SELECT public.complete_product_image_upload_session(:'t_ext', :'p_ext',
   'https://evil.example' || :'PUBPATH' || :'p_ext', 2500, 'image/jpeg') AS done_ext \gset
 RESET ROLE;
@@ -211,7 +215,7 @@ SELECT test.check('t16/080: external hostname + matching path -> host ignored: C
   'stored=' || (SELECT public_url FROM product_image_upload_sessions WHERE id = :'ext'::jsonb->>'sessionId'));
 -- more host tricks, each on v2 (object present): all ignored, so v2 would
 -- complete - run them inside a rolled-back probe and look at what is stored
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.check('t16/080: host variants (userinfo, port, http, IP, other bucket-looking host) are all ignored - stored URL is always the trusted one',
   (SELECT bool_and(test.t16_err(:'t_v2', :'p_v2', u || :'PUBPATH' || :'p_v2') = 'OK:' || :'TRUSTED' || :'p_v2')
      FROM unnest(ARRAY['https://pos.test@evil.example', 'https://evil.example:443', 'http://evil.example',
@@ -223,7 +227,7 @@ SELECT test.check('t16/080: the rolled-back host probes left v2 PENDING with no 
 -- ============================================================
 -- 5. Wrong bucket / wrong product / wrong session
 -- ============================================================
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.expect_error('t16/080: object only in ANOTHER bucket (same name) -> rejected, not found',
   format($q$SELECT public.complete_product_image_upload_session(%L, %L, %L, 2000, 'image/webp')$q$,
          :'t_wb', :'p_wb', 'https://pos.test' || :'PUBPATH' || :'p_wb'),
@@ -298,8 +302,8 @@ INSERT INTO t16_variants VALUES
   ('fragment',             :'p_enc' || '#x'),
   ('empty',                ''),
   ('NULL',                 NULL);
-GRANT SELECT ON t16_variants TO anon;
-SET ROLE anon;
+GRANT SELECT ON t16_variants TO anon, service_role;
+SET ROLE :completer;
 SELECT test.check('t16/080: every encoded / normalised / lookalike PATH variant is rejected with the path message',
   bool_and(m LIKE '%Upload path does not match this session%'),
   string_agg(label || '=' || left(m, 50), '; ') FILTER (WHERE m NOT LIKE '%Upload path does not match this session%'))
@@ -329,8 +333,8 @@ INSERT INTO t16_url_variants VALUES
   ('javascript: scheme',    'javascript:' || :'PUBPATH' || :'p_enc'),
   ('data: URL',             'data:image/webp;base64,AAAA'),
   ('ftp scheme',            'ftp://pos.test' || :'PUBPATH' || :'p_enc');
-GRANT SELECT ON t16_url_variants TO anon;
-SET ROLE anon;
+GRANT SELECT ON t16_url_variants TO anon, service_role;
+SET ROLE :completer;
 SELECT test.check('t16/080: every query / fragment / encoded / case / slash / scheme variant of the URL is rejected',
   bool_and(m NOT LIKE 'OK:%'
            AND (m LIKE '%does not match this upload session%' OR m LIKE '%must be a Storage URL%'
@@ -344,7 +348,7 @@ RESET ROLE;
 -- ============================================================
 -- 8. Expired / cancelled (object present) -> rejected, consistent message
 -- ============================================================
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.expect_error('t16/080: expired session (object uploaded) -> rejected',
   format($q$SELECT public.complete_product_image_upload_session(%L, %L, %L, 2000, 'image/webp')$q$,
          :'t_exp', :'p_exp', 'https://pos.test' || :'PUBPATH' || :'p_exp'),
@@ -363,7 +367,7 @@ SELECT test.check('t16/080: expired stays derivably expired (PENDING, past expir
 -- ============================================================
 -- 9. Missing storage object -> rejected, session stays PENDING
 -- ============================================================
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.expect_error('t16/080: storage object absent -> rejected',
   format($q$SELECT public.complete_product_image_upload_session(%L, %L, %L, 2000, 'image/webp')$q$,
          :'t_mis', :'p_mis', 'https://pos.test' || :'PUBPATH' || :'p_mis'),
@@ -374,7 +378,7 @@ SELECT test.check('t16/080: after the missing-object rejection the session is st
      FROM product_image_upload_sessions WHERE id = :'mis'::jsonb->>'sessionId'));
 -- the object arrives later (upload finished) -> the same call now succeeds
 SELECT test.t16_put('product-images', :'p_mis', 1500, 'image/jpeg') \gset
-SET ROLE anon;
+SET ROLE :completer;
 SELECT public.complete_product_image_upload_session(:'t_mis', :'p_mis', 'https://pos.test' || :'PUBPATH' || :'p_mis', 1500, 'image/jpeg') AS done_mis \gset
 RESET ROLE;
 SELECT test.check('t16/080: once the object exists the same session completes (only the object was missing)',
@@ -384,14 +388,14 @@ SELECT test.check('t16/080: once the object exists the same session completes (o
 -- ============================================================
 -- 10. Object metadata over the limit / wrong type -> rejected
 -- ============================================================
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.expect_error('t16/080: object metadata says 150000 bytes (client claims 2000) -> rejected',
   format($q$SELECT public.complete_product_image_upload_session(%L, %L, %L, 2000, 'image/webp')$q$,
          :'t_big', :'p_big', 'https://pos.test' || :'PUBPATH' || :'p_big'),
   'Uploaded image must be 100 KB or smaller');
 RESET ROLE;
 UPDATE storage.objects SET metadata = '{"size": 2000, "mimetype": "image/svg+xml"}' WHERE name = :'p_big';
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.expect_error('t16/080: object metadata type image/svg+xml (client claims webp) -> rejected',
   format($q$SELECT public.complete_product_image_upload_session(%L, %L, %L, 2000, 'image/webp')$q$,
          :'t_big', :'p_big', 'https://pos.test' || :'PUBPATH' || :'p_big'),
@@ -404,7 +408,7 @@ SELECT test.check('t16/080: the metadata rejections left the session PENDING',
 -- 11. Trusted base not configured -> fails closed; readers return null
 -- ============================================================
 DELETE FROM public.app_config WHERE key = 'supabase_public_url';
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.expect_error('t16/080: no trusted base configured -> completion refused (fails closed)',
   format($q$SELECT public.complete_product_image_upload_session(%L, %L, %L, 2000, 'image/webp')$q$,
          :'t_cfg', :'p_cfg', 'https://pos.test' || :'PUBPATH' || :'p_cfg'),

@@ -178,6 +178,8 @@ SELECT 'INFO sweep covered ' || test.var('t12_sweep_total') || ' key rows over '
 \set url_base 'https://pos.test/storage/v1/object/public/product-images/'
 SELECT (SELECT prosrc LIKE '%075%' AND prosrc NOT LIKE '%has expired%'
           FROM pg_proc WHERE proname = 'complete_product_image_upload_session') AS has075 \gset
+-- 083: completion is service_role-only (phone -> phone-upload-token function)
+SELECT test.completer() AS completer, test.m083() AS m083 \gset
 \if :has075
 SELECT test.login(:'AA') AS zz \gset
 SET ROLE authenticated;
@@ -196,7 +198,7 @@ UPDATE product_image_upload_sessions SET expires_at = now() - interval '1 minute
  WHERE id IN (:'s1'::jsonb->>'sessionId', :'s2'::jsonb->>'sessionId');
 
 SELECT test.logout() AS zz \gset
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.expect_error('t12/075: anon completion of an EXPIRED session is rejected with the common message',
   format($q$SELECT public.complete_product_image_upload_session('%s', '%s', '%s', 1000, 'image/webp')$q$,
          :'s1'::jsonb->>'token', :'s1'::jsonb->>'storagePath', :'url_s1'),
@@ -215,7 +217,7 @@ SELECT test.check('t12/075: status poll reports EXPIRED and the session ends EXP
   AND (SELECT status = 'EXPIRED' AND signed_upload_token IS NULL
          FROM product_image_upload_sessions WHERE id = :'s1'::jsonb->>'sessionId'));
 SELECT test.logout() AS zz \gset
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.expect_error('t12/075: completion after the session is marked EXPIRED is still rejected (same message)',
   format($q$SELECT public.complete_product_image_upload_session('%s', '%s', '%s', 1000, 'image/webp')$q$,
          :'s1'::jsonb->>'token', :'s1'::jsonb->>'storagePath', :'url_s1'),
@@ -233,7 +235,7 @@ SET ROLE authenticated;
 SELECT public.cancel_product_image_upload_session(:'s3'::jsonb->>'sessionId') AS zz \gset
 RESET ROLE;
 SELECT test.logout() AS zz \gset
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.expect_error('t12/075: completion of a CANCELED session is rejected',
   format($q$SELECT public.complete_product_image_upload_session('%s', '%s', '%s', 1000, 'image/webp')$q$,
          :'s3'::jsonb->>'token', :'s3'::jsonb->>'storagePath', :'url_s3'),
@@ -245,7 +247,7 @@ SELECT test.expect_error('t12/075: completion of a CANCELED session is rejected'
 RESET ROLE;
 INSERT INTO storage.objects (bucket_id, name, owner, owner_id)
 VALUES ('product-images', :'s4'::jsonb->>'storagePath', :'AA', :'AA');
-SET ROLE anon;
+SET ROLE :completer;
 SELECT public.complete_product_image_upload_session(:'s4'::jsonb->>'token', :'s4'::jsonb->>'storagePath',
   :'url_s4', 1000, 'image/webp') AS c4 \gset
 RESET ROLE;
@@ -253,14 +255,14 @@ SELECT test.check('t12/075: a valid (PENDING, unexpired) session still completes
   :'c4'::jsonb->>'status' = 'COMPLETED'
   AND (SELECT status = 'COMPLETED' AND completed_at IS NOT NULL AND bytes = 1000
          FROM product_image_upload_sessions WHERE id = :'s4'::jsonb->>'sessionId'));
-SET ROLE anon;
+SET ROLE :completer;
 SELECT test.expect_error('t12/075: completion of an already COMPLETED session is rejected',
   format($q$SELECT public.complete_product_image_upload_session('%s', '%s', '%s', 1000, 'image/webp')$q$,
          :'s4'::jsonb->>'token', :'s4'::jsonb->>'storagePath', :'url_s4'),
   'Upload link is no longer active');
 RESET ROLE;
-SELECT test.check('t12/075: anon still executes complete_product_image_upload_session (064 grant kept)',
-  has_function_privilege('anon', 'public.complete_product_image_upload_session(text,text,text,integer,text)', 'EXECUTE'));
+SELECT test.check('t12/075: anon executes complete_product_image_upload_session until 083 (064 grant), not from 083 (service_role only)',
+  has_function_privilege('anon', 'public.complete_product_image_upload_session(text,text,text,integer,text)', 'EXECUTE') = NOT :'m083'::boolean);
 \else
 SELECT 'SKIP t12 section 2 (075 not applied)';
 \endif

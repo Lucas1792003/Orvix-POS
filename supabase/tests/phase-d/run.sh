@@ -310,6 +310,35 @@ if [ "$((10#$MAX_MIG))" -ge 81 ]; then
 else
   log "skipping t19_old_client_compat (migrations capped at $MAX_MIG < 081)"
 fi
+# 083 (G5): product-images upload limits + service_role-only completion.
+# Part A (settings, grants, behaviour; then resets the bucket to production's
+# pre-083 NULL limits and adds 4 violating objects), re-apply 083 -> MUST
+# abort without printing object names, part B (nothing changed; violators
+# removed), re-apply 083 -> must succeed, part C (limits set, rows unchanged).
+if [ "$((10#$MAX_MIG))" -ge 83 ]; then
+  run_sql_test "$SQL/t20_upload_limits.sql"
+  M083="$REPO/supabase/migrations/083_product_images_upload_limits.sql"
+  log "re-applying 083 with violating objects present (must abort)"
+  if pg_psql -f "$M083" > "$WORK/mig3_083.log" 2>&1; then
+    su_psql -Atc "SELECT test.check('t20 guard: 083 aborts when existing objects violate the new limits', false, 'the re-apply succeeded')" | grep -E '^(PASS|FAIL)'
+  else
+    ok=false; grep -q "083: 4 existing product-images object(s) violate the new limits" "$WORK/mig3_083.log" && ok=true
+    leak=false; grep -qE 't20-|org/org-test' "$WORK/mig3_083.log" && leak=true
+    grep -h -E '083:' "$WORK/mig3_083.log" | sed 's/^.*ERROR: */INFO aborted as expected: /'
+    su_psql -Atc "SELECT test.check('t20 guard: 083 aborts with the per-type count message when existing objects violate the new limits', $ok)" | grep -E '^(PASS|FAIL)'
+    su_psql -Atc "SELECT test.check('t20 guard: the abort message names no object (counts by mimetype only)', NOT $leak)" | grep -E '^(PASS|FAIL)'
+  fi
+  run_sql_test "$SQL/t20_upload_limits_b.sql"
+  log "re-applying 083 to the clean populated bucket (must succeed, objects unchanged)"
+  if pg_psql -f "$M083" > "$WORK/mig4_083.log" 2>&1; then
+    grep -h -E '083: product-images limits set' "$WORK/mig4_083.log" | sed 's/^.*NOTICE: */INFO /'
+  else
+    tail -20 "$WORK/mig4_083.log"; fail "re-apply of 083 on a clean populated bucket"
+  fi
+  run_sql_test "$SQL/t20_upload_limits_c.sql"
+else
+  log "skipping t20_upload_limits (migrations capped at $MAX_MIG < 083)"
+fi
 # Concurrent first-time setup (076). MUST RUN LAST: t12_bootstrap_prep
 # empties public.users (TRUNCATE ... CASCADE) to recreate a fresh install in
 # this throwaway database. Two sessions call bootstrap_first_admin(); A holds

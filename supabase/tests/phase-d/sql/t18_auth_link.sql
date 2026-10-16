@@ -243,9 +243,9 @@ SELECT test.check('t18 seeded links untouched by every refused attempt',
   AND NOT EXISTS (SELECT 1 FROM users WHERE auth_id = :'FM'));
 
 -- ---------------------------------------------------------------- inventory
-SELECT test.check('t18 inventory: anon-executable public functions still exactly 3',
+SELECT test.check('t18 inventory: anon-executable public functions still exactly 3 (2 from 083: completion is service_role-only)',
   (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname = 'public' AND has_function_privilege('anon', p.oid, 'EXECUTE')) = 3);
+    WHERE n.nspname = 'public' AND has_function_privilege('anon', p.oid, 'EXECUTE')) = CASE WHEN test.m083() THEN 2 ELSE 3 END);
 SELECT test.check('t18 inventory: 30 RPCs carry p_idempotency_key; create_app_user authenticated-only, SECURITY DEFINER',
   (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public' AND pg_get_function_identity_arguments(p.oid) LIKE '%p_idempotency_key%') = 30

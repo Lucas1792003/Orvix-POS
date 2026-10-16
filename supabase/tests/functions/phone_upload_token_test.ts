@@ -512,3 +512,252 @@ test("phone-upload-token 081: concurrent requests are decided by the database, n
     assertEquals((await handler(req({ token: QR_TOKEN }))).status, 200);
   });
 });
+
+// ---------------------------------------------------------------- 083 (G5) completion with a byte check
+// docs/selfhost-migration/phase-f/migration-083-g5.md
+
+const KEY = `product-images/${PATH}`;
+const COMPLETE = "complete_product_image_upload_session";
+const bytesOf = (...parts: (number[] | string | Uint8Array)[]) => {
+  const chunks = parts.map((p) => (typeof p === "string" ? new TextEncoder().encode(p) : p instanceof Uint8Array ? p : new Uint8Array(p)));
+  const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+  return out;
+};
+const filler = (n: number) => new Uint8Array(Array.from({ length: n }, (_, i) => 0x10 + (i % 64)));
+const jpeg = (n = 2000) => bytesOf([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10], "JFIF", [0x00], filler(n), [0xff, 0xd9]);
+const le32 = (v: number) => [v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >>> 24) & 255];
+const webp = (n = 1500) => bytesOf("RIFF", le32(n + 12), "WEBP", "VP8 ", le32(n), filler(n));
+const png = () => bytesOf([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13], "IHDR", filler(40));
+
+const completeReq = () => req({ token: QR_TOKEN, action: "complete" });
+const touchedStorage = (world: World) => world.trace().some((t) => t.startsWith("storage:"));
+
+/** The 080 RPC (called by the function with the service role; 083 grants), modelled. */
+const withCompleteRpc = (world: World) => {
+  const calls: Record<string, unknown>[] = [];
+  world.db.rpcs[COMPLETE] = (args) => {
+    calls.push(args);
+    const row = world.db.tables.product_image_upload_sessions.find((r) => r.id === SESSION_ID)!;
+    if (args.p_token !== QR_TOKEN) return [400, { code: "P0001", message: "Invalid upload link" }];
+    if (row.status !== "PENDING") return [400, { code: "P0001", message: "Upload link is no longer active" }];
+    if (args.p_storage_path !== row.storage_path) return [400, { code: "P0001", message: "Upload path does not match this session" }];
+    if (!world.storage.objects.has(KEY)) return [400, { code: "P0001", message: "Uploaded image was not found in storage" }];
+    if (!["image/jpeg", "image/webp"].includes(String(args.p_mime_type))) return [400, { code: "P0001", message: "Unsupported uploaded image type" }];
+    row.status = "COMPLETED";
+    row.public_url = `https://pos.test/storage/v1/object/public/product-images/${row.storage_path}`;
+    return [200, {
+      sessionId: row.id,
+      storagePath: row.storage_path,
+      publicUrl: row.public_url,
+      bytes: args.p_bytes,
+      mimeType: args.p_mime_type,
+      expiresAt: row.expires_at,
+      status: "COMPLETED",
+    }];
+  };
+  return calls;
+};
+
+test("phone-upload-token 083: valid JPEG and WebP -> completed through the RPC (service role) with values from the stored object; no token, no rate-limit claim", async () => {
+  for (const [bytes, type] of [[jpeg(), "image/jpeg"], [webp(), "image/webp"]] as const) {
+    await run(async (world) => {
+      const handler = await seed(world);
+      const rpcCalls = withCompleteRpc(world);
+      world.storage.put(KEY, bytes, type);
+      const res = await handler(completeReq());
+      const text = await res.text();
+      assertEquals(res.status, 200, text);
+      const body = JSON.parse(text);
+      assertEquals(body.status, "COMPLETED");
+      assertEquals(body.storagePath, PATH);
+      assertEquals(rpcCalls.length, 1);
+      assertEquals(rpcCalls[0].p_storage_path, PATH);
+      assertEquals(rpcCalls[0].p_bytes, bytes.length);
+      assertEquals(rpcCalls[0].p_mime_type, type);
+      assertEquals(new URL(String(rpcCalls[0].p_public_url)).pathname, `/storage/v1/object/public/product-images/${PATH}`);
+      assertEquals(world.storage.signed.length, 0);
+      assertEquals(world.storage.deleted, []);
+      assertEquals(world.trace(), [
+        "db:GET product_image_upload_sessions",
+        "db:GET users",
+        "db:GET products",
+        "db:GET shops",
+        "storage:GET object",
+        `db:POST rpc/${COMPLETE}`,
+      ]);
+      assert(!text.includes(SERVICE_ROLE_KEY));
+    });
+  }
+});
+
+test("phone-upload-token 083: refused content -> 422 invalid_image, the object is DELETED, the session is not completed", async () => {
+  const cases: [string, Uint8Array, string][] = [
+    ["text/html declared", bytesOf("<!doctype html><html><body>hi</body></html>"), "text/html"],
+    ["image/svg+xml declared", bytesOf('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'), "image/svg+xml"],
+    ["application/octet-stream declared (JPEG bytes)", jpeg(), "application/octet-stream"],
+    [".jpg with HTML content (declared image/jpeg)", bytesOf("<html><script>alert(document.domain)</script></html>"), "image/jpeg"],
+    ["SVG content declared image/jpeg", bytesOf('<svg onload="alert(1)"/>'), "image/jpeg"],
+    ["JPEG header + HTML polyglot", bytesOf([0xff, 0xd8, 0xff, 0xe0], "<html><body><script>alert(1)</script>", [0xff, 0xd9]), "image/jpeg"],
+    ["JPEG with an upper-case <SCRIPT> in the middle", bytesOf(jpeg(500), "<SCRIPT>x</SCRIPT>", jpeg(500)), "image/jpeg"],
+    ["WebP + trailing HTML (RIFF size mismatch)", bytesOf(webp(200), "<html></html>"), "image/webp"],
+    ["WebP bytes declared image/jpeg", webp(), "image/jpeg"],
+    ["PNG (the bucket allows it, completion does not)", png(), "image/png"],
+    ["over 100 KB", jpeg(102400), "image/jpeg"],
+    ["empty object", new Uint8Array(0), "image/jpeg"],
+  ];
+  for (const [label, bytes, type] of cases) {
+    await run(async (world) => {
+      const handler = await seed(world);
+      const rpcCalls = withCompleteRpc(world);
+      world.storage.put(KEY, bytes, type);
+      const res = await handler(completeReq());
+      const text = await res.text();
+      assertEquals(res.status, 422, `${label}: ${text}`);
+      assertEquals(JSON.parse(text).code, "invalid_image", label);
+      assertEquals(world.storage.deleted, [KEY], `${label}: the object must be deleted`);
+      assert(!world.storage.objects.has(KEY), label);
+      assertEquals(rpcCalls.length, 0, `${label}: the RPC must not be called`);
+      assertEquals(world.db.tables.product_image_upload_sessions[0].status, "PENDING", label);
+      assert(!text.includes(SERVICE_ROLE_KEY));
+    });
+  }
+});
+
+test("phone-upload-token 083: after a refusal the phone can upload a real photo to the same path and complete", async () => {
+  await run(async (world) => {
+    const handler = await seed(world);
+    withCompleteRpc(world);
+    world.storage.put(KEY, bytesOf("<html></html>"), "image/jpeg");
+    assertEquals((await handler(completeReq())).status, 422);
+    // the path is free again: a fresh signed token for it (no alreadyUploaded)
+    const tok = await readJson(await handler(req({ token: QR_TOKEN })));
+    assertEquals(tok.status, 200);
+    assertEquals(tok.body.path, PATH);
+    assert(typeof tok.body.token === "string");
+    world.storage.put(KEY, jpeg(), "image/jpeg");
+    const done = await readJson(await handler(completeReq()));
+    assertEquals(done.status, 200);
+    assertEquals(done.body.status, "COMPLETED");
+  });
+});
+
+test("phone-upload-token 083: nothing uploaded -> 409 not_uploaded; no delete, no RPC", async () => {
+  await run(async (world) => {
+    const handler = await seed(world);
+    const rpcCalls = withCompleteRpc(world);
+    const res = await readJson(await handler(completeReq()));
+    assertEquals(res.status, 409);
+    assertEquals(res.body.code, "not_uploaded");
+    assertEquals(world.storage.deleted, []);
+    assertEquals(rpcCalls.length, 0);
+  });
+});
+
+test("phone-upload-token 083: completed / expired / foreign-org sessions are refused before storage is read; nothing is deleted", async () => {
+  await run(async (world) => {
+    const handler = await seed(world, { status: "COMPLETED" });
+    world.storage.put(KEY, jpeg(), "image/jpeg");
+    const res = await readJson(await handler(completeReq()));
+    assertEquals(res.status, 410);
+    assertEquals(res.body.status, "COMPLETED");
+    assert(!touchedStorage(world));
+  });
+  await run(async (world) => {
+    const handler = await seed(world, { expires_at: new Date(Date.now() - 1000).toISOString() });
+    world.storage.put(KEY, jpeg(), "image/jpeg");
+    const res = await readJson(await handler(completeReq()));
+    assertEquals(res.status, 410);
+    assert(!touchedStorage(world));
+  });
+  await run(async (world) => {
+    const handler = await seed(world, { product_id: "prod-b" });
+    world.storage.put(KEY, bytesOf("<html></html>"), "image/jpeg");
+    const res = await readJson(await handler(completeReq()));
+    assertEquals(res.status, 403);
+    assert(!touchedStorage(world));
+    assert(world.storage.objects.has(KEY), "a refused session must not delete anything");
+  });
+  await run(async (world) => {
+    const handler = await seed(world, { storage_path: `org/${OTHER_ORG}/temp/${SESSION_ID}` });
+    const res = await readJson(await handler(completeReq()));
+    assertEquals(res.status, 403);
+    assert(!touchedStorage(world));
+  });
+});
+
+test("phone-upload-token 083: a concurrent completion that won the race -> 410 with the session's status; the valid object stays", async () => {
+  await run(async (world) => {
+    const handler = await seed(world);
+    world.db.rpcs[COMPLETE] = () => {
+      world.db.tables.product_image_upload_sessions[0].status = "COMPLETED";
+      return [400, { code: "P0001", message: "Upload link is no longer active" }];
+    };
+    world.storage.put(KEY, jpeg(), "image/jpeg");
+    const res = await readJson(await handler(completeReq()));
+    assertEquals(res.status, 410);
+    assertEquals(res.body.status, "COMPLETED");
+    assertEquals(world.storage.deleted, []);
+  });
+});
+
+test("phone-upload-token 083: RPC refusal -> 422 completion_refused (its generic message); RPC / storage failure -> 503 without details", async () => {
+  await run(async (world) => {
+    const handler = await seed(world);
+    world.db.rpcs[COMPLETE] = () => [400, { code: "P0001", message: "Phone image upload is not configured on this server" }];
+    world.storage.put(KEY, jpeg(), "image/jpeg");
+    const res = await readJson(await handler(completeReq()));
+    assertEquals(res.status, 422);
+    assertEquals(res.body, { error: "Phone image upload is not configured on this server", code: "completion_refused" });
+  });
+  await run(async (world) => {
+    const handler = await seed(world);
+    world.db.rpcs[COMPLETE] = () => [401, { code: "42501", message: "permission denied for function complete_product_image_upload_session" }];
+    world.storage.put(KEY, jpeg(), "image/jpeg");
+    const res = await handler(completeReq());
+    const text = await res.text();
+    assertEquals(res.status, 503);
+    assert(!text.includes("permission"));
+  });
+  await run(async (world) => {
+    const handler = await seed(world);
+    const rpcCalls = withCompleteRpc(world);
+    world.storage.put(KEY, jpeg(), "image/jpeg");
+    world.storage.failGet = 500;
+    const res = await handler(completeReq());
+    assertEquals(res.status, 503);
+    await res.body?.cancel();
+    assertEquals(rpcCalls.length, 0);
+    assertEquals(world.storage.deleted, []);
+  });
+});
+
+test("phone-upload-token 083: a refused object whose delete fails is still never completed", async () => {
+  await run(async (world) => {
+    const handler = await seed(world);
+    const rpcCalls = withCompleteRpc(world);
+    world.storage.put(KEY, bytesOf("<html></html>"), "image/jpeg");
+    world.storage.failDelete = 500;
+    const res = await readJson(await handler(completeReq()));
+    assertEquals(res.status, 422);
+    assertEquals(res.body.code, "invalid_image");
+    assertEquals(rpcCalls.length, 0);
+    assertEquals(world.db.tables.product_image_upload_sessions[0].status, "PENDING");
+  });
+});
+
+test("phone-upload-token 083: unknown action -> 400 bad_request; wrong token for completion -> 404; neither touches storage", async () => {
+  await run(async (world) => {
+    const handler = await seed(world);
+    const bad = await readJson(await handler(req({ token: QR_TOKEN, action: "delete" })));
+    assertEquals(bad.status, 400);
+    assertEquals(bad.body.code, "bad_request");
+    const wrong = await readJson(await handler(req({ token: "z".repeat(64), action: "complete" })));
+    assertEquals(wrong.status, 404);
+    assert(!touchedStorage(world));
+  });
+});

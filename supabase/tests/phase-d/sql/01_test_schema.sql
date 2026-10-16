@@ -160,4 +160,12 @@ END $$;
 -- initial + sum(movements) = current for every row.
 CREATE TABLE test.initial_inventory (shop_id text, product_id text, qty integer, PRIMARY KEY (shop_id, product_id));
 
+-- 083 (G5): complete_product_image_upload_session becomes service_role-only
+-- (the phone completes through the phone-upload-token Edge Function, which
+-- checks the stored bytes first). m083() = 083 is applied (its COMMENT marker);
+-- completer() = the role a test uses to simulate the phone's completion.
+CREATE FUNCTION test.m083() RETURNS boolean LANGUAGE sql STABLE AS $$
+  SELECT coalesce(obj_description(to_regprocedure('public.complete_product_image_upload_session(text,text,text,integer,text)'), 'pg_proc'), '') LIKE '083:%' $$;
+CREATE FUNCTION test.completer() RETURNS text LANGUAGE sql STABLE AS $$
+  SELECT CASE WHEN test.m083() THEN 'service_role' ELSE 'anon' END $$;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA test TO anon, authenticated, service_role;
