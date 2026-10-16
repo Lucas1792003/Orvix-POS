@@ -316,3 +316,20 @@ For the coordinator (before building RC2):
 2. The Electron build now ships `dist/backend.json` (backend URL + public anon key, the same values already inlined in the JS bundle); include it in the artifact secret scan expectations.
 3. Run spec H (and F) live; then build with `VITE_BUILD_LABEL=rc2` into `ShwePhaLa-artifacts/rc2-1.0.16-<commit>/`.
 4. Open decision: set-aside rows keep blocking a normal update install (they are unsynced by design); the owner uses "Install anyway (after export)". If that is too strict, decide explicitly — the app never deletes them.
+
+## 10. RC2 built and frozen (coordinator, 2026-10-16 11:52 UTC) — NOT published
+Built from commit **`adbaf1b`** (clean tree; RC2 fixes D1–D4) with `VITE_BUILD_LABEL=rc2` (on-screen `v1.0.16 rc2`), the real anon key and the self-hosted origin; `--mac --arm64 --win --x64 --publish never`. Frozen read-only at `/Users/waiyan/Projects/personal/ShwePhaLa-artifacts/rc2-1.0.16-adbaf1b/` (`SHA256SUMS`, 13 entries, 13 OK). RC1 folder untouched (13 OK).
+
+| Artifact | sha256 |
+|---|---|
+| `Shwe-Pha-La-POS-Setup-1.0.16.exe` | `0ca75628fb8bc22a27991143320ccd9a334341b0097452acbcd6bd8920f639be` |
+| `Shwe-Pha-La-POS-1.0.16-arm64.dmg` | `1c7b650edc86a261181922eae4f82d4382a7bda048fe403f258d7a89e6ebe964` |
+| `Shwe-Pha-La-POS-1.0.16-x64.dmg` | `4de021443d01b778a61933bc1d2878474cc2a43d4d759d83e919f4ef0b31ca4f` |
+| `Shwe-Pha-La-POS-1.0.16-arm64.zip` | `195b096700065fa33cf53d05e2b8a74155648460b70a75cdaf601566521a63fa` |
+| `Shwe-Pha-La-POS-1.0.16-x64.zip` | `b03bceca98da148d45337fd95f1c37acde80cd00d97925efac7f00601e2cc83a` |
+
+Bundle: only the self-hosted origin (4 refs), 0 hosted refs, 0 `signUp`, 0 service-key matches in `dist/assets/*.js` and `dist/*.json`; `dist/backend.json` holds only `url` + `anonKey` (public, same values as the bundle) for the main-process owner check. `app_role()` reachable through the gateway (anon refused 42501, `authenticated` has EXECUTE, SECURITY DEFINER).
+
+Regression on `adbaf1b`: tsc clean; vitest 1040; Deno 94; harness 747/0 (capped 083: 672/0); isolation audit (083+085) 454/0/2 low, parity PASS; live suites all pass, CLEAN; e2e first run 47 passed / 2 failed (A8, C3 still clicked the removed Dismiss button — test-only), after updating those two specs to export + Set aside (commit after `adbaf1b`, **no product code changed**): **50 passed, 1 skipped (084-only)**, CLEAN; 574/574 images; production fingerprint identical.
+
+Open design decision: set-aside rows (including server-rejected "permanent conflict" sales) stay on the till forever and keep blocking a normal update install, so each later update on such a till needs the owner's "Install anyway (after export)". Nothing can permanently remove a set-aside row (by design).
