@@ -286,3 +286,6 @@ Built from commit `b777345` (clean tree) with the real anon key and the self-hos
 `latest.yml` / `latest-mac.yml`: version 1.0.16. Bundle: only the self-hosted origin (4 refs), 0 hosted refs, 0 `signUp` refs, 0 service-key matches, `X-Client-Info` + `shwephala-pos` + `validated-uploads` present, version string 1.0.16.
 
 Final regression on RC1 (same commit): tsc clean; vitest 1010; Deno 94; harness 747/0 (capped 083: 672/0); isolation audit modelling production (083+085, 084 skipped) 454/0/2 low with **schema parity PASS**; live suites phase-f-staff 9/9, phase-g4 15+1 skip, phase-d 16/16, org-isolation 12/12, g2 4/4, g3 9/9; e2e **49 passed, 1 skipped** (084-only); cleanup CLEAN; 574/574 images; production fingerprint identical before/after. Till readiness for 084: **NO-GO** (expected: no till on 1.0.16 yet, 3.1 h of gateway log, no register).
+
+## 8. RC1 frozen (2026-10-16)
+Read-only copy (files 0444, folder 0555) at `/Users/waiyan/Projects/personal/ShwePhaLa-artifacts/rc1-1.0.16-b777345/` with `SHA256SUMS` (13 entries incl. blockmaps, both update manifests and `FROZEN.txt`); `shasum -a 256 -c SHA256SUMS` → 13 OK; the five installer hashes equal §7. Rule: RC1 is never rebuilt or replaced; any rebuild is **RC2** in its own folder with its own hashes. `release/rc-1.0.16/` in the checkout is a working copy only — install from the frozen folder.
