@@ -63,19 +63,26 @@ export async function functionsSuite(w: World) {
   check("functions", "staff-admin: duplicate email is refused", dup.status === 409, ["edge-fn:staff-admin"], `status ${dup.status}`);
   check("functions", "staff-admin: no orphan auth account left behind (compensation)", noOrphanBefore() === beforeOrphan, ["edge-fn:staff-admin"], `orphans ${beforeOrphan}->${noOrphanBefore()}`);
 
-  // ---------------------------------------------------------------- platform-console
+  // ---------------------------------------------------------------- platform-console (RETIRED)
+  // Removed from lucashome 2026-10-16 (G0-1); source archived to archive/deprecated-edge-functions/
+  // (G0-2). The stack mounts only supabase/functions/*, so the function must not execute for
+  // anyone, including a platform admin: the runtime answers 404 or a worker boot error.
   const pc = (token: string | null, body: Record<string, unknown>) => fn(token, "platform-console", body);
-  for (const [label, token] of [["org A admin aal2", adminA2], ["org A cashier", A.people.cash.token], ["orphan", w.orphan.token]] as const) {
-    const who = await pc(token, { action: "whoami" });
-    capture(`platform-console ${label}`, who.text);
-    check("functions", `platform-console: ${label} is not authorized`, who.status === 403, ["edge-fn:platform-console"], `status ${who.status}`);
-    const list = await pc(token, { action: "list_organizations" });
-    check("functions", `platform-console: ${label} cannot list organizations`, list.status === 403, ["edge-fn:platform-console"], `status ${list.status}`);
-    const create = await pc(token, { action: "create_organization", orgName: "x", adminName: "x", adminEmail: `x${uuid().slice(0, 6)}@qa.invalid` });
-    check("functions", `platform-console: ${label} cannot create an organization`, create.status === 403, ["edge-fn:platform-console"], `status ${create.status}`);
+  const notExecuted = (r: { status: number; text: string }) =>
+    r.status !== 200 && r.status !== 201 &&
+    (r.status === 404 || /InvalidWorkerCreation|worker boot error|could not find an appropriate entrypoint/i.test(r.text));
+  for (const [label, token] of [["platform admin", w.platform.token], ["org A admin aal2", adminA2], ["org A cashier", A.people.cash.token], ["orphan", w.orphan.token]] as const) {
+    const bodies: Record<string, unknown>[] = [
+      { action: "whoami" },
+      { action: "list_organizations" },
+      { action: "create_organization", orgName: "x", adminName: "x", adminEmail: `x${uuid().slice(0, 6)}@qa.invalid` },
+    ];
+    for (const body of bodies) {
+      const r = await pc(token, body);
+      if (body.action === "whoami") capture(`platform-console (retired) ${label}`, r.text);
+      check("functions", `platform-console (retired): ${label} ${String(body.action)} does not execute`, notExecuted(r), ["edge-fn:platform-console"], `status ${r.status}`);
+    }
   }
-  const paWho = await pc(w.platform.token, { action: "whoami" });
-  check("functions", "platform-console: positive — the platform admin is recognised", paWho.status === 200, ["edge-fn:platform-console"], `status ${paWho.status}`);
 
   // ---------------------------------------------------------------- admin-2fa
   const a2 = (token: string | null) => fn(token, "admin-2fa", { action: "request" });

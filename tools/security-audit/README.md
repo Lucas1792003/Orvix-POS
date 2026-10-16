@@ -105,7 +105,7 @@ into another org's response is detectable.
 | `rpcs.ts` | every authenticated mutating RPC with B's ids → refused, and a before/after digest of all of B's tables is unchanged; idempotency-key org binding (074) |
 | `storage.ts` | A cannot list/overwrite/delete/move/sign B's objects; signed-URL path binding; public reads documented |
 | `phone.ts` | create-session cross-org refused; by-token returns only the 8 allowed fields; completion path binding (079/080); per-org rate counters (081) |
-| `functions.ts` | staff-admin (shop/org tampering, role/aal/code gates, escalation, replay, compensation), platform-console, admin-2fa, email-sales-report derive org server-side; GoTrue signup disabled (422) |
+| `functions.ts` | staff-admin (shop/org tampering, role/aal/code gates, escalation, replay, compensation), platform-console **retired** (G0-2: must not execute for any persona), admin-2fa, email-sales-report derive org server-side; GoTrue signup disabled (422) |
 | `authlink.ts` | the older `create_app_user`/direct-`auth_id` linking path — **expected GAP at 081**, closed at 082 |
 | `authz.ts` | authorization-boundary matrix across 9 personas; the anon surface |
 | `helpers.ts` | SECURITY DEFINER context helpers report caller-only; owner-scoped upload fns; bootstrap/rbac view/phone page; service-role-only definer grants |

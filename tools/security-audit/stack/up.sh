@@ -191,7 +191,7 @@ SQL
   wait_http "$GW_URL/storage/v1/status" '^200$' 60 || die "storage via gateway"
   wait_http "$GW_URL/functions/v1/phone-upload-page" '^200$' 180 || { docker logs "$FN" 2>&1 | sed -E 's/eyJ[A-Za-z0-9_.-]+/<jwt>/g' | tail -20; die "edge-runtime"; }
   # warm every function (npm:@supabase/supabase-js loads on first use)
-  for d in admin-2fa email-sales-report phone-upload-token platform-console staff-admin; do
+  for d in admin-2fa email-sales-report phone-upload-token staff-admin; do   # platform-console retired (G0-2)
     curl -s -o /dev/null --max-time 120 -X POST -H "Authorization: Bearer $ANON_KEY" -H 'content-type: application/json' \
       -d '{}' "$GW_URL/functions/v1/$d" || true
   done

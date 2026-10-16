@@ -42,6 +42,12 @@ UPSTREAM_SHA=9b7978abd7fd4af39e4f407f8a956137aa99e6ffaeb2190a5e29c8e1787d2da6
 # the same file after functions-main-public-page.patch
 PATCHED_SHA=d2901ffa9711a82117b0edde7b98cbd999ea5d61fa4536c74b307bb37cd111bc
 MARKER="const PUBLIC_PAGE_FUNCTIONS = new Set(['phone-upload-page'])"
+# Retired functions (G0-2, 2026-10-16): status and verify fail if one is in FUNCTIONS_DIR.
+# Must equal RETIRED_FUNCTIONS in functions-guard.sh (asserted by tests/functions-guard-test.sh).
+# This script is piped to the server on its own (`bash -s`), so the list is repeated here.
+# ALLOW_RETIRED_FUNCTIONS=1 downgrades the failure to a loud warning, ONLY for an
+# owner-approved rollback verification.
+RETIRED_FUNCTIONS="platform-console rotate-audit-log weekly-sales-report"
 PUBLIC_PAGES=(phone-upload-page)
 BACKUP_PREFIX="index.ts.pre-phone-page"
 
@@ -103,8 +109,28 @@ Until then the phone page answers 401 (fail-closed); no other function is affect
 EOF
 }
 
+# retired_check: 0 = none present; 1 = a retired function is in FUNCTIONS_DIR (printed)
+retired_check() {
+  local r n found=0
+  for r in $RETIRED_FUNCTIONS; do
+    if [[ -d "$FUNCTIONS_DIR" ]] && [[ -e "$FUNCTIONS_DIR/$r" || -L "$FUNCTIONS_DIR/$r" ]]; then
+      echo "RETIRED FUNCTION PRESENT: $FUNCTIONS_DIR/$r (G0-2: must not be active; move it to ~/removed-edge-functions-<UTC>/)" >&2
+      found=1
+    fi
+    for n in ${FUNCTION_NAMES:-}; do
+      if [[ "$n" == "$r" ]]; then echo "RETIRED FUNCTION NAMED in FUNCTION_NAMES: $r" >&2; found=1; fi
+    done
+  done
+  if (( found )) && [[ "${ALLOW_RETIRED_FUNCTIONS:-}" == 1 ]]; then
+    echo "WARNING: ALLOW_RETIRED_FUNCTIONS=1 set (owner-approved rollback verification only)" >&2
+    return 0
+  fi
+  return "$found"
+}
+
 cmd_status() {
   local st sha marker="absent" bk
+  retired_check || { echo "state:    RETIRED FUNCTION ACTIVE (see above)"; return 1; }
   echo "router:   $ROUTER"
   st=$(state_of "$ROUTER")
   if [[ "$st" == missing ]]; then echo "state:    missing"; return 1; fi
@@ -220,6 +246,7 @@ function_names() {
 }
 
 cmd_verify() {
+  retired_check || die "refusing to verify: a retired function is present in $FUNCTIONS_DIR (G0-2)"
   command -v curl >/dev/null || die "curl required"
   VTMP=$(mktemp -d); CLEANUP+=("$VTMP")
   local names=() n p gated=() pub

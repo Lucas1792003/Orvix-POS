@@ -38,9 +38,10 @@ export async function authzSuite(w: World) {
       expect: { anon: false, orphan: false, deactivated: false, cashier: false, manager: false, "admin-aal1": false, "admin-aal2": true, "admin-code-missing": false, "platform-admin": false },
     },
     {
-      op: "create organization (platform-console)", cover: ["edge-fn:platform-console"],
+      // platform-console is RETIRED (G0-1/G0-2): it must not succeed for anyone, platform admin included.
+      op: "platform-console whoami (retired)", cover: ["edge-fn:platform-console"],
       run: async (p) => { const r = await fn(p.token, "platform-console", { action: "whoami" }); return r.status === 200; },
-      expect: { anon: false, orphan: false, deactivated: false, cashier: false, manager: false, "admin-aal1": false, "admin-aal2": false, "admin-code-missing": false, "platform-admin": true },
+      expect: { anon: false, orphan: false, deactivated: false, cashier: false, manager: false, "admin-aal1": false, "admin-aal2": false, "admin-code-missing": false, "platform-admin": false },
     },
   ];
 

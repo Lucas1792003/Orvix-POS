@@ -201,6 +201,13 @@ spec in [04-features-workflows.md](./04-features-workflows.md#admin-login-verifi
 
 ## Platform Admin Console
 
+> **RETIRED (2026-10-16).** The `platform-console` Edge Function was removed from lucashome (G0-1) and its source
+> moved to `archive/deprecated-edge-functions/platform-console/` (G0-2). It must not be deployed: `deploy/lucashome/sync-functions.sh`
+> refuses it, and `supabase functions deploy platform-console` no longer finds a source. Organisation creation is an operator
+> runbook until the separate Orvix Control project exists (`docs/plans/orvix-platform-control-plane-architecture.md`). The
+> `/console` pages below still ship in the app bundle and are scheduled for removal in the 1.0.17 UI work. The text below is
+> kept for history only. Evidence: `docs/selfhost-migration/evidence/G0-1/`, `docs/selfhost-migration/evidence/G0-2/`.
+
 Internal, operator-only tool for provisioning new organizations
 (multi-tenant Phase 2 — see [09-roadmap-todo.md](./09-roadmap-todo.md#future-vision--multi-tenant-saas-2026-08-25-not-scheduled)).
 Reachable at `/console/login` — a URL deliberately not linked from
