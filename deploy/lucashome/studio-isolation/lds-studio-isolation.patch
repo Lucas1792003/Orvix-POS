@@ -1,0 +1,143 @@
+--- a/volumes/api/envoy/lds.template.yaml
++++ b/volumes/api/envoy/lds.template.yaml
+@@ -506,74 +506,19 @@
+                               type.googleapis.com/envoy.config.route.v3.FilterConfig
+                             disabled: true
+ 
+-                      - name: pg-protected
++                      # ShwePhaLa studio isolation (deploy/lucashome/studio-isolation/):
++                      # Studio (/), its MCP endpoints (/api/mcp, /mcp) and pg-meta (/pg/)
++                      # are NOT served on the shared API origin. Everything that no route
++                      # above matches gets a plain 404 here, with no basic-auth challenge.
++                      # Studio is published on 127.0.0.1:54323 only (SSH tunnel).
++                      # Keep this route LAST: any route added later goes above it.
++                      - name: phf-not-found
+                         match:
+-                          prefix: /pg/
+-                        route:
+-                          cluster: meta
+-                          prefix_rewrite: /
+-                          timeout: 30s
+-                        request_headers_to_add:
+-                          - header:
+-                              key: X-Forwarded-Prefix
+-                              value: /pg/
+-                            append_action: ADD_IF_ABSENT
+-                        typed_per_filter_config:
+-                          envoy.filters.http.basic_auth:
+-                            '@type': >-
+-                              type.googleapis.com/envoy.config.route.v3.FilterConfig
+-                            disabled: true
+-                          envoy.filters.http.cors:
+-                            '@type': >-
+-                              type.googleapis.com/envoy.extensions.filters.http.cors.v3.CorsPolicy
+-                            allow_origin_string_match:
+-                              - exact: '${SUPABASE_PUBLIC_URL}'
+-                              - safe_regex:
+-                                  regex: 'https?://(localhost|127\.0\.0\.1)(:[0-9]+)?'
+-                            allow_methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD"
+-                            allow_headers: "*"
+-                            expose_headers: "*"
+-                            max_age: "3600"
+-
+-                      - match:
+-                          prefix: /api/mcp
+-                        route:
+-                          cluster: studio
+-                          timeout: 30s
+-                        request_headers_to_add:
+-                          - header:
+-                              key: X-Forwarded-Prefix
+-                              value: /api/mcp
+-                            append_action: ADD_IF_ABSENT
+-                        typed_per_filter_config:
+-                          envoy.filters.http.basic_auth:
+-                            '@type': >-
+-                              type.googleapis.com/envoy.config.route.v3.FilterConfig
+-                            disabled: true
+-                          envoy.filters.http.rbac:
+-                            '@type': >-
+-                              type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+-                            rbac:
+-                              rules:
+-                                action: DENY
+-                                policies:
+-                                  deny_all:
+-                                    permissions:
+-                                      - any: true
+-                                    principals:
+-                                      - any: true
+-
+-                      - match:
+-                          prefix: /mcp
+-                        route:
+-                          cluster: studio
+-                          prefix_rewrite: /api/mcp
+-                          timeout: 30s
+-                        request_headers_to_add:
+-                          - header:
+-                              key: X-Forwarded-Prefix
+-                              value: /mcp
+-                            append_action: ADD_IF_ABSENT
++                          prefix: /
++                        direct_response:
++                          status: 404
++                          body:
++                            inline_string: "not found\n"
+                         typed_per_filter_config:
+                           envoy.filters.http.basic_auth:
+                             '@type': >-
+@@ -582,53 +527,8 @@
+                           envoy.filters.http.rbac:
+                             '@type': >-
+                               type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+-                            # Block access to /mcp by default
+                             rbac:
+                               rules:
+-                                action: DENY
+-                                policies:
+-                                  deny_all:
+-                                    permissions:
+-                                      - any: true
+-                                    principals:
+-                                      - any: true
+-                            # Enable local access (danger zone!)
+-                            # 1. Comment out the 'rbac' block above.
+-                            # 2. Uncomment and adjust the 'rbac' block below.
+-                            # 3. Add or adjust your local IPs in 'principals'.
+-                            #rbac:
+-                            #  rules:
+-                            #    action: ALLOW
+-                            #    policies:
+-                            #      allow_local:
+-                            #        permissions:
+-                            #          - any: true
+-                            #        principals:
+-                            #          - direct_remote_ip:
+-                            #              address_prefix: 127.0.0.1
+-                            #              prefix_len: 32
+-                            #          - direct_remote_ip:
+-                            #              address_prefix: ::1
+-                            #              prefix_len: 128
+-
+-                      - match:
+-                          prefix: /
+-                        route:
+-                          cluster: studio
+-                          timeout: 30s
+-                        request_headers_to_remove:
+-                          - authorization
+-                        request_headers_to_add:
+-                          - header:
+-                              key: X-Forwarded-Prefix
+-                              value: /
+-                            append_action: ADD_IF_ABSENT
+-                        typed_per_filter_config:
+-                          envoy.filters.http.rbac:
+-                            '@type': >-
+-                              type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute
+-                            rbac:
+-                              rules:
+                                 action: ALLOW
+                                 policies:
+                                   allow_all:

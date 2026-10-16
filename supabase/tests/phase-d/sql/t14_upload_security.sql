@@ -72,13 +72,20 @@ SELECT test.check('t14/078: legacy paths resolve to their org through server-sid
   AND public.app_storage_object_org('') IS NULL AND public.app_storage_object_org('org//x') IS NULL,
   :'legacy_map');
 
-SELECT test.check('t14/078: policies - 4, all TO authenticated; INSERT path-scoped; read/update/delete path-first with the 071 uploader fallback',
+SELECT CASE WHEN test.m084() THEN
+  test.check('t14/084: policies - 2 (read, delete), all TO authenticated, path-first with the 071 uploader fallback; no INSERT / UPDATE policy',
+    (SELECT count(*) FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects') = 2
+    AND (SELECT bool_and(roles = '{authenticated}') FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects')
+    AND NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects' AND cmd IN ('INSERT', 'UPDATE', 'ALL'))
+    AND (SELECT count(*) FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects'
+          AND qual LIKE '%app_storage_object_in_my_org(name)%' AND qual LIKE '%app_storage_owner_in_org%') = 2)
+ELSE test.check('t14/078: policies - 4, all TO authenticated; INSERT path-scoped; read/update/delete path-first with the 071 uploader fallback',
   (SELECT count(*) FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects') = 4
   AND (SELECT bool_and(roles = '{authenticated}') FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects')
   AND (SELECT with_check LIKE '%app_storage_can_write_path(name)%' FROM pg_policies WHERE schemaname = 'storage' AND policyname = 'product_images_insert')
   AND (SELECT count(*) FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects'
         AND qual LIKE '%app_storage_object_in_my_org(name)%' AND qual LIKE '%app_storage_owner_in_org%') = 3
-  AND (SELECT with_check LIKE '%app_storage_object_in_my_org(name)%' FROM pg_policies WHERE schemaname = 'storage' AND policyname = 'product_images_update'));
+  AND (SELECT with_check LIKE '%app_storage_object_in_my_org(name)%' FROM pg_policies WHERE schemaname = 'storage' AND policyname = 'product_images_update')) END;
 SELECT test.check('t14/078: helper grants - path->org resolver is service_role only; the boolean helpers are not anon',
   NOT has_function_privilege('authenticated', 'public.app_storage_object_org(text)', 'EXECUTE')
   AND NOT has_function_privilege('anon', 'public.app_storage_object_org(text)', 'EXECUTE')
@@ -95,8 +102,8 @@ SELECT test.check('t14/078 legacy: org-test ADMIN lists its own owner-less legac
   (SELECT count(*) FROM storage.objects WHERE name IN ('temp/pimg-legacya1', 'products/prod-1/1700000000000.webp', 'products/brand/1700000000001.webp')) = 3);
 SELECT test.check('t14/078 legacy: org-test ADMIN does not see org-two''s legacy object nor the unresolvable orphan',
   (SELECT count(*) FROM storage.objects WHERE name IN ('temp/pimg-legacyx1', 'products/prod-ghost/1700000000002.webp')) = 0);
-SELECT test.check('t14/078 legacy: org-test ADMIN can update (replace metadata of) its legacy objects; org-two''s: 0 rows',
-  test.affected($q$UPDATE storage.objects SET metadata = '{"t14":"a"}' WHERE name IN ('temp/pimg-legacya1', 'products/prod-1/1700000000000.webp', 'products/brand/1700000000001.webp')$q$) = 3
+SELECT test.check('t14/078 legacy: org-test ADMIN can update (replace metadata of) its legacy objects (084: no staff UPDATE at all -> 0); org-two''s: 0 rows',
+  test.affected($q$UPDATE storage.objects SET metadata = '{"t14":"a"}' WHERE name IN ('temp/pimg-legacya1', 'products/prod-1/1700000000000.webp', 'products/brand/1700000000001.webp')$q$) = CASE WHEN test.m084() THEN 0 ELSE 3 END
   AND test.affected($q$UPDATE storage.objects SET metadata = '{"pwned":true}' WHERE name = 'temp/pimg-legacyx1'$q$) = 0);
 SELECT test.check('t14/078 legacy: org-test ADMIN cannot delete org-two''s legacy object',
   test.affected($q$DELETE FROM storage.objects WHERE name = 'temp/pimg-legacyx1'$q$) = 0);
@@ -108,7 +115,7 @@ SET ROLE authenticated;
 SELECT test.check('t14/078 legacy: org-two ADMIN sees and manages its own legacy object, none of org-test''s',
   (SELECT count(*) FROM storage.objects WHERE name = 'temp/pimg-legacyx1') = 1
   AND (SELECT count(*) FROM storage.objects WHERE name IN ('temp/pimg-legacya1', 'products/brand/1700000000001.webp')) = 0
-  AND test.affected($q$UPDATE storage.objects SET metadata = '{"t14":"x"}' WHERE name = 'temp/pimg-legacyx1'$q$) = 1
+  AND test.affected($q$UPDATE storage.objects SET metadata = '{"t14":"x"}' WHERE name = 'temp/pimg-legacyx1'$q$) = CASE WHEN test.m084() THEN 0 ELSE 1 END
   AND test.affected($q$DELETE FROM storage.objects WHERE name IN ('temp/pimg-legacya1', 'products/brand/1700000000001.webp')$q$) = 0);
 RESET ROLE;
 SELECT test.login(:'CA1') AS zz \gset
@@ -151,34 +158,54 @@ SELECT test.check('t14/078: malformed / unknown paths are refused (no prefix esc
   AND NOT test.can_insert_object('org/org-test/temp/pimg-nosuchsession', :'AA')
   AND NOT test.can_insert_object('random/x.webp', :'AA')
   AND NOT test.can_insert_object('x.webp', :'AA'));
-SELECT test.check('t14/078: own-org uploads work - existing product, new (unsaved) product id, logo, and the legacy layout for old clients',
+SELECT CASE WHEN test.m084() THEN
+  test.check('t14/084: own-org DIRECT uploads are refused too - existing product, new product id, logo, legacy layout (only signed upload URLs write)',
+    NOT test.upload_object('org/org-test/products/prod-1/1800000000000.webp', :'AA')
+    AND NOT test.upload_object('org/org-test/products/prod-unsaved-1/1800000000001.webp', :'AA')
+    AND NOT test.upload_object('org/org-test/products/brand/1800000000002.webp', :'AA')
+    AND NOT test.can_insert_object('products/prod-1/1800000000003.webp', :'AA')
+    AND NOT test.can_insert_object('products/prod-unsaved-2/1800000000004.webp', :'AA'))
+ELSE test.check('t14/078: own-org uploads work - existing product, new (unsaved) product id, logo, and the legacy layout for old clients',
   test.upload_object('org/org-test/products/prod-1/1800000000000.webp', :'AA')
   AND test.upload_object('org/org-test/products/prod-unsaved-1/1800000000001.webp', :'AA')
   AND test.upload_object('org/org-test/products/brand/1800000000002.webp', :'AA')
   AND test.can_insert_object('products/prod-1/1800000000003.webp', :'AA')
-  AND test.can_insert_object('products/prod-unsaved-2/1800000000004.webp', :'AA'));
+  AND test.can_insert_object('products/prod-unsaved-2/1800000000004.webp', :'AA')) END;
 RESET ROLE;
 SELECT test.login(:'CA1') AS zz \gset
 SET ROLE authenticated;
 SELECT test.check('t14/078: a CASHIER cannot upload even under its own org prefix (permission unchanged since 016)',
   NOT test.can_insert_object('org/org-test/products/prod-1/1800000000009.webp', :'CA1'));
 RESET ROLE;
+-- 084: staff cannot write at all; the org-two object the move tests need is
+-- created the way storage-api writes a signed upload (superuser)
+INSERT INTO storage.objects (bucket_id, name, owner, owner_id)
+SELECT 'product-images', 'org/org-two/products/prod-x1/1800000000005.webp', :'AX', :'AX' WHERE test.m084();
 SELECT test.login(:'AX') AS zz \gset
 SET ROLE authenticated;
 SELECT test.check('t14/078: org-two ADMIN cannot see, overwrite or delete org-test''s org/ objects',
   (SELECT count(*) FROM storage.objects WHERE name LIKE 'org/org-test/%') = 0
   AND test.affected($q$UPDATE storage.objects SET metadata = '{"pwned":true}' WHERE name LIKE 'org/org-test/%'$q$) = 0
   AND test.affected($q$DELETE FROM storage.objects WHERE name LIKE 'org/org-test/%'$q$) = 0);
-SELECT test.upload_object('org/org-two/products/prod-x1/1800000000005.webp', :'AX') AS ax_up \gset
-SELECT test.expect_error('t14/078: org-two ADMIN cannot MOVE its object into org-test''s prefix (UPDATE ... SET name, WITH CHECK)',
+SELECT CASE WHEN test.m084() THEN NOT test.upload_object('org/org-two/products/prod-x1/1800000000006.webp', :'AX')
+            ELSE test.upload_object('org/org-two/products/prod-x1/1800000000005.webp', :'AX') END AS ax_up \gset
+-- 078: the move is refused by UPDATE's WITH CHECK (error); 084: there is no
+-- UPDATE policy, so the UPDATE matches no row at all
+SELECT CASE WHEN test.m084() THEN
+  test.check('t14/084: org-two ADMIN cannot MOVE its object into org-test''s prefix (no UPDATE policy: 0 rows)',
+    test.affected($q$UPDATE storage.objects SET name = 'org/org-test/products/prod-1/stolen.webp' WHERE name = 'org/org-two/products/prod-x1/1800000000005.webp'$q$) = 0)
+ELSE test.expect_error('t14/078: org-two ADMIN cannot MOVE its object into org-test''s prefix (UPDATE ... SET name, WITH CHECK)',
   $q$UPDATE storage.objects SET name = 'org/org-test/products/prod-1/stolen.webp' WHERE name = 'org/org-two/products/prod-x1/1800000000005.webp'$q$,
-  'row-level security');
-SELECT test.expect_error('t14/078: ... nor into org-test''s legacy product folder',
+  'row-level security') END;
+SELECT CASE WHEN test.m084() THEN
+  test.check('t14/084: ... nor into org-test''s legacy product folder (0 rows)',
+    test.affected($q$UPDATE storage.objects SET name = 'products/prod-1/stolen.webp' WHERE name = 'org/org-two/products/prod-x1/1800000000005.webp'$q$) = 0)
+ELSE test.expect_error('t14/078: ... nor into org-test''s legacy product folder',
   $q$UPDATE storage.objects SET name = 'products/prod-1/stolen.webp' WHERE name = 'org/org-two/products/prod-x1/1800000000005.webp'$q$,
-  'row-level security');
+  'row-level security') END;
 RESET ROLE;
 SELECT test.logout() AS zz \gset
-SELECT test.check('t14/078: org-two''s own upload landed (control)', :'ax_up'::boolean
+SELECT test.check('t14/078: org-two''s own upload landed (control; 084: its direct upload is refused, the object exists via the signed-upload path)', :'ax_up'::boolean
   AND (SELECT count(*) FROM storage.objects WHERE name = 'org/org-two/products/prod-x1/1800000000005.webp') = 1);
 SET ROLE anon;
 SELECT test.check('t14/078: anon lists 0 objects and cannot insert any',
@@ -204,8 +231,11 @@ SELECT test.check('t14/079: the server mints org/<org>/temp/<sessionId>; the ret
 
 -- signing (createSignedUploadUrl) is an INSERT RLS check as the desktop user
 SET ROLE authenticated;
-SELECT test.check('t14/078+079: the creating desktop user may sign its live session path',
-  test.can_insert_object(:'ok1'::jsonb->>'storagePath', :'AA'));
+SELECT CASE WHEN test.m084() THEN
+  test.check('t14/084: not even the creating desktop user may write its live session path directly (only phone-upload-token signs it, as service_role)',
+    NOT test.can_insert_object(:'ok1'::jsonb->>'storagePath', :'AA'))
+ELSE test.check('t14/078+079: the creating desktop user may sign its live session path',
+  test.can_insert_object(:'ok1'::jsonb->>'storagePath', :'AA')) END;
 RESET ROLE;
 SELECT test.login(:'MA') AS zz \gset
 SET ROLE authenticated;
@@ -254,7 +284,7 @@ SELECT test.check('t14/079: active session end to end - attach, by-token (upload
   AND :'st1'::jsonb->>'status' = 'COMPLETED' AND :'st1'::jsonb->>'publicUrl' = :'PUB' || (:'ok1'::jsonb->>'storagePath'));
 SELECT test.check('t14/078: the phone-uploaded object is listable and manageable by its org (path org/org-test/temp/...)',
   (SELECT count(*) FROM storage.objects WHERE name = :'ok1'::jsonb->>'storagePath') = 1
-  AND test.affected(format($q$UPDATE storage.objects SET metadata = '{"t14":"ok"}' WHERE name = %L$q$, :'ok1'::jsonb->>'storagePath')) = 1);
+  AND test.affected(format($q$UPDATE storage.objects SET metadata = '{"t14":"ok"}' WHERE name = %L$q$, :'ok1'::jsonb->>'storagePath')) = CASE WHEN test.m084() THEN 0 ELSE 1 END);
 SELECT test.check('t14/078: a COMPLETED session''s path can no longer be signed (no second token)',
   NOT test.can_insert_object(:'ok1'::jsonb->>'storagePath', :'AA'));
 RESET ROLE;
@@ -318,8 +348,11 @@ SELECT test.check('t14/079: expired / cancelled sessions never reached COMPLETED
 INSERT INTO product_image_upload_sessions (id, token_hash, created_by, shop_id, product_id, storage_path, status, expires_at)
 VALUES ('pimg-legacypend', md5('t14-legacy-pend'), 'u-admin', 'shop-a', 'prod-1', 'temp/pimg-legacypend', 'PENDING', now() + interval '5 minutes');
 SET ROLE authenticated;
-SELECT test.check('t14/078 compat: a session created before 079 (temp/<id>) can still be signed by its creator',
-  test.can_insert_object('temp/pimg-legacypend', :'AA'));
+SELECT CASE WHEN test.m084() THEN
+  test.check('t14/084 compat: a session created before 079 (temp/<id>) can no longer be signed by the desktop user (old builds: update before 084)',
+    NOT test.can_insert_object('temp/pimg-legacypend', :'AA'))
+ELSE test.check('t14/078 compat: a session created before 079 (temp/<id>) can still be signed by its creator',
+  test.can_insert_object('temp/pimg-legacypend', :'AA')) END;
 RESET ROLE;
 SELECT test.login(:'AX') AS zz \gset
 SET ROLE authenticated;

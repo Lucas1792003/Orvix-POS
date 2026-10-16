@@ -761,3 +761,100 @@ test("phone-upload-token 083: unknown action -> 400 bad_request; wrong token for
     assert(!touchedStorage(world));
   });
 });
+
+// ---------------------------------------------------------------- G5 follow-up: the desktop uses the same flow
+// docs/selfhost-migration/phase-f/g5-followups.md §1. The desktop creates the
+// session with its own JWT (the server derives org, path, product and shop),
+// then calls this function exactly like the phone page. Nothing in the
+// request besides the session token may influence what is signed, validated
+// or completed.
+
+const desktopReq = (body: unknown) =>
+  new Request("http://functions.local/phone-upload-token", {
+    method: "POST",
+    // a signed-in desktop sends its user JWT; the function must not trust it for anything
+    headers: { "Content-Type": "application/json", Authorization: "Bearer user-jwt-claiming-org-b", apikey: "anon-key-jwt", "x-org-id": OTHER_ORG },
+    body: JSON.stringify(body),
+  });
+
+test("phone-upload-token G5 desktop: a logo session (no product, no shop) gets a token for its own path and completes with a valid WebP", async () => {
+  await run(async (world) => {
+    const handler = await seed(world, { product_id: null, shop_id: null });
+    const rpcCalls = withCompleteRpc(world);
+    const tok = await readJson(await handler(desktopReq({ token: QR_TOKEN })));
+    assertEquals(tok.status, 200);
+    assertEquals(tok.body.path, PATH);
+    world.storage.put(KEY, webp(), "image/webp");
+    const done = await readJson(await handler(desktopReq({ token: QR_TOKEN, action: "complete" })));
+    assertEquals(done.status, 200);
+    assertEquals(done.body.status, "COMPLETED");
+    assertEquals(done.body.publicUrl, `https://pos.test/storage/v1/object/public/product-images/${PATH}`);
+    assertEquals(rpcCalls.length, 1);
+    // no product / shop lookups for a session without them
+    assert(!world.trace().includes("db:GET products"));
+    assert(!world.trace().includes("db:GET shops"));
+  });
+});
+
+test("phone-upload-token G5 desktop: client-supplied path / org / URL / size / type fields are ignored for the token and the completion", async () => {
+  await run(async (world) => {
+    const handler = await seed(world);
+    const rpcCalls = withCompleteRpc(world);
+    const forged = {
+      token: QR_TOKEN,
+      path: `org/${OTHER_ORG}/products/prod-b/evil.jpg`,
+      storagePath: `org/${OTHER_ORG}/temp/pimg-other`,
+      orgId: OTHER_ORG,
+      publicUrl: "https://evil.example/storage/v1/object/public/product-images/x",
+      bytes: 1,
+      mimeType: "image/png",
+    };
+    const tok = await readJson(await handler(desktopReq(forged)));
+    assertEquals(tok.status, 200);
+    assertEquals(tok.body.path, PATH);
+    const bytes = jpeg();
+    world.storage.put(KEY, bytes, "image/jpeg");
+    const done = await readJson(await handler(desktopReq({ ...forged, action: "complete" })));
+    assertEquals(done.status, 200);
+    assertEquals(rpcCalls.length, 1);
+    assertEquals(rpcCalls[0].p_storage_path, PATH);
+    assertEquals(rpcCalls[0].p_bytes, bytes.length);
+    assertEquals(rpcCalls[0].p_mime_type, "image/jpeg");
+    assertEquals(new URL(String(rpcCalls[0].p_public_url)).pathname, `/storage/v1/object/public/product-images/${PATH}`);
+    assert(!String(rpcCalls[0].p_public_url).includes("evil.example"));
+  });
+});
+
+test("phone-upload-token G5 desktop: a polyglot uploaded by the desktop is refused and deleted exactly like a phone upload", async () => {
+  await run(async (world) => {
+    const handler = await seed(world);
+    const rpcCalls = withCompleteRpc(world);
+    world.storage.put(KEY, bytesOf([0xff, 0xd8, 0xff, 0xe0], "<html><script>alert(1)</script></html>", [0xff, 0xd9]), "image/jpeg");
+    const res = await readJson(await handler(desktopReq({ token: QR_TOKEN, action: "complete" })));
+    assertEquals(res.status, 422);
+    assertEquals(res.body.code, "invalid_image");
+    assertEquals(world.storage.deleted, [KEY]);
+    assertEquals(rpcCalls.length, 0);
+    assertEquals(world.db.tables.product_image_upload_sessions[0].status, "PENDING");
+  });
+});
+
+test("phone-upload-token G5 desktop: completion is refused before storage is read when the creator was deactivated or the product moved to another org", async () => {
+  const cases: [string, (w: World) => void][] = [
+    ["creator deactivated", (w) => { w.db.tables.users[0].is_active = false; }],
+    ["creator moved to another org", (w) => { w.db.tables.users[0].org_id = OTHER_ORG; }],
+    ["product now of another org", (w) => { w.db.tables.products[0].org_id = OTHER_ORG; }],
+  ];
+  for (const [label, mutate] of cases) {
+    await run(async (world) => {
+      const handler = await seed(world);
+      const rpcCalls = withCompleteRpc(world);
+      world.storage.put(KEY, jpeg(), "image/jpeg");
+      mutate(world);
+      const res = await readJson(await handler(desktopReq({ token: QR_TOKEN, action: "complete" })));
+      assertEquals(res.status, 403, label);
+      assertEquals(rpcCalls.length, 0, label);
+      assert(!touchedStorage(world), `${label}: storage must not be touched`);
+    });
+  }
+});

@@ -1,7 +1,6 @@
 import { useCallback, useRef, useState, type ChangeEvent } from "react";
 import { compressProductImage, formatImageSize } from "../../lib/compressProductImage";
 import { uploadProductImage } from "../../lib/productImageStorage";
-import { useAuthStore } from "../../stores/authStore";
 import { ProductImagePhoneUploadModal } from "./ProductImagePhoneUploadModal";
 
 interface ProductImageInputProps {
@@ -20,8 +19,9 @@ type Phase = "compressing" | "uploading" | null;
 
 /**
  * Product image picker. A selected image is resized + compressed to under
- * 100 KB (`compressProductImage`), uploaded to Supabase Storage
- * (`uploadProductImage`), and only the resulting public URL is handed back via
+ * 100 KB (`compressProductImage`), uploaded through the server-validated
+ * session flow (`uploadProductImage`: the server checks the bytes and derives
+ * the URL), and only that server-derived public URL is handed back via
  * `onChange`. No base64 data URL is ever stored on the product row.
  */
 export const ProductImageInput = ({ productId, shopId, value, onChange, disabled }: ProductImageInputProps) => {
@@ -30,8 +30,6 @@ export const ProductImageInput = ({ productId, shopId, value, onChange, disabled
   const [error, setError] = useState<string | null>(null);
   const [compressedBytes, setCompressedBytes] = useState<number | null>(null);
   const [phoneUploadOpen, setPhoneUploadOpen] = useState(false);
-  // Storage paths are organization-scoped (migration 078).
-  const orgId = useAuthStore((state) => state.currentOrgId);
 
   const busy = phase !== null;
 
@@ -42,8 +40,10 @@ export const ProductImageInput = ({ productId, shopId, value, onChange, disabled
       const image = await compressProductImage(file);
       setCompressedBytes(image.bytes);
       setPhase("uploading");
-      const url = await uploadProductImage(productId, image, orgId);
-      // Only the uploaded Storage URL reaches the product row.
+      // G5: the server validates the stored bytes and derives the URL; the
+      // organization and the object path are decided server-side.
+      const url = await uploadProductImage(productId, image, { shopId });
+      // Only the server-derived Storage URL reaches the product row.
       onChange(url);
     } catch (e) {
       setError(e instanceof Error ? e.message : "The image could not be processed.");

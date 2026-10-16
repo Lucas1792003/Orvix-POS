@@ -451,7 +451,7 @@ SELECT CASE WHEN test.col_exists('products', 'org_id')
 SELECT test.finding('rbac_assignment_violations runs with security_invoker',
   EXISTS (SELECT 1 FROM pg_class c, unnest(c.reloptions) o WHERE c.relname = 'rbac_assignment_violations' AND o IN ('security_invoker=on', 'security_invoker=true')));
 SELECT test.finding('storage.objects: read/update/delete policies are org-aware',
-  (SELECT count(*) FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects' AND qual LIKE '%app_storage_owner_in_org%') = 3);
+  (SELECT count(*) FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects' AND qual LIKE '%app_storage_owner_in_org%') = CASE WHEN test.m084() THEN 2 ELSE 3 END);  -- 084: the update policy is gone (read + delete stay)
 SELECT test.finding('business_profile is keyed per organization',
   EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
            WHERE c.conrelid = 'business_profile'::regclass AND c.contype = 'p' AND a.attname = 'org_id'));
