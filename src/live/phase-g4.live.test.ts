@@ -614,7 +614,9 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
         expectNothingLeft(s, k.what); // the function DELETED the refused object
         // the RPC as its only caller would also not complete it now: the object is gone
         const r = await complete(s, { p_bytes: k.body.length, p_mime_type: k.type });
-        expect(r.error?.message, k.what).toBe(NOT_FOUND);
+        // refused either because the object is gone or (claimed size > 100 KB) by the RPC's own size check first
+        expect(r.error, `${k.what}: the RPC must refuse`).not.toBeNull();
+        expect(r.error?.message === NOT_FOUND || /^Uploaded image must be 100 KB or smaller/.test(r.error?.message ?? ""), `${k.what}: ${r.error?.message}`).toBe(true);
         expectNothingLeft(s, `${k.what} (after RPC)`);
         notes.push(`${k.what}: PUT 200 (stored ${stored}) -> function 422 invalid_image, object deleted, PENDING`);
         if (!recovered) {

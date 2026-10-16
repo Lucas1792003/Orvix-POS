@@ -138,7 +138,7 @@ test("G-desktop-polyglot [083]: the desktop module refuses a polyglot: 422, obje
   });
   test.skip(out === "module-unavailable", "packaged build: source modules are not importable from the renderer (covered by the audit suite on the disposable stack)");
   expect(out).toMatch(/^rejected:Image upload failed: The uploaded file is not a valid JPEG or WebP photo/);
-  const last = sql1(`SELECT id || '|' || status || '|' || storage_path FROM product_image_upload_sessions s JOIN users u ON u.id = s.created_by WHERE u.org_id = '${ids.org}' ORDER BY s.created_at DESC LIMIT 1;`).split("|");
+  const last = sql1(`SELECT s.id || '|' || s.status || '|' || s.storage_path FROM product_image_upload_sessions s JOIN users u ON u.id = s.created_by WHERE u.org_id = '${ids.org}' ORDER BY s.created_at DESC LIMIT 1;`).split("|");
   expect(last[1]).toBe("CANCELED");
   expect(sql1(`SELECT count(*) FROM storage.objects WHERE bucket_id = '${BUCKET}' AND name = '${last[2]}';`)).toBe("0");
   record("desktop-upload", "G-desktop-polyglot [083]", "PASS", "polyglot -> 422 invalid_image (function), object deleted, session CANCELED by the desktop");
