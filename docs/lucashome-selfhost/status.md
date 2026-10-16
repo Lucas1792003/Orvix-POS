@@ -1,5 +1,7 @@
 # lucashome — status
 
+> 2026-10-16 10:37 UTC: Studio isolated (404 on the shared origin; admin only via `ssh -N -L 127.0.0.1:54323:127.0.0.1:54323 lucashome`); gateway access log records paths without query strings (no tokens/e-mail filters). Evidence [G12](../selfhost-migration/evidence/G12/2026-10-16-gateway-logging-studio-isolation.md).
+
 Last verified **2026-10-16 ~07:55 UTC** (085 deployment) unless stated otherwise. Master list of what still blocks production: [`../selfhost-migration/phase-f/production-readiness-checklist.md`](../selfhost-migration/phase-f/production-readiness-checklist.md).
 
 **One line (2026-10-16):** schema **085** (084 deliberately not applied), 10/10 containers healthy, 6 edge functions, sign-up closed, 0 real sales, all backups still on one disk (email tier installed disabled). Not in production use: no till runs a self-host build yet ([`../desktop-app/status.md`](../desktop-app/status.md)).

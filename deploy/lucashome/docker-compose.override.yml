@@ -80,3 +80,7 @@ services:
   studio:
     mem_limit: 512m
     logging: *default-logging
+    # phf-studio-loopback: Studio only on the server's loopback; reach it with
+    #   ssh -N -L 127.0.0.1:54323:127.0.0.1:54323 <host>  (never 0.0.0.0 / a tailnet address)
+    ports:
+      - "127.0.0.1:54323:3000/tcp"
