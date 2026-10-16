@@ -53,6 +53,7 @@ import { DEV_SERVER_URL, liveCfg, qaPassword, qaState, qaTotpSecret, RESULTS_DIR
 import { record } from "./helpers/evidence";
 import { assertConsistency } from "./helpers/consistency";
 import { Terminal } from "./helpers/terminal";
+import { HTML_DOC, JPEG_HTML_POLYGLOT, SVG_DOC, TINY_WEBP } from "../src/live/imageFixtures";
 
 test.describe.configure({ mode: "serial" });
 
@@ -71,8 +72,8 @@ const PAGE_MODE = (process.env.E2E_PHONE_PAGE ?? "deployed").trim();
 if (PAGE_MODE !== "deployed" && PAGE_MODE !== "local") throw new Error(`E2E_PHONE_PAGE must be "deployed" or "local", got "${PAGE_MODE}"`);
 const MODES = `fn ${FN_MODE}, page ${PAGE_MODE}`;
 const QA_OBJECT = new RegExp(`^org/${ids.org}/temp/pimg-[0-9a-f]+$`);
-// Tiny lossless WebP (34 bytes) for the programmatic race (same constant as phase-g3).
-const TINY_WEBP_B64 = "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
+// Tiny lossless WebP (34 bytes) for the programmatic race (src/live/imageFixtures.ts; passes 083's byte check).
+const TINY_WEBP_B64 = TINY_WEBP.toString("base64");
 
 const PHONE_READY = "Choose or take a product photo.";
 const PHONE_DONE = "Photo uploaded. You can return to the computer.";
@@ -387,7 +388,7 @@ test.beforeAll(async () => {
   record("phone-upload", "storage baseline", "INFO", `${storageBefore}; ${orphansBefore}`);
 
   schemaVersion = sql1(`SELECT max(version) FROM supabase_migrations.schema_migrations;`);
-  record("phone-upload", "schema", "INFO", `schema ${schemaVersion}; 081 rate-limit cases ${schemaVersion >= "081" ? "RUN" : "SKIPPED (not deployed)"}`);
+  record("phone-upload", "schema", "INFO", `schema ${schemaVersion}; 081 rate-limit cases ${schemaVersion >= "081" ? "RUN" : "SKIPPED (not deployed)"}; 083 G5 cases ${schemaVersion >= "083" ? "RUN (completion through the function only)" : "SKIPPED (not deployed)"}`);
   trustedBase = sql1(`SELECT value FROM public.app_config WHERE key = 'supabase_public_url';`);
   expect(trustedBase, "080 app_config.supabase_public_url must be set").toMatch(/^https:\/\/[a-z0-9.-]+(:\d+)?$/);
   expect(trustedBase, "the stack's trusted origin is the origin the apps are built for").toBe(cfg.url);
@@ -807,16 +808,22 @@ test("D-g5-html-as-jpeg [083]: HTML bytes declared image/jpeg are stored by the 
   const { P, fnCalls, puts, completes } = await launchPhone();
   try {
     await phoneOpens(P, s);
-    const html = Buffer.from("<!doctype html><html><body><script>document.title='qa-g5'</script></body></html>").toString("base64");
-    const polyglot = Buffer.concat([Buffer.from("ffd8ffe0", "hex"), Buffer.from("<html><script>document.title='qa-g5'</script></html>"), Buffer.from("ffd9", "hex")]).toString("base64");
-    for (const [label, b64] of [["html", html], ["polyglot", polyglot]] as const) {
-      const out = await pageUpload(P, b64, "image/jpeg");
+    // shared with the live suites (src/live/imageFixtures.ts; each proven against imageCheck.ts by imageFixtures.test.ts)
+    const cases = [
+      ["html", HTML_DOC],
+      ["jpeg+html polyglot", JPEG_HTML_POLYGLOT],
+      ["webp bytes declared jpeg", TINY_WEBP],
+    ] as const;
+    for (const [label, bytes] of cases) {
+      const out = await pageUpload(P, bytes.toString("base64"), "image/jpeg");
       expect(out, label).toBe(`rejected:${G5_REFUSED}`);
       expect(objectsUnder(s), `${label}: the function deleted the refused object`).toBe(0);
       expect(sessionRow(s.sessionId).split("|")[0], label).toBe("PENDING");
     }
-    expect(puts.map((p) => p.status)).toEqual([200, 200]);
-    expect(completes.map((c) => c.status)).toEqual([422, 422]);
+    // the deployed-mode ledger is fed from response events: wait until every answer is in
+    await expect.poll(() => completes.length, { timeout: 10_000 }).toBe(cases.length);
+    expect(puts.map((p) => p.status)).toEqual(cases.map(() => 200));
+    expect(completes.map((c) => c.status)).toEqual(cases.map(() => 422));
     expect(completes.every((c) => (c.text ?? "").includes('"invalid_image"'))).toBe(true);
     // the same QR still works with a real photo through the UI
     await phonePicks(P);
@@ -824,8 +831,9 @@ test("D-g5-html-as-jpeg [083]: HTML bytes declared image/jpeg are stored by the 
     await desktopShowsImage(s);
     const db = await assertCompletedOnce(s);
     const img = await saveProductAndCheckImageUrl(s);
-    expect(completes.map((c) => c.status)).toEqual([422, 422, 200]);
-    record("phone-upload", "D-g5-html-as-jpeg [083]", "PASS", `[${MODES}] HTML and JPEG-header+HTML declared image/jpeg: PUT 200 (bucket checks the declared type) -> complete 422 invalid_image, object deleted, session PENDING; then a real photo: tokens=${fnCalls.length}, complete 200; ${db}; ${img}`);
+    await expect.poll(() => completes.length, { timeout: 10_000 }).toBe(cases.length + 1);
+    expect(completes.map((c) => c.status)).toEqual([...cases.map(() => 422), 200]);
+    record("phone-upload", "D-g5-html-as-jpeg [083]", "PASS", `[${MODES}] ${cases.map(([l]) => l).join(", ")} declared image/jpeg: PUT 200 (bucket checks the declared type) -> complete 422 invalid_image, object deleted, session PENDING; then a real photo: tokens=${fnCalls.length}, complete 200; ${db}; ${img}`);
   } finally {
     await P.close();
   }
@@ -838,7 +846,7 @@ test("D-g5-declared-types [083]: text/html, image/svg+xml and application/octet-
   const { P, puts, completes } = await launchPhone();
   try {
     await phoneOpens(P, s);
-    const body = Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'><script>1</script></svg>").toString("base64");
+    const body = SVG_DOC.toString("base64");
     const outs: string[] = [];
     for (const type of ["text/html", "image/svg+xml", "application/octet-stream"]) outs.push(await pageUpload(P, body, type));
     for (const o of outs) expect(o).toMatch(/^rejected:Image upload failed/);

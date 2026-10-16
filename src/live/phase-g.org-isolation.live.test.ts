@@ -36,14 +36,15 @@ import {
   Evidence, liveConfig, makeClient, randomPassword, runSql, runSqlFile, createAuthUser, signedInClient,
   sleep, uuid, waitFor, type LiveConfig,
 } from "./liveHelpers";
+// 34-byte lossless 1x1 WebP: a real image, within 083's bucket and completion limits.
+import { TINY_WEBP } from "./imageFixtures";
+import { completeThroughFunction, isPost083, schemaVersion } from "./phoneCompletion";
 
 const LIVE = Boolean(process.env.LIVE_SUPABASE_URL);
 vi.setConfig({ testTimeout: 600_000, hookTimeout: 600_000 });
 
 const SEED_SQL = new URL("../../supabase/tests/phase-d/live/seed.sql", import.meta.url).pathname;
 const BUCKET = "product-images";
-// 1x1 lossless WebP (26 bytes): a real image, well under the bucket limits.
-const TINY_WEBP = Buffer.from("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==", "base64");
 const NOT_IN_ORG = /not found in your organization/i;
 const DENIED = /not found in your organization|not permitted|permission denied|row-level security|not authorized/i;
 
@@ -1035,14 +1036,25 @@ ROLLBACK;`).trim().split("\n").filter((l) => /^\d+\/\d+$/.test(l))[0];
   });
 
   // =========================================================================
-  it("10. anonymous: only app_setup_needed + the two phone-upload RPCs; every table read empty or denied", async () => {
+  it("10. anonymous: only app_setup_needed + the phone-upload RPCs (two < 083, one >= 083); every table read empty or denied", async () => {
+    // 083 (G5): complete_product_image_upload_session is service_role only; the
+    // phone completes through phone-upload-token {action:"complete"}.
+    const post083 = isPost083(schemaVersion(cfg));
     const granted = runSql(cfg, `SELECT string_agg(p.proname, ',' ORDER BY p.proname) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND has_function_privilege('anon', p.oid, 'EXECUTE');`).trim();
-    expect(granted).toBe("app_setup_needed,complete_product_image_upload_session,get_product_image_upload_session_by_token");
-    const allowed = [
+    expect(granted).toBe(post083 ? "app_setup_needed,get_product_image_upload_session_by_token" : "app_setup_needed,complete_product_image_upload_session,get_product_image_upload_session_by_token");
+    const completeArgs = { p_token: "0".repeat(128), p_storage_path: "temp/x", p_public_url: `${cfg.url}/x`, p_bytes: 1, p_mime_type: "image/webp" };
+    const allowed: [string, Record<string, unknown>][] = [
       ["app_setup_needed", {}],
       ["get_product_image_upload_session_by_token", { p_token: "0".repeat(128) }],
-      ["complete_product_image_upload_session", { p_token: "0".repeat(128), p_storage_path: "temp/x", p_public_url: `${cfg.url}/x`, p_bytes: 1, p_mime_type: "image/webp" }],
-    ] as const;
+      ...(post083 ? [] : [["complete_product_image_upload_session", completeArgs] as [string, Record<string, unknown>]]),
+    ];
+    let fnNote = "";
+    if (post083) {
+      const fn = await completeThroughFunction(cfg, "0".repeat(128));
+      expect(fn.httpStatus).toBe(404);
+      expect(fn.code).toBe("invalid");
+      fnNote = `; phone-upload-token {action:"complete"} with an unknown token -> ${fn.httpStatus} ${fn.code}`;
+    }
     const allowedOut: string[] = [];
     for (const [fn, args] of allowed) {
       const r = await rpc(anon, fn, args as Record<string, unknown>);
@@ -1063,6 +1075,7 @@ ROLLBACK;`).trim().split("\n").filter((l) => /^\d+\/\d+$/.test(l))[0];
       app_require_org: { p_kind: "shop", p_id: B.shop },
       role_default_permissions: { p_role: "ADMIN" },
       bootstrap_first_admin: {}, // 076: authenticated + service_role only
+      ...(post083 ? { complete_product_image_upload_session: completeArgs } : {}), // 083: service_role only
     };
     const codes: string[] = [];
     for (const [fn, args] of Object.entries(sample)) {
@@ -1081,6 +1094,6 @@ ROLLBACK;`).trim().split("\n").filter((l) => /^\d+\/\d+$/.test(l))[0];
     const anonIns = await anon.from("organizations").insert({ id: `qa-org-anon-${ts}`, name: "QA Anon Org" });
     expect(anonIns.error).not.toBeNull();
     expect(await svcCount("users", (q) => q.eq("id", "qa-user-anon"))).toBe(0);
-    ev.pass("10 anonymous surface", `anon EXECUTE (pg_proc) = {${granted}}; allowed calls: ${allowedOut.join(" ")}; denied: ${codes.join(" ")}; table reads: ${reads.join(" ")}; anon organizations insert -> ${anonIns.error?.code}`);
+    ev.pass("10 anonymous surface", `anon EXECUTE (pg_proc) = {${granted}}; allowed calls: ${allowedOut.join(" ")}${fnNote}; denied: ${codes.join(" ")}; table reads: ${reads.join(" ")}; anon organizations insert -> ${anonIns.error?.code}`);
   });
 });

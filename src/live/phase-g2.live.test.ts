@@ -22,6 +22,10 @@
 //                             the only way to create an organization)
 // Since 080 one storage object is uploaded (075 check, session 3: completion
 // requires the object); it is removed again through the Storage API.
+// Since 083 (G5) the phone completes through phone-upload-token
+// {action:"complete"} and anon / authenticated get 42501 from the RPC; the
+// 075 checks run against whichever completion path the schema has
+// (src/live/phoneCompletion.ts).
 // ---------------------------------------------------------------------------
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -33,11 +37,15 @@ import {
 const LIVE = Boolean(process.env.LIVE_SUPABASE_URL);
 vi.setConfig({ testTimeout: 300_000, hookTimeout: 300_000 });
 
+// 34-byte lossless WebP: 080 completes only an existing object; 083's function check accepts it.
+import { TINY_WEBP } from "./imageFixtures";
+import {
+  completeThroughRpc, describeCompletion, exactRpcArgs, isInactive, isNotUploaded, isPermissionDenied, isPost083,
+  phoneCompleter, schemaVersion, type PhoneCompletion,
+} from "./phoneCompletion";
+
 const SEED_SQL = new URL("../../supabase/tests/phase-d/live/seed.sql", import.meta.url).pathname;
 const REAL_ORG = "org-shwe-pha-lar";
-const INACTIVE = "Upload link is no longer active";
-// 34-byte lossless WebP (same constant as phase-g3/g4): 080 completes only an existing object.
-const TINY_WEBP = Buffer.from("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==", "base64");
 
 type Rpc = { data: any; error: any; status: number };
 const rpc = async (client: SupabaseClient, name: string, args: Record<string, unknown>): Promise<Rpc> => {
@@ -267,65 +275,79 @@ describe.skipIf(!LIVE)("Phase G live checks for 074-076 (self-hosted stack)", ()
       if (r.error || r.data?.length !== 1) throw new Error(`expire ${id}: ${r.error?.message}`);
     };
     const row = (id: string) => sql1(`SELECT status || '|' || (expires_at <= now()) || '|' || COALESCE(signed_upload_token, '<null>') || '|' || COALESCE(bytes::text, '<null>') FROM product_image_upload_sessions WHERE id = '${id}';`);
-    const completeArgs = (s: any) => ({
-      p_token: s.token, p_storage_path: s.storagePath,
-      p_public_url: `${cfg.url}/storage/v1/object/public/product-images/${s.storagePath}`,
-      p_bytes: 100, p_mime_type: "image/webp",
-    });
-    expect(sql1(`SELECT has_function_privilege('anon', 'public.complete_product_image_upload_session(text,text,text,integer,text)', 'EXECUTE');`)).toBe("t");
+    // < 083 the phone completes with the anon RPC (claiming 100 bytes); >= 083 through the
+    // function, which never takes a claim. 083 also closes the RPC to anon / authenticated.
+    const schema = schemaVersion(cfg);
+    const post083 = isPost083(schema);
+    const phoneComplete = phoneCompleter(cfg, anon, () => post083);
+    const claim = { p_bytes: 100 };
+    const desc = (c: PhoneCompletion) => describeCompletion(c);
+    const sig = "public.complete_product_image_upload_session(text,text,text,integer,text)";
+    expect(sql1(`SELECT has_function_privilege('anon', '${sig}', 'EXECUTE') || '|' || has_function_privilege('authenticated', '${sig}', 'EXECUTE');`)).toBe(post083 ? "false|false" : "true|true");
+    const expectLocked = async (s: any) => {
+      for (const c of [anon, A.admin]) {
+        const r = await completeThroughRpc(c, exactRpcArgs(cfg, s, claim));
+        expect(isPermissionDenied(r), desc(r)).toBe(true);
+      }
+    };
 
     // ---- session 1: desktop status poll persists the expiry ---------------
     const s1 = await newSession();
     await expire(s1.sessionId);
-    const c1 = await rpc(anon, "complete_product_image_upload_session", completeArgs(s1));
-    expect(c1.error?.message).toBe(INACTIVE);
+    if (post083) await expectLocked(s1);
+    const c1 = await phoneComplete(s1, claim);
+    expect(isInactive(c1), desc(c1)).toBe(true);
     const r1 = row(s1.sessionId);
-    expect(r1).toBe(`PENDING|true|${FAKE_SIGNED}|<null>`); // rejected call changed nothing; derivably expired
+    // < 083: the rejected RPC changed nothing (derivably expired); >= 083: the function stamps EXPIRED itself
+    expect(r1).toBe(post083 ? "EXPIRED|true|<null>|<null>" : `PENDING|true|${FAKE_SIGNED}|<null>`);
     const g1 = ok(await rpc(A.admin, "get_product_image_upload_session_status", { p_session_id: s1.sessionId }), "status poll");
     expect(g1.status).toBe("EXPIRED");
     const r1b = row(s1.sessionId);
     expect(r1b).toBe("EXPIRED|true|<null>|<null>");
-    const c1b = await rpc(anon, "complete_product_image_upload_session", completeArgs(s1));
-    expect(c1b.error?.message).toBe(INACTIVE);
+    const c1b = await phoneComplete(s1, claim);
+    expect(isInactive(c1b), desc(c1b)).toBe(true);
     expect(row(s1.sessionId)).toBe(r1b);
-    notes.push(`S1 ${s1.sessionId}: expires_at -60 s + signed token set (service role); anon complete -> "${c1.error.message}"; row status|expired|signed_token|bytes = ${r1}; admin get_..._status -> ${g1.status}; row -> ${r1b}; complete again -> "${c1b.error.message}", row unchanged`);
+    notes.push(`S1 ${s1.sessionId} (schema ${schema}): expires_at -60 s + signed token set (service role); ${post083 ? "anon / ADMIN RPC -> 42501; " : ""}phone complete -> ${desc(c1)}; row status|expired|signed_token|bytes = ${r1}; admin get_..._status -> ${g1.status}; row -> ${r1b}; complete again -> ${desc(c1b)}, row unchanged`);
 
     // ---- session 2: the phone page's by-token read persists the expiry ----
+    // (>= 083 the function's completion attempt stamps it first; the by-token read then agrees)
     const s2 = await newSession();
     await expire(s2.sessionId);
-    const c2 = await rpc(anon, "complete_product_image_upload_session", completeArgs(s2));
-    expect(c2.error?.message).toBe(INACTIVE);
-    expect(row(s2.sessionId)).toBe(`PENDING|true|${FAKE_SIGNED}|<null>`);
+    const c2 = await phoneComplete(s2, claim);
+    expect(isInactive(c2), desc(c2)).toBe(true);
+    expect(row(s2.sessionId)).toBe(post083 ? "EXPIRED|true|<null>|<null>" : `PENDING|true|${FAKE_SIGNED}|<null>`);
     const g2 = ok(await rpc(anon, "get_product_image_upload_session_by_token", { p_token: s2.token }), "by-token read");
     expect(g2.status).toBe("EXPIRED");
     expect(g2.uploadToken).toBeNull();
     const r2 = row(s2.sessionId);
     expect(r2).toBe("EXPIRED|true|<null>|<null>");
-    const c2b = await rpc(anon, "complete_product_image_upload_session", completeArgs(s2));
-    expect(c2b.error?.message).toBe(INACTIVE);
-    notes.push(`S2 ${s2.sessionId}: anon complete -> "${c2.error.message}", row still PENDING (expired); anon get_..._by_token -> status ${g2.status}, uploadToken ${g2.uploadToken}; row -> ${r2}; complete again -> "${c2b.error.message}"`);
+    const c2b = await phoneComplete(s2, claim);
+    expect(isInactive(c2b), desc(c2b)).toBe(true);
+    notes.push(`S2 ${s2.sessionId}: phone complete -> ${desc(c2)}, row ${post083 ? "stamped EXPIRED by the function" : "still PENDING (expired)"}; anon get_..._by_token -> status ${g2.status}, uploadToken ${g2.uploadToken}; row -> ${r2}; complete again -> ${desc(c2b)}`);
 
     // ---- session 3: a fresh ACTIVE session still completes -----------------
     const s3 = await newSession();
     const g3 = ok(await rpc(anon, "get_product_image_upload_session_by_token", { p_token: s3.token }), "by-token read (active)");
     expect(g3.status).toBe("PENDING");
     // 080: the object must exist before completion (session stays PENDING);
-    // bytes then come from the object's storage metadata (34), not the
-    // client's claim (100).
-    const c3pre = await rpc(anon, "complete_product_image_upload_session", completeArgs(s3));
-    expect(c3pre.error?.message).toBe("Uploaded image was not found in storage");
+    // bytes then come from the stored object (34), never the client's claim (100).
+    const c3pre = await phoneComplete(s3, claim);
+    expect(isNotUploaded(c3pre), desc(c3pre)).toBe(true);
     expect(row(s3.sessionId)).toBe("PENDING|false|<null>|<null>");
     const up3 = await svc.storage.from("product-images").upload(s3.storagePath, TINY_WEBP, { contentType: "image/webp" });
     expect(up3.error).toBeNull();
-    const c3 = ok(await rpc(anon, "complete_product_image_upload_session", completeArgs(s3)), "complete active session");
+    if (post083) await expectLocked(s3);
+    const c3r = await phoneComplete(s3, claim);
+    if (!c3r.ok) throw new Error(`complete active session failed: ${desc(c3r)}`);
+    const c3 = c3r.data;
     expect(c3).toMatchObject({ sessionId: s3.sessionId, status: "COMPLETED", bytes: TINY_WEBP.length, mimeType: "image/webp", storagePath: s3.storagePath });
     const r3 = row(s3.sessionId);
     expect(r3).toBe(`COMPLETED|false|<null>|${TINY_WEBP.length}`);
     const st3 = ok(await rpc(A.admin, "get_product_image_upload_session_status", { p_session_id: s3.sessionId }), "status (completed)");
     expect(st3.status).toBe("COMPLETED");
-    const c3b = await rpc(anon, "complete_product_image_upload_session", completeArgs(s3));
-    expect(c3b.error?.message).toBe(INACTIVE);
-    notes.push(`S3 ${s3.sessionId} (active): by-token -> ${g3.status}; anon complete before the upload -> "${c3pre.error.message}" (080), still PENDING; after the object exists -> ${c3.status} bytes=${c3.bytes} (object metadata; client claimed 100); row -> ${r3}; admin status -> ${st3.status}; second complete -> "${c3b.error.message}"`);
+    const c3b = await phoneComplete(s3, claim);
+    expect(isInactive(c3b), desc(c3b)).toBe(true);
+    notes.push(`S3 ${s3.sessionId} (active): by-token -> ${g3.status}; phone complete before the upload -> ${desc(c3pre)} (080), still PENDING; after the object exists${post083 ? " (anon / ADMIN RPC -> 42501)" : ""} -> ${c3.status} via ${c3r.via} bytes=${c3.bytes} (the stored object${post083 ? "" : "; client claimed 100"}); row -> ${r3}; admin status -> ${st3.status}; second complete -> ${desc(c3b)}`);
     const objSql = `SELECT count(*) FROM storage.objects WHERE name IN ('${s1.storagePath}', '${s2.storagePath}', '${s3.storagePath}');`;
     const objs = sql1(objSql);
     expect(objs).toBe("1");

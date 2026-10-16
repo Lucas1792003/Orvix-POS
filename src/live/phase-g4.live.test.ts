@@ -27,6 +27,19 @@
 //     docs/selfhost-migration/phase-f/rate-limiting.md): per-session burst +
 //     Retry-After + window reset, concurrent burst, lifetime cap, per-org
 //     window, per-user session creation (HTTP 429)
+//   G5-1..3 migration 083 (run ONLY when the schema is >= 083;
+//     docs/selfhost-migration/phase-f/migration-083-g5.md; placed before 9-13
+//     so the 081 tests' org-window / per-user fillers cannot starve them):
+//     the function completes only real JPEG/WebP <= 100 KB without markup and
+//     DELETES what it refuses; the bucket refuses other declared types and
+//     > 5 MiB; cross-org tokens / paths complete nothing
+//
+// Version-aware completion (src/live/phoneCompletion.ts): below 083 the phone
+// completes with the anon RPC, so the RPC's argument checks (tests 2-6) are
+// exercised as anon. From 083 anon/authenticated get 42501 on the RPC (tests
+// 2-6 assert that too), the phone completes through the function (which sends
+// no path / URL / size at all), and the RPC's argument checks are exercised as
+// service_role - its only caller, i.e. the function's second line.
 //
 // Skipped unless LIVE_SUPABASE_URL is set. QA data only: organizations
 // created the console way (service-role INSERT + ADMIN row), ids qa-g4<x>-,
@@ -40,6 +53,14 @@ import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { Evidence, liveConfig, makeClient, randomPassword, runSql, createAuthUser, signedInClient, type LiveConfig } from "./liveHelpers";
+import {
+  BUCKET_MAX_BYTES, COMPLETION_MAX_BYTES, HTML_DOC, JPEG_HTML_POLYGLOT, JPEG_OVER_BUCKET_LIMIT, JPEG_OVER_COMPLETION_LIMIT,
+  SVG_DOC, TINY_JPEG, TINY_PNG, TINY_WEBP, jpegWithComment,
+} from "./imageFixtures";
+import {
+  completeThroughFunction, completeThroughRpc, describeCompletion, exactRpcArgs, isInactive, isInvalidImage, isNotUploaded,
+  isPermissionDenied, isPost083, phoneCompleter, schemaVersion, signedPut, type PhoneCompletion,
+} from "./phoneCompletion";
 
 const LIVE = Boolean(process.env.LIVE_SUPABASE_URL);
 vi.setConfig({ testTimeout: 600_000, hookTimeout: 600_000 });
@@ -47,8 +68,6 @@ vi.setConfig({ testTimeout: 600_000, hookTimeout: 600_000 });
 const BUCKET = "product-images";
 const REAL_ORG = "org-shwe-pha-lar";
 const FN = "/functions/v1/phone-upload-token";
-// 34-byte lossless WebP (same constant as phase-g3 / spec D).
-const TINY_WEBP = Buffer.from("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==", "base64");
 const INACTIVE = "Upload link is no longer active";
 const PATH_MISMATCH = "Upload path does not match this session";
 const URL_MISMATCH = "Uploaded image URL does not match this upload session";
@@ -83,9 +102,10 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
   let trusted = "";
   let configBefore = "";
   let realBefore = "";
-  /** max(supabase_migrations.schema_migrations.version), e.g. "080" / "081" */
+  /** max(supabase_migrations.schema_migrations.version), e.g. "080" / "081" / "083" */
   let schema = "";
   const has081 = () => schema >= "081";
+  const has083 = () => isPost083(schema);
 
   const sql1 = (q: string): string => runSql(cfg, q).trim();
   const derived = (p: string) => `${trusted}/storage/v1/object/public/${BUCKET}/${p}`;
@@ -100,8 +120,29 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
    || (SELECT COALESCE(string_agg((to_jsonb(z) - 'last_accessed_at')::text, '|' ORDER BY z.name), '') FROM storage.objects z WHERE name NOT LIKE 'org/qa-%')) || ' sessions=' || (SELECT count(*) FROM product_image_upload_sessions) || ' objects(non-qa)=' || (SELECT count(*) FROM storage.objects WHERE name NOT LIKE 'org/qa-%');`;
 
   const createSession = async (o: Org): Promise<Sess> => ok(await rpc(o.admin, "create_product_image_upload_session", { p_shop_id: o.shop, p_product_id: o.prod }), `${o.key} create session`);
+  /**
+   * The completion RPC's own argument checks, as the role that may call it:
+   * anon (= the phone) before 083, service_role (= the function) from 083.
+   */
   const complete = (s: Sess, over: Record<string, unknown> = {}) =>
-    rpc(anon, "complete_product_image_upload_session", { p_token: s.token, p_storage_path: s.storagePath, p_public_url: url(s.storagePath), p_bytes: TINY_WEBP.length, p_mime_type: "image/webp", ...over });
+    rpc(has083() ? svc : anon, "complete_product_image_upload_session", { p_token: s.token, p_storage_path: s.storagePath, p_public_url: url(s.storagePath), p_bytes: TINY_WEBP.length, p_mime_type: "image/webp", ...over });
+  /** What the phone does to complete on this schema: the anon RPC < 083, the function >= 083. */
+  let phoneComplete: (s: Sess, rpcOver?: Record<string, unknown>) => Promise<PhoneCompletion>;
+  const completed = (c: PhoneCompletion, what: string): any => {
+    if (!c.ok) throw new Error(`${what} failed: ${describeCompletion(c)}`);
+    return c.data;
+  };
+  /** 083: anon and the org's own ADMIN cannot call the RPC at all, not even with the exact values. Returns evidence. */
+  const expectRpcLocked = async (s: Sess, over: Record<string, unknown> = {}): Promise<string> => {
+    const out: string[] = [];
+    for (const [who, c] of [["anon", anon], ["authenticated (A ADMIN)", A.admin]] as const) {
+      const r = await completeThroughRpc(c, exactRpcArgs(cfg, s, over));
+      expect(isPermissionDenied(r), `${who}: ${describeCompletion(r)}`).toBe(true);
+      out.push(`${who} -> ${r.code}`);
+    }
+    return out.join(", ");
+  };
+  const objMeta = (p: string) => sql1(`SELECT COALESCE(string_agg((metadata->>'mimetype') || '/' || (metadata->>'size'), ','), '<none>') FROM storage.objects WHERE bucket_id = '${BUCKET}' AND name = '${p}';`);
   const callFn = async (token: unknown): Promise<{ status: number; body: any; ms: number; retryAfter: string | null }> => {
     const t0 = performance.now();
     const res = await fetch(`${cfg.url}${FN}`, {
@@ -152,8 +193,13 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     cfg = liveConfig();
     svc = makeClient(cfg, cfg.serviceKey);
     anon = makeClient(cfg, cfg.anonKey);
-    schema = sql1(`SELECT max(version) FROM supabase_migrations.schema_migrations;`);
+    schema = schemaVersion(cfg);
     expect(schema >= "080", `schema ${schema} must be >= 080`).toBe(true);
+    phoneComplete = phoneCompleter(cfg, anon, has083);
+    // 083's grants are present exactly when the schema says so (anon|authenticated|service_role)
+    const sig = "public.complete_product_image_upload_session(text,text,text,integer,text)";
+    expect(sql1(`SELECT has_function_privilege('anon', '${sig}', 'EXECUTE') || '|' || has_function_privilege('authenticated', '${sig}', 'EXECUTE') || '|' || has_function_privilege('service_role', '${sig}', 'EXECUTE');`))
+      .toBe(has083() ? "false|false|true" : "true|true|true");
     // 081's limiter is present exactly when the schema says so (no half-applied state)
     expect(sql1(`SELECT to_regprocedure('public.claim_phone_upload_token_issue(text)') IS NOT NULL;`)).toBe(has081() ? "t" : "f");
     trusted = sql1(`SELECT value FROM public.app_config WHERE key = 'supabase_public_url';`);
@@ -307,14 +353,36 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
       else expect(r.error.message, `url ${what}`).toMatch(expected);
       urlNotes.push(`${what} -> "${short(r.error.message, 45)}"`);
     }
+    // 083: the phone roles cannot reach those checks at all - not with the
+    // exact values, not with another session's path or a foreign URL
+    let locked = "";
+    if (has083()) {
+      locked = [
+        await expectRpcLocked(s),
+        await expectRpcLocked(s, { p_storage_path: other.storagePath, p_public_url: url(other.storagePath) }),
+        await expectRpcLocked(s, { p_storage_path: sB.storagePath, p_public_url: url(sB.storagePath) }),
+        await expectRpcLocked(s, { p_public_url: url(p, "https://evil.example") }),
+      ].join("; ");
+    }
     expect(rowMd5(s.sessionId)).toBe(md5Before);
     expect(sessRow(s.sessionId)).toBe("PENDING|<null>|<null>|false");
     expect(objCount(s.storagePath)).toBe("1");
-    // control: the exact values complete
-    const done = ok(await complete(s), "control complete");
+    // control: the phone completes. 083: through the function, which takes
+    // nothing from the client but the token - extra fields naming another
+    // session's path / a foreign URL / a size are ignored.
+    const ctl = has083()
+      ? await completeThroughFunction(cfg, s.token, { path: other.storagePath, storagePath: sB.storagePath, p_storage_path: other.storagePath, p_public_url: url(p, "https://evil.example"), publicUrl: url(other.storagePath), bytes: 1, mimeType: "image/png" })
+      : await phoneComplete(s);
+    const done = completed(ctl, "control complete");
     expect(done.status).toBe("COMPLETED");
+    expect(done.storagePath).toBe(p);
     expect(done.publicUrl).toBe(derived(p));
-    ev.pass("2 path/URL/bucket variants refused", `object present; ${pathVariants.length} p_storage_path variants -> "${PATH_MISMATCH}" each [${pathNotes.join(", ")}]; ${urlVariants.length} p_public_url variants refused: ${urlNotes.join("; ")}; session row byte-identical (md5) and PENDING after all ${pathVariants.length + urlVariants.length}; control with the exact path/URL -> COMPLETED, publicUrl = trusted derived URL. (An object present ONLY in another bucket is covered by harness t16: lucashome has one bucket and creating a second is a storage config change, not done.)`);
+    expect(sessRow(s.sessionId)).toBe(`COMPLETED|${derived(p)}|${TINY_WEBP.length}|true`);
+    expect(sessRow(other.sessionId)).toBe("PENDING|<null>|<null>|false");
+    expect(sessRow(sB.sessionId)).toBe("PENDING|<null>|<null>|false");
+    expect(objCount(other.storagePath)).toBe("0");
+    expect(objCount(sB.storagePath)).toBe("0");
+    ev.pass("2 path/URL/bucket variants refused", `schema ${schema}; object present; RPC as ${has083() ? "service_role (083: its only caller)" : "anon (the phone)"}: ${pathVariants.length} p_storage_path variants -> "${PATH_MISMATCH}" each [${pathNotes.join(", ")}]; ${urlVariants.length} p_public_url variants refused: ${urlNotes.join("; ")}; ${has083() ? `083 RPC locked for the phone roles: ${locked}; ` : ""}session row byte-identical (md5) and PENDING after all; control ${has083() ? "via the function (body also carried another session's path, B's path, a foreign URL, a fake size/type - all ignored)" : "anon RPC with the exact path/URL"} -> COMPLETED, storagePath = the session's own, publicUrl = trusted derived URL; the other A session and B's session stay PENDING with no object. (An object present ONLY in another bucket is covered by harness t16: lucashome has one bucket and creating a second is a storage config change, not done.)`);
   });
 
   // =========================================================================
@@ -324,6 +392,8 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     for (const h of hosts) {
       const s = await createSession(A);
       await phoneUpload(s);
+      // 083: the phone roles cannot send a URL at all; the RPC's derivation is checked as its only caller
+      if (has083()) await expectRpcLocked(s, { p_public_url: url(s.storagePath, h) });
       const r = await complete(s, { p_public_url: url(s.storagePath, h) });
       expect(r.error, `host ${h}: ${r.error?.message}`).toBeNull();
       expect(r.data.status).toBe("COMPLETED");
@@ -339,25 +409,29 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
       expect(get.status).toBe(200);
       notes.push(`${h.replace(new URL(cfg.url).host, "<trusted-host>")} -> COMPLETED`);
     }
-    ev.pass("3 external host ignored", `${notes.join("; ")}; for each: returned, stored, desktop-poll and by_token publicUrl = <app_config origin>/storage/v1/object/public/${BUCKET}/<session path>; the foreign host appears nowhere in the row; GET of that URL 200`);
+    ev.pass("3 external host ignored", `schema ${schema}; completion RPC called as ${has083() ? "service_role (083; anon + A ADMIN -> 42501 with each foreign URL)" : "anon"}: ${notes.join("; ")}; for each: returned, stored, desktop-poll and by_token publicUrl = <app_config origin>/storage/v1/object/public/${BUCKET}/<session path>; the foreign host appears nowhere in the row; GET of that URL 200`);
   });
 
   // =========================================================================
   it("4. missing storage object -> refused, session stays PENDING; completes once the object exists", async () => {
     const s = await createSession(A);
     const md5 = rowMd5(s.sessionId);
-    const r = await complete(s);
-    expect(r.error?.message).toBe(NOT_FOUND);
+    const r = await phoneComplete(s);
+    expect(isNotUploaded(r), describeCompletion(r)).toBe(true);
     expect(rowMd5(s.sessionId)).toBe(md5);
     expect(sessRow(s.sessionId)).toBe("PENDING|<null>|<null>|false");
+    // the RPC's own existence check (anon < 083, service_role >= 083), also with a different claimed size/type
     const r2 = await complete(s, { p_bytes: 50_000, p_mime_type: "image/jpeg" });
     expect(r2.error?.message).toBe(NOT_FOUND);
+    expect(rowMd5(s.sessionId)).toBe(md5);
     await phoneUpload(s);
-    const done = ok(await complete(s, { p_bytes: 50_000, p_mime_type: "image/jpeg" }), "complete after upload");
+    if (has083()) await expectRpcLocked(s, { p_bytes: 50_000, p_mime_type: "image/jpeg" });
+    // < 083 the phone claims 50000/jpeg; >= 083 it cannot claim anything (the function measures)
+    const done = completed(await phoneComplete(s, { p_bytes: 50_000, p_mime_type: "image/jpeg" }), "complete after upload");
     expect(done.status).toBe("COMPLETED");
-    expect(done.bytes).toBe(TINY_WEBP.length); // from the object's metadata, not the client's claim
+    expect(done.bytes).toBe(TINY_WEBP.length); // from the object, not the client's claim
     expect(done.mimeType).toBe("image/webp");
-    ev.pass("4 missing object", `complete before the upload -> "${r.error.message}" (x2, also with a different claimed size/type); row byte-identical, PENDING, no URL/bytes/completed_at; after the real phone upload -> COMPLETED with bytes=${done.bytes}/mime=${done.mimeType} from storage metadata (client claimed 50000/image/jpeg)`);
+    ev.pass("4 missing object", `schema ${schema}; phone completion before the upload -> ${describeCompletion(r)}; RPC (${has083() ? "service_role" : "anon"}) with a different claimed size/type -> "${r2.error.message}"; row byte-identical, PENDING, no URL/bytes/completed_at; after the real phone upload -> COMPLETED via ${r.via} with bytes=${done.bytes}/mime=${done.mimeType} from the stored object${has083() ? "" : " (client claimed 50000/image/jpeg)"}`);
   });
 
   // =========================================================================
@@ -365,15 +439,19 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     const s = await createSession(A);
     await phoneUpload(s);
     const n0 = sql1(`SELECT count(*) FROM product_image_upload_sessions;`);
-    const both = await Promise.all([complete(s), complete(s)]);
-    const wins = both.filter((r) => !r.error);
-    const losses = both.filter((r) => r.error);
+    const both = await Promise.all([phoneComplete(s), phoneComplete(s)]);
+    const wins = both.filter((r) => r.ok);
+    const losses = both.filter((r) => !r.ok);
     expect(wins).toHaveLength(1);
     expect(losses).toHaveLength(1);
-    expect(losses[0].error.message).toBe(INACTIVE);
+    expect(isInactive(losses[0]), describeCompletion(losses[0])).toBe(true);
+    if (losses[0].via === "function") expect(losses[0].sessionStatus).toBe("COMPLETED");
     const md5 = rowMd5(s.sessionId);
     const third = await complete(s, { p_public_url: url(s.storagePath, "https://evil.example") });
     expect(third.error?.message).toBe(INACTIVE);
+    const fourth = await phoneComplete(s);
+    expect(isInactive(fourth), describeCompletion(fourth)).toBe(true);
+    if (has083()) await expectRpcLocked(s);
     expect(rowMd5(s.sessionId)).toBe(md5);
     expect(sql1(`SELECT count(*) FROM product_image_upload_sessions WHERE id = '${s.sessionId}';`)).toBe("1");
     expect(sql1(`SELECT count(*) FROM product_image_upload_sessions;`)).toBe(n0);
@@ -381,7 +459,7 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     expect(sessRow(s.sessionId)).toBe(`COMPLETED|${derived(s.storagePath)}|${TINY_WEBP.length}|true`);
     const fnAfter = await callFn(s.token);
     expect(fnAfter.status).toBe(410);
-    ev.pass("5 duplicate completion", `2 concurrent completes -> 1 COMPLETED + 1 "${losses[0].error.message}"; a later complete (external host) -> "${third.error.message}"; row byte-identical after it; 1 row for the session, session count unchanged (${n0}), 1 object; function for the completed session -> ${fnAfter.status} ${fnAfter.body?.code}/${fnAfter.body?.status}`);
+    ev.pass("5 duplicate completion", `schema ${schema}; 2 concurrent phone completes (${losses[0].via}) -> 1 COMPLETED + 1 ${describeCompletion(losses[0])}; a later RPC complete (${has083() ? "service_role" : "anon"}, external host) -> "${third.error.message}"; a later phone complete -> ${describeCompletion(fourth)}${has083() ? "; anon / A ADMIN RPC -> 42501" : ""}; row byte-identical after it; 1 row for the session, session count unchanged (${n0}), 1 object; function for the completed session -> ${fnAfter.status} ${fnAfter.body?.code}/${fnAfter.body?.status}`);
   });
 
   // =========================================================================
@@ -390,27 +468,37 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     await phoneUpload(sE);
     const ex = await svc.from("product_image_upload_sessions").update({ expires_at: new Date(Date.now() - 60_000).toISOString() }).eq("id", sE.sessionId).select("id");
     expect(ex.data).toHaveLength(1);
-    const cE = await complete(sE);
-    expect(cE.error?.message).toBe(INACTIVE);
+    const cE = await phoneComplete(sE);
+    expect(isInactive(cE), describeCompletion(cE)).toBe(true);
+    if (cE.via === "function") expect(cE.sessionStatus).toBe("EXPIRED");
     const rowE = sessRow(sE.sessionId);
+    // < 083 the RPC refuses without writing; >= 083 the function stamps EXPIRED (via _by_token) before answering
     expect(rowE.startsWith("PENDING|<null>|<null>|false") || rowE.startsWith("EXPIRED|<null>")).toBe(true);
+    const rE = await complete(sE);
+    expect(rE.error?.message).toBe(INACTIVE);
     const fE = await callFn(sE.token);
     expect(fE.status).toBe(410);
     expect(fE.body.status).toBe("EXPIRED");
     expect(sessRow(sE.sessionId).startsWith("EXPIRED|<null>")).toBe(true);
-    const cE2 = await complete(sE);
-    expect(cE2.error?.message).toBe(INACTIVE);
+    const cE2 = await phoneComplete(sE);
+    expect(isInactive(cE2), describeCompletion(cE2)).toBe(true);
+    if (has083()) await expectRpcLocked(sE);
+    expect(objCount(sE.storagePath)).toBe("1"); // an inactive session's object is not read, not completed
 
     const sC = await createSession(A);
     await phoneUpload(sC);
     ok(await rpc(A.admin, "cancel_product_image_upload_session", { p_session_id: sC.sessionId }), "cancel");
-    const cC = await complete(sC);
-    expect(cC.error?.message).toBe(INACTIVE);
+    const cC = await phoneComplete(sC);
+    expect(isInactive(cC), describeCompletion(cC)).toBe(true);
+    if (cC.via === "function") expect(cC.sessionStatus).toBe("CANCELED");
+    const rC = await complete(sC);
+    expect(rC.error?.message).toBe(INACTIVE);
+    if (has083()) await expectRpcLocked(sC);
     expect(sessRow(sC.sessionId)).toBe("CANCELED|<null>|<null>|false");
     const fC = await callFn(sC.token);
     expect(fC.status).toBe(410);
     expect(fC.body.status).toBe("CANCELED");
-    ev.pass("6 expired / cancelled", `expired (object uploaded first): complete -> "${cE.error.message}" (row ${rowE.split("|")[0]}, no URL); function -> 410 EXPIRED and the row is stamped EXPIRED; complete again -> refused. cancelled (object uploaded first): complete -> "${cC.error.message}", row CANCELED|<null>; function -> 410 CANCELED`);
+    ev.pass("6 expired / cancelled", `schema ${schema}; expired (object uploaded first): phone complete -> ${describeCompletion(cE)} (row ${rowE.split("|")[0]}, no URL); RPC (${has083() ? "service_role" : "anon"}) -> "${rE.error.message}"; token function -> 410 EXPIRED and the row is stamped EXPIRED; phone complete again -> refused${has083() ? "; anon / A ADMIN RPC -> 42501" : ""}. cancelled (object uploaded first): phone complete -> ${describeCompletion(cC)}, RPC -> "${rC.error.message}", row CANCELED|<null>; token function -> 410 CANCELED`);
   });
 
   // =========================================================================
@@ -437,6 +525,155 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     expect(priv).toBe("false|false|false|false|true");
     expect(sql1(CONFIG_SQL)).toBe(configBefore);
     ev.pass("7 app_config / helper not exposed", `${notes.join(" || ")}; catalog: anon/auth table privilege any of S/I/U/D = false/false, helper EXECUTE anon/auth = false/false, RLS on; app_config rows|md5 unchanged`);
+  });
+
+  // =========================================================================
+  // 083 / G5 (docs/selfhost-migration/phase-f/migration-083-g5.md). Run ONLY
+  // when the schema is >= 083 (bucket limits, RPC service_role only, the
+  // validating function deployed first). Every object is written the phone's
+  // way (token from the function, PUT to the signed URL as anon).
+  // =========================================================================
+  /** A fresh upload token for the session from the deployed function. */
+  const uploadToken = async (s: Sess): Promise<string> => {
+    const t = await callFn(s.token);
+    expect(t.status, JSON.stringify(t.body)).toBe(200);
+    expect(t.body.path).toBe(s.storagePath);
+    return t.body.token;
+  };
+  /** Nothing completed, nothing stored: the refused session is untouched and PENDING. */
+  const expectNothingLeft = (s: Sess, what: string) => {
+    expect(objCount(s.storagePath), `${what}: object`).toBe("0");
+    expect(sessRow(s.sessionId), `${what}: session`).toBe("PENDING|<null>|<null>|false");
+  };
+
+  it("G5-1. [083] bucket limits; the phone completes real JPEG / WebP (up to exactly 100 KB) through the function; the RPC refuses anon and authenticated", async (ctx) => {
+    if (!has083()) ctx.skip();
+    const bucket = sql1(`SELECT public || '|' || file_size_limit || '|' || allowed_mime_types::text FROM storage.buckets WHERE id = '${BUCKET}';`);
+    expect(bucket).toBe(`true|${BUCKET_MAX_BYTES}|{image/jpeg,image/png,image/webp}`);
+    const notes: string[] = [];
+    const boundary = jpegWithComment({ totalBytes: COMPLETION_MAX_BYTES });
+    for (const [what, body, type] of [["WebP 34 B", TINY_WEBP, "image/webp"], ["JPEG", TINY_JPEG, "image/jpeg"], [`JPEG exactly ${COMPLETION_MAX_BYTES} B`, boundary, "image/jpeg"]] as const) {
+      const s = await createSession(A);
+      const locked = await expectRpcLocked(s, { p_bytes: body.length, p_mime_type: type });
+      const put = await signedPut(cfg, s.storagePath, await uploadToken(s), body, type);
+      expect(put.status, put.body).toBe(200);
+      expect(objMeta(s.storagePath)).toBe(`${type}/${body.length}`);
+      // still not completable by the phone roles once the object exists
+      await expectRpcLocked(s, { p_bytes: body.length, p_mime_type: type });
+      const c = await completeThroughFunction(cfg, s.token);
+      const done = completed(c, what);
+      expect(done).toMatchObject({ sessionId: s.sessionId, status: "COMPLETED", storagePath: s.storagePath, publicUrl: derived(s.storagePath), bytes: body.length, mimeType: type });
+      expect(sessRow(s.sessionId)).toBe(`COMPLETED|${derived(s.storagePath)}|${body.length}|true`);
+      const get = await fetch(done.publicUrl);
+      expect(get.status).toBe(200);
+      expect(get.headers.get("content-type")).toBe(type);
+      expect(Buffer.from(await get.arrayBuffer()).equals(body)).toBe(true);
+      notes.push(`${what}: RPC ${locked}; PUT 200; function -> COMPLETED ${type}/${body.length} B, trusted URL, public GET 200 ${type} byte-identical`);
+    }
+    ev.pass("G5-1 [083] valid completions", `bucket public|limit|types = ${bucket}; ${notes.join(" || ")}`);
+  });
+
+  it("G5-2. [083] refused content (disguised HTML, SVG, JPEG+HTML polyglot, > function limit, > 5 MiB, wrong magic, PNG): no completed session, no object left", async (ctx) => {
+    if (!has083()) ctx.skip();
+    const html = Buffer.from(HTML_DOC);
+    type Case = { what: string; body: Buffer; type: string; fileName?: string; at: "storage" | "completion" };
+    const cases: Case[] = [
+      { what: "disguised HTML (qa-photo.jpg, image/jpeg, HTML body, multipart)", body: html, type: "image/jpeg", fileName: "qa-photo.jpg", at: "completion" },
+      { what: "HTML declared image/jpeg (raw PUT)", body: html, type: "image/jpeg", at: "completion" },
+      { what: "HTML declared text/html", body: html, type: "text/html", at: "storage" },
+      { what: "SVG declared image/svg+xml", body: SVG_DOC, type: "image/svg+xml", at: "storage" },
+      { what: "SVG declared image/jpeg", body: SVG_DOC, type: "image/jpeg", at: "completion" },
+      { what: "JPEG-header + HTML polyglot (valid JPEG, HTML in a COM segment)", body: JPEG_HTML_POLYGLOT, type: "image/jpeg", at: "completion" },
+      { what: `real JPEG ${150 * 1024} B (> ${COMPLETION_MAX_BYTES} B function limit, < 5 MiB)`, body: JPEG_OVER_COMPLETION_LIMIT(), type: "image/jpeg", at: "completion" },
+      { what: `real JPEG ${BUCKET_MAX_BYTES + 1} B (> 5 MiB bucket limit)`, body: JPEG_OVER_BUCKET_LIMIT(), type: "image/jpeg", at: "storage" },
+      { what: "WebP bytes declared image/jpeg (wrong magic)", body: TINY_WEBP, type: "image/jpeg", at: "completion" },
+      { what: "JPEG bytes declared image/webp (wrong magic)", body: TINY_JPEG, type: "image/webp", at: "completion" },
+      { what: "PNG declared image/png (bucket allows, completion does not)", body: TINY_PNG, type: "image/png", at: "completion" },
+    ];
+    const notes: string[] = [];
+    const sessions: Sess[] = [];
+    let recovered = "";
+    for (const k of cases) {
+      const s = await createSession(A);
+      sessions.push(s);
+      const put = await signedPut(cfg, s.storagePath, await uploadToken(s), k.body, k.type, k.fileName);
+      if (k.at === "storage") {
+        // 0 = the connection was closed on the oversized body without an answer (still refused; nothing stored is checked next)
+        expect(put.status === 0 || put.status >= 400, `${k.what}: PUT must be refused, got ${put.status} ${put.body}`).toBe(true);
+        expect(objCount(s.storagePath), k.what).toBe("0");
+        const c = await completeThroughFunction(cfg, s.token);
+        expect(isNotUploaded(c), `${k.what}: ${describeCompletion(c)}`).toBe(true);
+        expectNothingLeft(s, k.what);
+        notes.push(`${k.what}: PUT ${put.status} "${short(put.body, 50)}", nothing stored; complete -> ${c.httpStatus} ${c.code}`);
+      } else {
+        expect(put.status, `${k.what}: storage checks only the declared type/size: ${put.body}`).toBe(200);
+        const stored = objMeta(s.storagePath);
+        expect(stored).toBe(`${k.type}/${k.body.length}`);
+        const c = await completeThroughFunction(cfg, s.token);
+        expect(isInvalidImage(c), `${k.what}: ${describeCompletion(c)}`).toBe(true);
+        expectNothingLeft(s, k.what); // the function DELETED the refused object
+        // the RPC as its only caller would also not complete it now: the object is gone
+        const r = await complete(s, { p_bytes: k.body.length, p_mime_type: k.type });
+        expect(r.error?.message, k.what).toBe(NOT_FOUND);
+        expectNothingLeft(s, `${k.what} (after RPC)`);
+        notes.push(`${k.what}: PUT 200 (stored ${stored}) -> function 422 invalid_image, object deleted, PENDING`);
+        if (!recovered) {
+          // the freed path takes a real photo; the same session then completes
+          const again = await signedPut(cfg, s.storagePath, await uploadToken(s), TINY_WEBP, "image/webp");
+          expect(again.status, again.body).toBe(200);
+          const ok2 = completed(await completeThroughFunction(cfg, s.token), "recovery");
+          expect(ok2.mimeType).toBe("image/webp");
+          expect(sessRow(s.sessionId)).toBe(`COMPLETED|${derived(s.storagePath)}|${TINY_WEBP.length}|true`);
+          recovered = `after "${k.what}" was refused, the same session took a real WebP on the freed path -> COMPLETED`;
+        }
+      }
+    }
+    // across all case sessions: the only completion is the recovery's real WebP
+    const ids = sessions.map((s) => `'${s.sessionId}'`).join(",");
+    expect(sql1(`SELECT count(*) FILTER (WHERE status = 'COMPLETED') || '|' || count(*) FILTER (WHERE status = 'COMPLETED' AND mime_type = 'image/webp' AND bytes = ${TINY_WEBP.length}) FROM product_image_upload_sessions WHERE id IN (${ids});`)).toBe("1|1");
+    expect(sql1(`SELECT count(*) FROM storage.objects WHERE bucket_id = '${BUCKET}' AND name IN (${sessions.map((s) => `'${s.storagePath}'`).join(",")});`)).toBe("1");
+    ev.pass("G5-2 [083] refused content", `${cases.length} cases, each its own session: ${notes.join("; ")}; ${recovered}`);
+  });
+
+  it("G5-3. [083] cross-org: another org's upload token cannot write this session's path; this token cannot complete from another org's object; the other org's ADMIN cannot call the RPC", async (ctx) => {
+    if (!has083()) ctx.skip();
+    const sA = await createSession(A);
+    const sB = await createSession(B);
+    const tA = await uploadToken(sA);
+    const tB = await uploadToken(sB);
+    // signed tokens are bound to their path: swapping them writes nothing
+    const aWithB = await signedPut(cfg, sA.storagePath, tB, TINY_WEBP, "image/webp");
+    const bWithA = await signedPut(cfg, sB.storagePath, tA, TINY_WEBP, "image/webp");
+    expect(aWithB.status, aWithB.body).toBeGreaterThanOrEqual(400);
+    expect(bWithA.status, bWithA.body).toBeGreaterThanOrEqual(400);
+    expectNothingLeft(sA, "A path with B's token");
+    expectNothingLeft(sB, "B path with A's token");
+    // B's own object exists; A's token must not complete from it (the function derives A's path)
+    const bPut = await signedPut(cfg, sB.storagePath, await uploadToken(sB), TINY_WEBP, "image/webp");
+    expect(bPut.status, bPut.body).toBe(200);
+    const cA = await completeThroughFunction(cfg, sA.token, { path: sB.storagePath, p_storage_path: sB.storagePath, p_public_url: url(sB.storagePath) });
+    expect(isNotUploaded(cA), describeCompletion(cA)).toBe(true);
+    expectNothingLeft(sA, "A after completing with B's object present");
+    expect(sessRow(sB.sessionId)).toBe("PENDING|<null>|<null>|false");
+    // the RPC: B's ADMIN and anon -> 42501 with A's token on either path; the service role's path check refuses the swap
+    const lockNotes: string[] = [];
+    for (const [who, c] of [["B ADMIN", B.admin], ["A ADMIN", A.admin], ["anon", anon]] as const) {
+      for (const p of [sA.storagePath, sB.storagePath]) {
+        const r = await completeThroughRpc(c, exactRpcArgs(cfg, sA, { p_storage_path: p, p_public_url: url(p) }));
+        expect(isPermissionDenied(r), `${who}: ${describeCompletion(r)}`).toBe(true);
+      }
+      lockNotes.push(`${who} -> 42501 x2`);
+    }
+    const svcSwap = await complete(sA, { p_storage_path: sB.storagePath, p_public_url: url(sB.storagePath) });
+    expect(svcSwap.error?.message).toBe(PATH_MISMATCH);
+    expectNothingLeft(sA, "A after the service-role swap");
+    expect(sessRow(sB.sessionId)).toBe("PENDING|<null>|<null>|false");
+    // B's legitimate pending object: removed now (the cleanup would too) so nothing is left by this case
+    const rm = await svc.storage.from(BUCKET).remove([sB.storagePath]);
+    expect(rm.error).toBeNull();
+    expect(objCount(sB.storagePath)).toBe("0");
+    for (const [o, s] of [[A, sA], [B, sB]] as const) ok(await rpc(o.admin, "cancel_product_image_upload_session", { p_session_id: s.sessionId }), "cancel");
+    ev.pass("G5-3 [083] cross-org", `PUT to A's path with B's token -> ${aWithB.status} "${short(aWithB.body, 40)}"; to B's path with A's token -> ${bWithA.status}; nothing stored; with B's real object present, function complete with A's token (body naming B's path) -> ${describeCompletion(cA)}, A PENDING, B PENDING; RPC with A's token on A's / B's path: ${lockNotes.join(", ")}; service_role with A's token + B's path -> "${svcSwap.error.message}"; B's own object removed, both sessions cancelled`);
   });
 
   // =========================================================================
@@ -500,7 +737,7 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     expect(objCount(s.storagePath)).toBe("1");
     const after = await callFn(s.token);
     expect(after.body).toEqual({ alreadyUploaded: true, path: s.storagePath });
-    ok(await complete(s), "complete");
+    completed(await phoneComplete(s), "complete");
     // invalid tokens: same 404 for all, cost = one indexed lookup each
     const badMs: number[] = [];
     const badStatuses: Record<string, number> = {};
@@ -556,7 +793,7 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     expect(counters(s.sessionId)).toBe("6|1");
     const p = await put(s.storagePath, after.body.token);
     expect(p.status, p.body).toBe(200);
-    const done = ok(await complete(s), "complete after the wait");
+    const done = completed(await phoneComplete(s), "complete after the wait");
     expect(done.status).toBe("COMPLETED");
     const bad = await Promise.all(Array.from({ length: 20 }, () => callFn(randomBytes(64).toString("hex"))));
     expect(bad.every((r) => r.status === 404)).toBe(true);
