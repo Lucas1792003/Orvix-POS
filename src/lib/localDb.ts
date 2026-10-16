@@ -5,6 +5,7 @@ import type {
   Refund, Sale, SaleItem, Shift, Shop, StockTransfer, StockTransferItem,
   Supplier, SupplierPayment, SupplierProduct, UnitType, User,
 } from "../types";
+import type { ReconciliationRecord } from "./reconcile/types";
 
 // Singleton business_profile row wrapped with a fixed key so Dexie has a
 // primary key to store it under (the DB row itself has no id column).
@@ -42,8 +43,24 @@ export interface SyncOutboxEntry {
   // is included in every export, still counts as unsynced for the updater
   // guard, and an owner can restore it. There is no UI path that deletes
   // an unsynced entry (docs/desktop-app/release-1.0.16.md, RC2).
-  status: "pending" | "syncing" | "failed" | "conflict" | "quarantined" | "archived";
+  // "reconciled" (1.0.16 RC3): the owner documented what happened to an
+  // entry that will never sync from here (matched to a server sale,
+  // re-entered through the normal sales flow, or confirmed cancelled), after
+  // an export of it in this session, a read-only server check and a fresh
+  // server-verified owner check (src/stores/data/reconcile.ts). The row,
+  // payload, key and earlier status fields stay; it is never sent, stays in
+  // every export, and (while its integrity checks pass) no longer blocks an
+  // ordinary update install.
+  status: "pending" | "syncing" | "failed" | "conflict" | "quarantined" | "archived" | "reconciled";
   attempts: number;
+  /** RC3: the status the entry had when it was reconciled. */
+  statusBeforeReconcile?: "conflict" | "quarantined" | "archived";
+  /** RC3: the owner's reconciliation record (see lib/reconcile/types.ts). */
+  reconciliation?: ReconciliationRecord;
+  /** RC3: a reconciliation that failed its integrity check on load (the
+   *  row was edited after it was reconciled). Kept for the audit; the row is
+   *  back in "Set aside" and blocks updates again. */
+  reconcileRejected?: { record: unknown; detectedAt: string; reason: string };
   /** When the drain marked the entry `syncing` (RC2): a `syncing` row older
    *  than the stale threshold, or any at startup, is a request whose
    *  response never arrived and is resent with the same key (outbox.ts). */
@@ -138,6 +155,8 @@ export const SYNC_STATE_KEYS = {
   // session) belongs to. Written by lib/backendOrigin.ts at startup.
   backendOrigin: "backend-origin",
 } as const;
+
+export { RECONCILE_LOG_PREFIX } from "./reconcile/constants";
 
 /** Small key/value table for sync-layer state that must survive a reload
  *  and must never be wiped by a snapshot replace: the cross-instance drain

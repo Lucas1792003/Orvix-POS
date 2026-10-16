@@ -15,6 +15,7 @@ const entry = (over: Partial<QueueExportEntry>): QueueExportEntry => ({
   refs: [], provisional: [], shopId: "shop-1", createdAt: "2026-10-13T01:00:00.000Z", ringUpAt: "2026-10-13T01:00:00.000Z",
   status: "pending", attempts: 0, lastErrorClass: null, lastError: null, nextAttemptAt: null, backendOrigin: "https://pos.example.test", quarantineReason: null,
   archivedAt: null, archivedBy: null, archiveReason: null, statusBeforeArchive: null,
+  statusBeforeReconcile: null, reconciliation: null, reconcileRejected: null,
   ...over,
 });
 
@@ -22,7 +23,7 @@ const payload = (entries: QueueExportEntry[] = [entry({})]): QueueExportPayload 
   format: "shwephala-queue-export", formatVersion: 1, appVersion: "1.0.16", exportedAt: "2026-10-13T02:00:00.000Z",
   tillId: "till-abc123", backendHost: "pos.example.test",
   session: { userId: "user-1", orgId: "org-1", shopId: "shop-1", role: "CASHIER" },
-  entries, provisionalIdMap: [], redactedFields: 0,
+  entries, provisionalIdMap: [], redactedFields: 0, reconciliationLog: [],
 });
 
 async function flipCiphertextByte(text: string): Promise<string> {

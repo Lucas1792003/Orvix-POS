@@ -85,7 +85,8 @@ export async function quarantineForeignOutboxEntries(db: LocalDb, origin: string
       // A set-aside entry is already out of the sync path; it keeps its own
       // status (and its pre-archive status) until an owner restores it —
       // restoring re-runs this rule on the next drain.
-      if (belongsToBackend(entry, origin) || entry.status === "quarantined" || entry.status === "archived") return;
+      // RC3: a reconciled entry is closed by the owner's record; never re-quarantined.
+      if (belongsToBackend(entry, origin) || entry.status === "quarantined" || entry.status === "archived" || entry.status === "reconciled") return;
       entry.statusBeforeQuarantine = entry.status;
       entry.status = "quarantined";
       entry.quarantinedAt = now.toISOString();

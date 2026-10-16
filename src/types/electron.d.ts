@@ -62,6 +62,31 @@ export interface ElectronQueueExportSaveResult {
   error?: string;
 }
 
+export interface ElectronReconcileAttestRequest {
+  accessToken: string;
+  localId: string;
+  entryDigest: string;
+  recordDigest: string;
+}
+
+export interface ElectronReconcileAttestResult {
+  ok: boolean;
+  code: string;
+  message?: string;
+  owner?: { userId: string; name: string; orgId: string | null; role: "ADMIN"; verifiedAt: string; source: "backend" };
+  seal?: string;
+}
+
+export interface ElectronReconcileSealItem {
+  localId: string;
+  entryDigest: string;
+  recordDigest: string;
+  ownerUserId: string;
+  ownerName: string;
+  verifiedAt: string;
+  seal: string;
+}
+
 export interface ElectronAPI {
   isElectron: true;
   platform: string;
@@ -78,6 +103,11 @@ export interface ElectronAPI {
   /** RC2: prime main's owner verification while the server is reachable. */
   verifyOwnerSession?: (request: { accessToken: string }) => Promise<{ ok: boolean; code?: string }>;
   reportAppState?: (state: ElectronAppState) => void;
+  /** RC3: fresh server-verified owner check + seal for one reconciliation
+   *  (electron/reconcileAuthority.cjs). Never cached; refused offline. */
+  reconcileAttest?: (request: ElectronReconcileAttestRequest) => Promise<ElectronReconcileAttestResult>;
+  /** RC3: verify stored reconciliation seals (one boolean per item). */
+  reconcileVerifySeals?: (items: ElectronReconcileSealItem[]) => Promise<boolean[]>;
   onUpdateRequest?: (callback: (request: { action: "open-export" | "sync-now" }) => void) => () => void;
   /** Save an ENCRYPTED pending-queue export through the native save dialog
    *  (main process writes; the renderer has no file-system access). */

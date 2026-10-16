@@ -1,24 +1,41 @@
 // ----------------------------------------------------------------------
 // Which outbox entries were exported (saved to an encrypted .spqx file) in
 // THIS app session. Memory only, on purpose: the desktop updater's
-// "install after export" recovery path and dismissing a quarantined entry
-// both require an export the operator made just now, not one from an
-// earlier day. Dependency-free.
+// "install after export" recovery path, setting an entry aside and (RC3)
+// reconciling one all require an export the operator made just now, not one
+// from an earlier day. RC3 also keeps, per entry, the digest of exactly what
+// was exported (lib/reconcile/digest.ts entryDigest), so a reconciliation
+// can prove the file holds THIS version of the entry. Dependency-free.
 // ----------------------------------------------------------------------
 
-const exported = new Set<string>();
+export interface ExportedEntryRef {
+  opId: string;
+  /** entryDigest of the row as exported; absent for callers that only know ids. */
+  digest?: string;
+}
+
+const exported = new Map<string, { digest: string | null; at: string }>();
 let lastExportAt: string | null = null;
 const listeners = new Set<() => void>();
 
 /** Called by exportPendingQueue() after the file was saved / downloaded. */
-export function recordQueueExport(opIds: readonly string[], at: Date = new Date()): void {
-  for (const id of opIds) exported.add(id);
-  lastExportAt = at.toISOString();
+export function recordQueueExport(entries: readonly (string | ExportedEntryRef)[], at: Date = new Date()): void {
+  const when = at.toISOString();
+  for (const e of entries) {
+    const ref = typeof e === "string" ? { opId: e } : e;
+    exported.set(ref.opId, { digest: ref.digest ?? null, at: when });
+  }
+  lastExportAt = when;
   for (const l of listeners) l();
 }
 
 export function wasExported(opId: string): boolean {
   return exported.has(opId);
+}
+
+/** The digest and time of this session's latest export of `opId`, or null. */
+export function exportedEntry(opId: string): { digest: string | null; at: string } | null {
+  return exported.get(opId) ?? null;
 }
 
 /** True when every given outbox id was exported in this session (an empty

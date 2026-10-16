@@ -18,6 +18,9 @@ import {
 } from "../lib/outboxSetAsidePolicy";
 import type { SyncOutboxEntry } from "../lib/localDb";
 import { ExportQueueDialog } from "../components/sync/ExportQueueDialog";
+import { ReconcileDialog } from "../components/sync/ReconcileDialog";
+import { desktopVerifyDeps, verifyReconciledEntries } from "../stores/data/reconcile";
+import { isReconcilableStatus } from "../lib/reconcile/policy";
 import { useTranslation } from "../hooks/useTranslation";
 
 const RPC_LABELS: Record<string, string> = {
@@ -104,12 +107,17 @@ export const SyncConflictsPage = () => {
   const [exportOpen, setExportOpen] = useState(false);
   // The entry the confirmation dialog is about, fixed when it opens.
   const [confirmEntry, setConfirmEntry] = useState<SyncOutboxEntry | null>(null);
+  // RC3: the entry the reconcile dialog is about.
+  const [reconcileEntry, setReconcileEntry] = useState<SyncOutboxEntry | null>(null);
   const [, setExportTick] = useState(0);
   const { t } = useTranslation();
 
   const refresh = useCallback(async () => {
     setIsLoading(true);
     try {
+      // RC3: a reconciled row whose record no longer checks out goes back to
+      // Set aside (needs attention) before the list is shown.
+      await verifyReconciledEntries(desktopVerifyDeps()).catch((err) => console.error("[sync] reconciliation check failed:", err));
       setEntries(await listOutboxEntries());
       setLoadedAt(Date.now());
     } finally {
@@ -125,8 +133,9 @@ export const SyncConflictsPage = () => {
   useEffect(() => onQueueExported(() => setExportTick((n) => n + 1)), []);
 
   const shopName = (shopId: string | null) => shops.find((s) => s.id === shopId)?.name ?? shopId ?? "—";
-  const queueEntries = entries.filter((e) => e.status !== "archived");
+  const queueEntries = entries.filter((e) => e.status !== "archived" && e.status !== "reconciled");
   const setAsideEntries = entries.filter((e) => e.status === "archived");
+  const reconciledEntries = entries.filter((e) => e.status === "reconciled");
   const conflictCount = queueEntries.filter((e) => e.status === "conflict").length;
   const pendingCount = queueEntries.length - conflictCount;
   const locked = busy || isLoading;
@@ -198,7 +207,8 @@ export const SyncConflictsPage = () => {
   const summary = isLoading
     ? "Loading…"
     : `${conflictCount} ${conflictCount === 1 ? "conflict" : "conflicts"} · ${pendingCount} ${pendingCount === 1 ? "entry" : "entries"} still syncing` +
-      (setAsideEntries.length > 0 ? ` · ${setAsideEntries.length} set aside` : "");
+      (setAsideEntries.length > 0 ? ` · ${setAsideEntries.length} set aside` : "") +
+      (reconciledEntries.length > 0 ? ` · ${reconciledEntries.length} reconciled` : "");
 
   return (
     <Card>
@@ -266,6 +276,17 @@ export const SyncConflictsPage = () => {
                             Retry
                           </Button>
                         )}
+                        {isOwner && (
+                          <Button
+                            variant="secondary" size="sm"
+                            disabled={locked || !isReconcilableStatus(entry.status)}
+                            title={isReconcilableStatus(entry.status) ? "Document what happened to it (owner)" : "Still in the sync queue: set it aside first, then reconcile it."}
+                            onClick={() => setReconcileEntry(entry)}
+                            data-testid="outbox-reconcile"
+                          >
+                            Reconcile
+                          </Button>
+                        )}
                         <Button
                           variant="danger" size="sm"
                           disabled={locked || block === "not-owner"}
@@ -310,9 +331,21 @@ export const SyncConflictsPage = () => {
                     <TD>{shopName(entry.shopId)}</TD>
                     <TD>{new Date(entry.createdAt).toLocaleString()}</TD>
                     <TD>{entry.archivedAt ? new Date(entry.archivedAt).toLocaleString() : "—"}</TD>
-                    <TD><Badge tone="slate">{entry.statusBeforeArchive ?? "—"}</Badge></TD>
                     <TD>
-                      <div className="flex justify-end">
+                      <Badge tone="slate">{entry.statusBeforeArchive ?? "—"}</Badge>
+                      {entry.reconcileRejected && (
+                        <span className="ml-1" data-testid="reconcile-rejected" title={entry.reconcileRejected.reason}>
+                          <Badge tone="red">Reconciliation rejected: needs attention</Badge>
+                        </span>
+                      )}
+                    </TD>
+                    <TD>
+                      <div className="flex justify-end gap-2">
+                        {isOwner && (
+                          <Button variant="secondary" size="sm" disabled={locked} onClick={() => setReconcileEntry(entry)} data-testid="set-aside-reconcile">
+                            Reconcile
+                          </Button>
+                        )}
                         <Button
                           variant="secondary" size="sm"
                           disabled={locked || !isOwner}
@@ -331,6 +364,62 @@ export const SyncConflictsPage = () => {
           </div>
         </div>
       )}
+      {reconciledEntries.length > 0 && (
+        <div className="mt-6" data-testid="reconciled-list">
+          <h3 className="text-sm font-semibold text-slate-700">Reconciled ({reconciledEntries.length})</h3>
+          <p className="mt-1 text-xs text-slate-500">
+            The owner documented what happened to these. They are never sent, stay on this till and in every export, and no
+            longer hold back updates while their record checks out.
+          </p>
+          <div className="mt-2">
+            <Table>
+              <THead>
+                <TR>
+                  <TH>Action</TH>
+                  <TH>Shop</TH>
+                  <TH>Resolution</TH>
+                  <TH>Server sale</TH>
+                  <TH>Owner</TH>
+                  <TH>Reconciled at</TH>
+                  <TH>Reason</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {reconciledEntries.map((entry) => {
+                  const r = entry.reconciliation;
+                  return (
+                    <TR key={entry.localId} data-testid="reconciled-row" data-resolution={r?.resolution ?? ""}>
+                      <TD>{describeEntry(entry)}</TD>
+                      <TD>{shopName(entry.shopId)}</TD>
+                      <TD><Badge tone={r?.resolution === "cancelled" ? "slate" : "green"}>{r?.resolution ?? "—"}</Badge></TD>
+                      <TD>{r?.serverRef ? (r.serverRef.receiptNo ?? r.serverRef.saleId) : "—"}</TD>
+                      <TD>{r?.owner?.name ?? "—"}</TD>
+                      <TD>{r ? new Date(r.reconciledAt).toLocaleString() : "—"}</TD>
+                      <TD><span className="text-xs text-slate-600 break-words">{r?.reason ?? ""}</span></TD>
+                    </TR>
+                  );
+                })}
+              </TBody>
+            </Table>
+          </div>
+        </div>
+      )}
+      <ReconcileDialog
+        localId={reconcileEntry?.localId ?? null}
+        label={reconcileEntry ? describeEntry(reconcileEntry) : ""}
+        shop={reconcileEntry ? shopName(reconcileEntry.shopId) : ""}
+        isOwner={isOwner}
+        onClose={() => setReconcileEntry(null)}
+        onDone={(row) => {
+          setReconcileEntry(null);
+          addToast({ variant: "success", title: "Reconciled", description: `Recorded as ${row.reconciliation?.resolution ?? "reconciled"}. The entry stays on this till and in every export; it no longer holds back updates.` });
+          void refresh();
+        }}
+        onError={(message) => {
+          addToast({ variant: "error", title: "Not reconciled", description: message });
+          void refresh();
+        }}
+      />
       <Modal
         open={confirmEntry !== null}
         title="Set this entry aside?"
