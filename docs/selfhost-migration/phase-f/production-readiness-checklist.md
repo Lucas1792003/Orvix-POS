@@ -75,3 +75,16 @@ States: **DONE** (verified, evidence linked) · **READY** (prepared and tested, 
 
 ### Publication branch: gitleaks findings verified harmless (2026-10-16)
 gitleaks 8.30.1 over `main..publish/selfhost-support` (fresh single-branch clone): 7 `generic-api-key` hits, all test literals — `0f8fad5b-d9cb-469f-a165-70867728950e` / `7c9e6679-7425-40de-944b-e07fc1f90ae7` (RFC 4122 example UUIDs used as idempotency keys in staffForm/createStaffUser/staff_admin tests), `sb_secret_abcdef0123456789` (fake key a phone-page test asserts is refused), `signed-t14-ok1` / `signed-t14-exp1` (literal token labels in harness t14). The server's real anon and service keys occur **0** times in the publish-only history. Not pushed.
+
+### Canary readiness (2026-10-16)
+| # | Item | State | Evidence |
+|---|---|---|---|
+| K1 | RC1 frozen (read-only, SHA256SUMS) | DONE | release-1.0.16.md §8 |
+| K2 | RC1 override audit: export recoverable, no automatic deletion — PASS; defects D1 Dismiss (medium), D2 stuck syncing (medium), D3 ID-map prune (medium), D4 owner-only not enforced (low) | OPEN — owner decides RC2 | electron-compatibility.md, `audit/rc1/` |
+| K3 | Per-till migration register + "migrated" rule | DONE (template) | till-register.csv, till-readiness-084.md §2.1 |
+| K4 | Non-destructive canary (CANARY-tagged data only, fingerprint SQL) | DONE (prepared) | canary-1.0.16-checklist.md, canary-1.0.16-fingerprint.sql |
+| K5 | Hosted delta check prepared (owner runs) | OWNER | hosted-delta-check.md |
+| K6 | Studio isolation rehearsed on a temporary gateway; revert byte-identical | READY — approval | studio-isolation.md |
+| K7 | L1: gateway access log records query strings (short-lived upload tokens, public anon key, staff e-mail filter values); fix prepared and tested, not applied | OPEN — approval (same restart as K6) | gateway-logging-review.md |
+| K8 | Publication branch gitleaks findings harmless | DONE | §"Publication branch" above |
+| K9 | Owner action list by location | DONE | [owner-actions.md](owner-actions.md) |
