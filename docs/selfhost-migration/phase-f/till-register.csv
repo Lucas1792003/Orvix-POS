@@ -1,0 +1,4 @@
+# Till register (PRIVATE). Method: till-readiness-084.md §2. One row per till; never delete a row, set retired=yes.
+# user_ref = the "u-<10 hex>" pseudonym printed by deploy/lucashome/verify-till-readiness.sh (never a user id or e-mail).
+# Times in UTC, e.g. 2026-10-20T03:15:00Z.
+till_id,label,shop_id,user_ref,updated_utc,test_utc,retired

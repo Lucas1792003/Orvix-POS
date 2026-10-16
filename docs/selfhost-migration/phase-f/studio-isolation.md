@@ -1,8 +1,10 @@
 # Phase F: isolating Supabase Studio from the shared API origin
 
-Status: **prepared and tested locally, NOT applied** (2026-10-16). Nothing was
-changed on the server. Read-only checks only. Applying needs the owner's
-approval (§7). Closes checklist item A6d once applied and verified.
+Status: **deploy-ready, NOT applied** (2026-10-16). Nothing was changed on
+the server; read-only checks only. The change is now a controlled, reversible
+script (`studio-isolation.sh` status / stage / validate / apply / revert,
+§7), like the G5 header rule. Applying needs the owner's approval. Closes
+checklist item A6d once applied and verified.
 
 Related: [`production-readiness-checklist.md`](production-readiness-checklist.md)
 A6d / C4, [`remote-access-architecture.md`](remote-access-architecture.md) §5.3
@@ -20,7 +22,7 @@ its tailnet name.
 | Gateway | compose service `api-gw`, container `supabase-envoy`, Envoy v1.39.1, published `127.0.0.1:8000` only | `docker ps --format '{{.Names}} {{.Ports}}'` |
 | Studio | compose service `studio`, container `supabase-studio`, healthy, `3000/tcp` exposed on the Docker network only (not published) | same; `docker inspect` health |
 | Tailnet origin | `https://<host>.<tailnet-name>.ts.net` (tailnet only) → `/` proxy `http://127.0.0.1:8000`. Funnel: no public entry | `tailscale serve status`, `tailscale funnel status` |
-| Envoy template | `volumes/api/envoy/lds.template.yaml` is **byte-identical to upstream** `self-hosted/v0.8.2` (sha256 `9d9a6d6e…73566c3d`). Neither optional rule (083 headers, phone-upload rate limit) is applied | `sha256sum` on the server vs the file fetched at the pinned commit |
+| Envoy template | `volumes/api/envoy/lds.template.yaml` sha256 **`a635a7aa…2190e571`** since 2026-10-16 06:37 UTC = upstream `self-hosted/v0.8.2` (`9d9a6d6e…73566c3d`, kept as `lds.template.yaml.pre-g5-headers`) **+ the G5 header rule** (reproduced byte-for-byte by `envoy_storage_headers.py apply` on upstream). The four Studio/pg routes are still the upstream block. Rate-limit rule not applied. Only `${…}` placeholders, no values (checked before copying) | `sha256sum`; `studio_isolation.py status` (read-only, `ssh … 'python3 -I - status <lds> <override>' < studio_isolation.py`) → `lds: upstream`, `override: upstream` |
 | Routes to Studio | three routes on the one listener `supabase` (port 8000): `/api/mcp` → `studio` (RBAC deny), `/mcp` → `studio` (RBAC deny), and the **catch-all `/` → `studio`**, the only route that keeps basic auth on. `/pg/` → `meta` (pg-meta), service key required | `grep` of route names / prefixes / clusters only |
 | Compose dependency | `api-gw` `depends_on: studio: condition: service_healthy` (upstream) | `docker compose config` |
 | Host ports in use | `0.0.0.0:3000` (open-webui), `0.0.0.0:3100` (another app), `127.0.0.1:5432`, `127.0.0.1:8000`. `54323` is free | `ss -ltn` |
@@ -102,10 +104,14 @@ tunnel is small and it adds a second listener to maintain.
 
 | File | Purpose |
 |---|---|
-| [`deploy/lucashome/studio-isolation/lds-studio-isolation.patch`](../../../deploy/lucashome/studio-isolation/lds-studio-isolation.patch) | unified diff for `volumes/api/envoy/lds.template.yaml`, apply with `patch -p1` in `/srv/supabase/stack`. Pinned: upstream `9d9a6d6e…73566c3d` → patched `95bd48a7…0064f8f` |
+| [`deploy/lucashome/studio-isolation/studio-isolation.sh`](../../../deploy/lucashome/studio-isolation/studio-isolation.sh) | **the server procedure**: `status` (read-only), `stage` (edited copies to `~/studio-isolation/stage/`), `validate` (envoy `--mode validate` + temporary test gateway + `verify`), `verify` (read-only HTTP checks, §7.1), `apply --yes`, `revert --yes` |
+| [`deploy/lucashome/studio-isolation/studio_isolation.py`](../../../deploy/lucashome/studio-isolation/studio_isolation.py) | the edit itself, status / apply / revert, for the template **and** the compose override. Replaces the upstream four-route block (sha256 pinned `f121d31b…`) by `phf-not-found`; adds / removes exactly 4 lines in the override's `studio:` block. Idempotent; unknown state refuses and writes nothing; prints structure only |
+| [`deploy/lucashome/studio-isolation/upstream-studio-routes.yaml`](../../../deploy/lucashome/studio-isolation/upstream-studio-routes.yaml) | the verbatim upstream block that `revert` puts back (placeholders only) |
+| [`deploy/lucashome/studio-isolation/lds-studio-isolation.patch`](../../../deploy/lucashome/studio-isolation/lds-studio-isolation.patch) | superseded by the script, kept for review: `apply` on upstream gives exactly its patched sha `95bd48a7…0064f8f`. Not used on the server any more (today's file is not upstream by sha) |
 | [`deploy/lucashome/studio-isolation/compose-studio-loopback.yml`](../../../deploy/lucashome/studio-isolation/compose-studio-loopback.yml) | the `ports:` entry for the `studio` block of `docker-compose.override.yml` (required) |
 | [`deploy/lucashome/studio-isolation/compose-studio-on-demand.yml`](../../../deploy/lucashome/studio-isolation/compose-studio-on-demand.yml) | optional (d): `profiles: [studio]` + `api-gw.depends_on: !reset {}` |
-| [`deploy/lucashome/tests/envoy-studio-isolation-test.sh`](../../../deploy/lucashome/tests/envoy-studio-isolation-test.sh) | local proof, §8 |
+| [`deploy/lucashome/tests/envoy-studio-isolation-test.sh`](../../../deploy/lucashome/tests/envoy-studio-isolation-test.sh) | local proof of the route change, §8 |
+| [`deploy/lucashome/tests/studio-isolation-tool-test.sh`](../../../deploy/lucashome/tests/studio-isolation-tool-test.sh) | local proof of the script: shas, idempotency, order independence, compose, Envoy run + `verify`, §8.1 |
 
 ### 5.1 Envoy change
 
@@ -150,9 +156,15 @@ still reads them.
   studio:
     mem_limit: 512m
     logging: *default-logging
+    # phf-studio-loopback: Studio only on the server's loopback; reach it with
+    #   ssh -N -L 127.0.0.1:54323:127.0.0.1:54323 <host>  (never 0.0.0.0 / a tailnet address)
     ports:
       - "127.0.0.1:54323:3000/tcp"
 ```
+
+`studio_isolation.py` adds exactly these 4 lines at the end of the existing
+`studio:` block (and `revert` removes exactly them); it refuses if the block
+already has its own `ports:`.
 
 Checked with `docker compose config` against upstream compose + the current
 override: Studio gets `host_ip: 127.0.0.1, published: 54323, target: 3000`.
@@ -163,11 +175,12 @@ default service list no longer contains `studio`; `--profile studio` adds it.
 
 - The 083 storage header rule inserts a route **before** `/storage/v1/`; the
   phone-upload rate limit inserts a route **before** `functions-v1-all`.
-  Both also add a filter before `envoy.filters.http.router`. This patch only
-  touches the end of the route list. All three can be applied in any order;
-  the patch still applies (with an offset) after the other two, and the
-  combined config is tested (§8). Only the patched-sha check in §7 step 2
-  then differs; check with `grep` instead.
+  Both also add a filter before `envoy.filters.http.router`. This change only
+  touches the end of the route list. All three (and the prepared access-log
+  field) can be applied in any order; `studio_isolation.py` anchors on the
+  pinned upstream block, not on line numbers or the file sha, and the
+  combined result is byte-identical in every order (§8.1). The server file
+  already carries the header rule (sha `a635a7aa…`).
 - `phf-not-found` must stay the **last** route. Any route added later goes
   above it, otherwise it is unreachable.
 - After this change, the 083 rule's argument "no access to the origin's
@@ -231,34 +244,81 @@ the cached basic-auth credentials; they no longer open anything anyway).
 ## 7. Apply procedure (owner approval required; not executed)
 
 Outside shop hours: recreating `api-gw` drops API connections for a few
-seconds; tills retry from the outbox.
+seconds; tills retry from the outbox. Recreating the gateway also resets its
+access log: run `verify-till-readiness.sh reduce >> …` first
+([till-readiness-084.md](till-readiness-084.md) §3.3), and consider applying
+the prepared access-log field (`envoy_access_log_client_info.py`, same
+stage / validate / install pattern) in the same window, so the log resets once.
 
 ```
-mac$ ssh <host> 'mkdir -p ~/studio-isolation'
-mac$ scp deploy/lucashome/studio-isolation/lds-studio-isolation.patch <host>:~/studio-isolation/
-ls$  cd /srv/supabase/stack
-ls$  sha256sum volumes/api/envoy/lds.template.yaml          # 9d9a6d6e… (or note the value if the optional rules are in)
-ls$  cp -p volumes/api/envoy/lds.template.yaml volumes/api/envoy/lds.template.yaml.pre-studio-isolation.$(date -u +%Y%m%dT%H%M%SZ)
-ls$  patch -p1 --dry-run < ~/studio-isolation/lds-studio-isolation.patch && patch -p1 < ~/studio-isolation/lds-studio-isolation.patch
-ls$  sha256sum volumes/api/envoy/lds.template.yaml          # 95bd48a7… when started from upstream
-ls$  grep -c 'cluster: studio' volumes/api/envoy/lds.template.yaml   # 0
-mac$ # repo: add the ports entry (5.2) to deploy/lucashome/docker-compose.override.yml, commit
-mac$ scp deploy/lucashome/docker-compose.override.yml <host>:/srv/supabase/stack/
-ls$  docker compose config --quiet
-ls$  docker compose up -d studio                            # recreated with 127.0.0.1:54323
-ls$  docker compose up -d --force-recreate api-gw           # re-renders lds.yaml from the template
-ls$  docker compose ps                                      # all healthy
+mac$ scp -r deploy/lucashome/studio-isolation lucashome:~/
+ls$  cd ~/studio-isolation
+ls$  ./studio-isolation.sh status        # lds: upstream (sha a635a7aa), override: upstream; probe / -> 401|challenge=1
+ls$  ./studio-isolation.sh stage         # writes stage/lds.template.yaml + stage/docker-compose.override.yml; stack untouched
+ls$  ./studio-isolation.sh validate      # must end "0 failed"
 ```
 
-`--force-recreate` matters: the template is a single-file bind mount, and
-`patch` writes a new file (new inode). A plain `restart` would keep the old
-file in the container.
+`validate` checks the staged template with `api-gw --mode validate`, prints
+the staged override's Studio port as compose resolves it (`127.0.0.1 54323
+3000`), then starts a **temporary** gateway on the real compose network with
+only the staged template, as was done for the header rule:
 
-Then §6. Afterwards: update `deploy/lucashome/README.md` (deployed state),
-checklist A6d → DONE with the evidence file, and add the template sha to the
-post-upgrade checks: an upstream `update.sh` may replace or merge
-`lds.template.yaml`. After any upgrade, `grep -c 'cluster: studio'` must be
-0 and §6.1 must pass before traffic is restored to the public origin.
+```
+docker compose run --rm --no-deps -d --name phf-gw-test -p 127.0.0.1:18001:8000 \
+  -v ~/studio-isolation/stage/lds.template.yaml:/etc/envoy/lds.template.yaml:ro api-gw
+```
+
+and runs `verify --base http://127.0.0.1:18001 --gateway-only` against it
+(real auth, PostgREST, storage and functions behind it). It refuses if port
+18001 or the container name is taken, and removes the container afterwards.
+Production traffic is not touched.
+
+After a passing `validate`:
+
+```
+ls$  ./studio-isolation.sh apply --yes
+```
+
+`apply` re-derives the edit from the live files and refuses if they changed
+since `stage`. Then: backups `lds.template.yaml.pre-studio-isolation.<UTC>`
+and `docker-compose.override.yml.pre-studio-isolation.<UTC>`, install, `docker
+compose config --quiet`, `up -d studio` (port 127.0.0.1:54323), `up -d
+--force-recreate api-gw` (single-file bind mount: the new file is a new inode,
+a plain restart would keep the old one), wait for the gateway, `status`
+(lds: isolated, override: isolated), and the full `verify` (§7.1, including
+the Studio loopback checks). Then from the Mac:
+
+```
+mac$ O=https://<host>.<tailnet-name>.ts.net
+mac$ for p in / /project/default /api/mcp /pg/; do curl -s -o /dev/null -w "$p %{http_code}\n" "$O$p"; done   # all 404
+mac$ ssh -N -L 127.0.0.1:54323:127.0.0.1:54323 lucashome     # foreground; Ctrl-C when done
+mac$ open http://127.0.0.1:54323                              # Studio; Table editor + SQL editor work
+```
+
+Plus one desktop-app login, a product list load and one phone upload by QR
+(§6.2).
+
+Afterwards, in the repo: copy the server's new override back
+(`scp lucashome:/srv/supabase/stack/docker-compose.override.yml deploy/lucashome/`;
+the repo copy and the server copy were the same `f3d56b05…` on 2026-10-16, so
+the result is the tool's edit only), commit; update
+`deploy/lucashome/README.md` (deployed state); checklist A6d → DONE with the
+evidence; add `./studio-isolation.sh status` to the post-upgrade checks. An
+upstream `update.sh` may replace or merge `lds.template.yaml`: after any
+upgrade, `status` must say `lds: isolated` and §6.1 must pass before traffic
+is restored to a public origin. If an upgrade changed the upstream block,
+`status` says `unknown` and `apply` refuses: re-derive the block, update
+`upstream-studio-routes.yaml` and its pinned sha, re-run the tests.
+
+### 7.1 What `verify` checks
+
+| Group | Checks | Expected after apply |
+|---|---|---|
+| Studio gone from the shared origin | GET `/`, `/project/default`, `/project/default/editor`, `/api/platform/profile`, `/api/platform/pg-meta/default/query`, `/api/mcp`, `/mcp`, `/pg/`, `/pg/tables`, `/favicon.ico`, `/_next/…`, `/nonexistent`; POST pg-meta query; `..` from `/rest/v1/` | `404`, no `WWW-Authenticate` |
+| API unchanged | `/auth/v1/health` without key → 401, no challenge; `/rest/v1/` without key → 401; `/storage/v1/version` → 200; `/functions/v1/phone-upload-page` → 200; `/functions/v1/phone-upload-token` routed | as today |
+| Public image | one product's public image URL from the DB (path never printed) → 200, `image/*`; when the template carries the G5 rule: `nosniff` + CSP `sandbox` | unchanged |
+| Signed URL | service key read by exact name from `.env`, sent with `curl -K -` (never printed); sign that object for 60 s → download 200 | unchanged |
+| Studio on loopback (skipped with `--gateway-only`) | `docker port supabase-studio` = `127.0.0.1:54323`; listener bound to 127.0.0.1 only; Studio answers there | new |
 
 ## 8. Local test evidence
 
@@ -287,16 +347,54 @@ gateways side by side:
 
 Result 2026-10-16: **58 passed, 0 failed**.
 
+### 8.1 The deploy-ready script
+
+`deploy/lucashome/tests/studio-isolation-tool-test.sh` (Envoy v1.39.1,
+`node:24-slim` stubs, containers `phf-si-tool-test-*`, loopback ports). Run
+with `SERVER_LDS=<read-only copy of the server template>`: **49 passed, 0
+failed** (2026-10-16).
+
+- Inputs: upstream files at the pinned commit; the server template is
+  re-derived (`envoy_storage_headers.py apply` on upstream = `a635a7aa…`), the
+  read-only server copy is byte-identical to it, no secret-looking value.
+- `apply` on upstream = the reviewed patch (`95bd48a7…`); `phf-not-found` is
+  the last route; no `cluster: studio`, no `pg-protected`.
+- Idempotent (apply twice; in place); `revert(apply(x)) = x` for upstream and
+  for the server file (`a635a7aa…`); revert on upstream is a no-op.
+- Order independence: header(studio(upstream)) = studio(header(upstream));
+  with the prepared access-log field too (all orders give the same bytes).
+- A changed upstream block (or a changed not-found block, for revert) is
+  refused with nothing written; status `unknown`.
+- Compose: the repo override (= server copy) is `upstream`; apply adds
+  exactly 4 lines; idempotent; revert = original bytes; `docker compose
+  config` of upstream compose + edited override gives Studio `127.0.0.1:54323
+  → 3000` (api-gw stays on 127.0.0.1); the current override publishes nothing.
+- Envoy: `--mode validate` passes for upstream+isolation, server+isolation,
+  the final template (server + isolation + access-log field) and the current
+  server template. `studio-isolation.sh verify --gateway-only` against the
+  final template: 0 failed, header rule and signed URL checked, no key in the
+  output, Studio stub never reached. The same `verify` against the current
+  server template fails exactly on the Studio lines (the checks bite).
+- The final template's access log ends with `"shwephala-pos/1.0.16
+  (validated-uploads)"` (or `"-"`), and `verify-till-readiness.sh reduce`
+  reads it as `desktop|1.0.16|yes`.
+
 ## 9. Rollback
 
 ```
-ls$  cd /srv/supabase/stack
-ls$  cp -p volumes/api/envoy/lds.template.yaml.pre-studio-isolation.<UTC> volumes/api/envoy/lds.template.yaml
-     # or: patch -R -p1 < ~/studio-isolation/lds-studio-isolation.patch
-mac$ # repo: remove the ports entry (and the on-demand blocks if merged); scp the override
-ls$  docker compose config --quiet && docker compose up -d studio && docker compose up -d --force-recreate api-gw
-ls$  curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/          # 401 again (Studio behind basic auth)
+ls$  cd ~/studio-isolation && ./studio-isolation.sh revert --yes
 ```
+
+`revert` backs up the current files (`*.pre-studio-revert.<UTC>`), puts the
+verbatim upstream route block back in place of `phf-not-found` and removes the
+4 override lines (both with `studio_isolation.py revert`, so a header rule or
+rate-limit rule applied in the meantime stays), recreates studio and api-gw,
+and checks `/` → `401 Basic`. Manual alternative: copy the
+`*.pre-studio-isolation.<UTC>` backups back (only if no other gateway rule was
+applied after them), then `docker compose config --quiet && docker compose up
+-d studio && docker compose up -d --force-recreate api-gw`. If the on-demand
+blocks (§5.4) were merged, remove them first. Repo: copy the reverted override
+back and commit.
 
 Rollback restores today's exposure, so it is only allowed while no public
 origin (tunnel, Funnel) exists.
@@ -317,6 +415,6 @@ no Tailscale Funnel, and no other public route to `127.0.0.1:8000` until:**
 
 ## 11. Items needing owner approval
 
-1. Apply §7 (Envoy patch + Studio loopback port), outside shop hours.
+1. Apply §7 (`studio-isolation.sh stage` → `validate` → `apply --yes`), outside shop hours; optionally the prepared access-log field ([till-readiness-084.md](till-readiness-084.md) §3.3) in the same gateway recreate.
 2. Optional (d): Studio stopped by default, started on demand.
 3. Record gate S in the remote-access plan and the checklist.
