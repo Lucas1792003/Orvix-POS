@@ -42,6 +42,7 @@ Thumbs.db
 
 # Testing
 coverage
+!/tools/security-audit/coverage/
 
 # Cache
 .cache

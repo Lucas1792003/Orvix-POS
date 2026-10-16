@@ -1,0 +1,6 @@
+{
+  "comment": "Items that are not database objects in the inventory (Edge Functions and the GoTrue signup surface). Every Edge Function directory that would be deployed must appear here and be covered by a test.",
+  "edge_functions": ["admin-2fa", "email-sales-report", "phone-upload-token", "phone-upload-page", "platform-console", "staff-admin"],
+  "edge_function_cover_prefix": "edge-fn:",
+  "extra_requirements": ["edge-fn:signup"]
+}
