@@ -71,6 +71,33 @@ export function assertCompressedPhoneUpload(bytes: number, publicUrl: string): v
   assertStorageUrlIsSafe(publicUrl);
 }
 
+/**
+ * The backend does not offer the validated upload flow at all: the
+ * `phone-upload-token` Edge Function is missing (hosted answers an unknown
+ * function with 404 `{code:"NOT_FOUND"}`, the self-hosted edge runtime with
+ * 500 "worker boot error"), it predates migration 083 (it ignores
+ * `action:"complete"` and answers with a token instead), or the session RPC
+ * itself is missing (PGRST202). Nothing was written in any of these cases.
+ */
+export class ValidatedUploadUnavailableError extends Error {
+  constructor(detail: string) {
+    super(
+      "This server does not support validated image uploads " +
+      `(${detail}). The image was not saved and nothing was written. Ask the owner to update the server.`,
+    );
+    this.name = "ValidatedUploadUnavailableError";
+  }
+}
+
+/** A response that did not come from phone-upload-token itself (it always
+ *  answers with a JSON `code` / known shape). */
+function isFunctionMissing(status: number, b: Record<string, unknown>): boolean {
+  const msg = typeof b.msg === "string" ? b.msg : typeof b.message === "string" ? b.message : "";
+  if (b.code === "NOT_FOUND") return true;
+  if (/InvalidWorkerCreation|worker boot error|could not find an appropriate entrypoint|Function not found/i.test(msg)) return true;
+  return status === 404 && typeof b.error !== "string" && typeof b.code !== "string";
+}
+
 export async function createProductImageUploadSession(input: {
   productId: string;
   shopId?: string | null;
@@ -80,7 +107,12 @@ export async function createProductImageUploadSession(input: {
     p_product_id: input.productId || null,
     p_shop_id: input.shopId || null,
   });
-  if (error) throw new Error(error.message);
+  if (error) {
+    if ((error as { code?: string }).code === "PGRST202") {
+      throw new ValidatedUploadUnavailableError("create_product_image_upload_session is not installed");
+    }
+    throw new Error(error.message);
+  }
   if (!data) throw new Error("Upload session was not created.");
 
   const session = data as SessionRpcRow;
@@ -268,6 +300,7 @@ export async function requestPhoneUploadTarget(
     throw new Error("The upload server returned an unexpected answer. Try again.");
   }
   const message = typeof b.error === "string" && b.error ? b.error : null;
+  if (isFunctionMissing(status, b)) throw new ValidatedUploadUnavailableError("its phone-upload-token service is not installed");
   if (status === 410 || b.code === "inactive") {
     const s = STATUSES.includes(b.status as ProductImageUploadSessionStatus)
       ? (b.status as ProductImageUploadSessionStatus)
@@ -435,7 +468,10 @@ export async function getProductImageUploadSessionStatus(
   try {
     res = await (opts.fetchImpl ?? fetch)(`${backendRest.url}/rest/v1/rpc/get_product_image_upload_session_status`, {
       method: "POST",
-      headers: { apikey: backendRest.anonKey, Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
+      headers: {
+        apikey: backendRest.anonKey, Authorization: `Bearer ${bearer}`, "Content-Type": "application/json",
+        ...("clientInfo" in backendRest && backendRest.clientInfo ? { "X-Client-Info": backendRest.clientInfo } : {}),
+      },
       body: JSON.stringify({ p_session_id: sessionId }),
       signal: controller.signal,
     });
@@ -522,6 +558,12 @@ export async function completeProductImageUploadSession(
   if (status === 200 && b.status === "COMPLETED" && b.storagePath === input.storagePath) {
     return body as ProductImageUploadSessionStatusResult;
   }
+  // A pre-083 phone-upload-token ignores action:"complete" and hands out a
+  // token: the server cannot validate the bytes, so the upload must fail.
+  if (status === 200 && b.status === undefined && (typeof b.token === "string" || b.alreadyUploaded === true)) {
+    throw new ValidatedUploadUnavailableError("its phone-upload-token service predates byte validation (migration 083)");
+  }
+  if (isFunctionMissing(status, b)) throw new ValidatedUploadUnavailableError("its phone-upload-token service is not installed");
   if (status === 410 || b.code === "inactive") {
     const s = STATUSES.includes(b.status as ProductImageUploadSessionStatus)
       ? (b.status as ProductImageUploadSessionStatus)

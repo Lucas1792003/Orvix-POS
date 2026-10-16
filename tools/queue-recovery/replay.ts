@@ -29,6 +29,8 @@ export type Outcome =
   | "rejected"                // permanent server rejection (validation, permission, mismatch …)
   | "skipped-conflict"        // the till had already parked it as a conflict (use --include-conflicts)
   | "skipped-redacted"        // payload was altered by the exporter's credential redaction
+  | "skipped-quarantined"     // the till quarantined it: queued for ANOTHER backend (e.g. v1.0.15 → hosted);
+                              // replayed only with --include-quarantined + --confirm-host (owner decision)
   | "blocked-unresolved-ref"  // depends on an entry that did not succeed / unknown provisional id
   | "not-attempted"           // the run stopped earlier on a transient failure
   | "planned";                // --dry-run
@@ -71,6 +73,9 @@ export interface ReplayOptions {
    *  (exact applied / already-applied classification). */
   ledgerToken?: string | null;
   includeConflicts?: boolean;
+  /** Also replay entries the till quarantined (queued for another backend).
+   *  An explicit owner decision: the CLI requires --confirm-host with it. */
+  includeQuarantined?: boolean;
   dryRun?: boolean;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
@@ -172,7 +177,7 @@ const shortKey = (k: string | null) => (k ? k.slice(0, 8) : "-");
 function emptyCounts(): Record<Outcome, number> {
   return {
     applied: 0, "already-applied": 0, accepted: 0, rejected: 0, "skipped-conflict": 0,
-    "skipped-redacted": 0, "blocked-unresolved-ref": 0, "not-attempted": 0, planned: 0,
+    "skipped-redacted": 0, "skipped-quarantined": 0, "blocked-unresolved-ref": 0, "not-attempted": 0, planned: 0,
   };
 }
 
@@ -231,6 +236,12 @@ export async function replayExport(payload: QueueExportPayload, options: ReplayO
     const e = ordered[i];
     if (report.stoppedOn) {
       push(e, "not-attempted", { detail: `run stopped at seq ${report.stoppedOn}` });
+      continue;
+    }
+    if (e.status === "quarantined" && !options.includeQuarantined) {
+      push(e, "skipped-quarantined", {
+        detail: `queued for ${e.backendOrigin ?? "an unrecorded backend (pre-1.0.16 build)"}; ${e.quarantineReason ?? "quarantined by the till"}`,
+      });
       continue;
     }
     if (e.status === "conflict" && !options.includeConflicts) {
@@ -344,7 +355,7 @@ export function formatReport(report: ReplayReport): string {
 
 /** Exit status: 0 when every replayable entry succeeded (or was planned). */
 export function exitCodeFor(report: ReplayReport): number {
-  const bad = report.counts.rejected + report.counts["blocked-unresolved-ref"] + report.counts["not-attempted"] + report.counts["skipped-redacted"];
+  const bad = report.counts.rejected + report.counts["blocked-unresolved-ref"] + report.counts["not-attempted"] + report.counts["skipped-redacted"] + report.counts["skipped-quarantined"];
   return bad > 0 ? 4 : 0;
 }
 

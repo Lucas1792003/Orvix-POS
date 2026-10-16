@@ -35,6 +35,7 @@ import {
   cancelProductImageUploadSession,
   createProductImageUploadSession,
   uploadPhoneProductImage,
+  ValidatedUploadUnavailableError,
   type PhoneUploadDeps,
   type ProductImageUploadSession,
   type ProductImageUploadSessionStatusResult,
@@ -151,6 +152,8 @@ export async function uploadProductImage(
     result = await upload(session.token, image, { sessionExpiresAt: session.expiresAt, ...(deps.uploadDeps ?? {}) });
   } catch (e) {
     await cancelSession(session.sessionId).catch(() => undefined);
+    // A server without the validated flow: say so plainly (nothing was saved).
+    if (e instanceof ValidatedUploadUnavailableError) throw e;
     const message = e instanceof Error && e.message ? e.message : "unknown error";
     throw new Error(message.startsWith("Image upload failed") ? message : `Image upload failed: ${message}`);
   }

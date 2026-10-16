@@ -51,6 +51,8 @@ function toEntry(row: StoredRow, counter: { n: number }): QueueExportEntry {
     lastErrorClass: row.failureKind ?? null,
     lastError: row.lastError ? row.lastError.slice(0, 500) : null,
     nextAttemptAt: row.nextAttemptAt ?? null,
+    backendOrigin: row.backendOrigin ?? null,
+    quarantineReason: row.quarantineReason ?? null,
   };
 }
 

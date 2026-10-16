@@ -9,9 +9,11 @@
 import { localDb } from "../localDb";
 import { backendHost } from "../supabase";
 import { getTillId } from "../tillId";
+import { APP_VERSION } from "../clientInfo";
 import { useAuthStore } from "../../stores/authStore";
 import { useAppStore } from "../../stores/appStore";
 import { collectQueueExport } from "./collect";
+import { recordQueueExport } from "./exportRecord";
 import {
   assertNoSecretValues, defaultExportFileName, encryptQueueExport, summarize, type QueueExportSummary,
 } from "./format";
@@ -50,7 +52,7 @@ export function knownSecretValues(): string[] {
 
 async function appVersion(): Promise<string> {
   try {
-    return (await window.electronAPI?.appVersion()) ?? "web";
+    return (await window.electronAPI?.appVersion()) ?? `web-${APP_VERSION}`;
   } catch {
     return "unknown";
   }
@@ -83,6 +85,7 @@ export async function exportPendingQueue(passphrase: string): Promise<ExportQueu
     const res = await api.saveQueueExport({ defaultFileName: fileName, contents });
     if (res.canceled) return { status: "canceled" };
     if (!res.ok || !res.filePath) throw new Error(res.error ?? "The file could not be saved.");
+    recordQueueExport(payload.entries.map((e) => e.opId));
     return { status: "saved", filePath: res.filePath, summary };
   }
 
@@ -98,5 +101,6 @@ export async function exportPendingQueue(passphrase: string): Promise<ExportQueu
   } finally {
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }
+  recordQueueExport(payload.entries.map((e) => e.opId));
   return { status: "downloaded", fileName, summary };
 }

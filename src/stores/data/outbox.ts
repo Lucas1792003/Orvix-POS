@@ -1,4 +1,5 @@
 import { supabase } from "../../lib/supabase";
+import { belongsToBackend, currentBackendOrigin, quarantineForeignOutboxEntries } from "../../lib/backendOrigin";
 import { localDb, SYNC_STATE_KEYS, type SyncOutboxEntry } from "../../lib/localDb";
 import { newId } from "../../lib/id";
 import { isDuplicateError, isNetworkError } from "../../lib/errors";
@@ -74,6 +75,9 @@ export async function enqueueOutbox(entry: EnqueueInput): Promise<void> {
     ...entry,
     args,
     idempotencyKey,
+    // Which backend this entry is for (blocker D-d): the drain sends it only
+    // to this origin; anywhere else it is quarantined (lib/backendOrigin.ts).
+    backendOrigin: currentBackendOrigin(),
     localId: newId("outbox"),
     createdAt: new Date().toISOString(),
     status: "pending",
@@ -188,12 +192,13 @@ export async function clearNeedsReauth(): Promise<void> {
 /** Recount the queue and push it to the UI store. */
 export async function refreshSyncStatus(): Promise<void> {
   try {
-    const [pendingCount, conflictCount, needsReauth] = await Promise.all([
+    const [pendingCount, conflictCount, quarantinedCount, needsReauth] = await Promise.all([
       countPendingOutbox(),
       localDb.syncOutbox.where("status").equals("conflict").count(),
+      localDb.syncOutbox.where("status").equals("quarantined").count(),
       readNeedsReauth(),
     ]);
-    useSyncStore.getState().setStatus({ pendingCount, conflictCount, needsReauth });
+    useSyncStore.getState().setStatus({ pendingCount, conflictCount, quarantinedCount, needsReauth });
   } catch (err) {
     console.error("[DB] Failed to read sync status:", err);
   }
@@ -371,6 +376,10 @@ export async function drainOutbox(): Promise<DrainResult> {
 
 async function runDrainPass(): Promise<DrainResult> {
   await pruneProvisionalIdMap();
+  // Never send an entry to a backend other than the one it was queued for
+  // (main.tsx does this at startup too; repeated here so the drain does not
+  // depend on it). Quarantined entries are not "pending" and are skipped.
+  if ((await quarantineForeignOutboxEntries(localDb, currentBackendOrigin())) > 0) await refreshSyncStatus();
   const queued = await localDb.syncOutbox.where("status").anyOf("pending", "failed").count();
   if (queued === 0) return "drained";
 
@@ -420,6 +429,15 @@ async function runDrainPass(): Promise<DrainResult> {
     // Stop here rather than let later (possibly dependent) entries overtake
     // it; the periodic trigger will come back once the window has passed.
     if (entry.nextAttemptAt && Date.parse(entry.nextAttemptAt) > Date.now()) return "backoff";
+
+    // Last line of defence for the origin rule: re-read the stored row (it
+    // may have been rewritten since the list above was taken) and refuse
+    // anything not tagged with this backend.
+    const stored = await localDb.syncOutbox.get(entry.localId);
+    if (!stored || !belongsToBackend(stored, currentBackendOrigin())) {
+      await quarantineForeignOutboxEntries(localDb, currentBackendOrigin());
+      continue;
+    }
 
     // Entries queued before Phase D carry no key (the Dexie v2 upgrade
     // assigns one, but be safe) — mint it now so that from this attempt on
@@ -508,6 +526,13 @@ export async function listOutboxEntries(): Promise<SyncOutboxEntry[]> {
  *  e.g. after a manager corrects the shop's stock so a re-run of the same
  *  sale might succeed. Clears the backoff window as well as the status. */
 export async function retryOutboxEntry(localId: string): Promise<void> {
+  // A quarantined entry belongs to another backend: retrying it here would
+  // send it to the wrong server. It can only be exported and reconciled.
+  const entry = await localDb.syncOutbox.get(localId);
+  if (!entry) return;
+  if (entry.status === "quarantined" || !belongsToBackend(entry, currentBackendOrigin())) {
+    throw new Error("This entry was queued for another server and cannot be retried here. Export it for the owner.");
+  }
   await localDb.syncOutbox.update(localId, {
     status: "pending", lastError: undefined, nextAttemptAt: undefined, failureKind: undefined,
   });
@@ -525,4 +550,11 @@ export async function dismissOutboxEntry(localId: string): Promise<void> {
 
 export async function countPendingOutbox(): Promise<number> {
   return localDb.syncOutbox.where("status").anyOf("pending", "syncing", "failed").count();
+}
+
+/** Everything the server does not have yet, whatever the status (pending,
+ *  syncing, failed, conflict, quarantined). The desktop updater guard
+ *  (electron/updateGuard.cjs) refuses to install while this is non-zero. */
+export async function countUnsyncedOutbox(): Promise<number> {
+  return localDb.syncOutbox.count();
 }

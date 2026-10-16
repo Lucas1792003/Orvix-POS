@@ -23,8 +23,33 @@ contextBridge.exposeInMainWorld("electronAPI", {
   /** Manually triggers an update check — progress/result arrives via onUpdateStatus. */
   checkForUpdates: () => ipcRenderer.invoke("updates:check"),
 
-  /** Quits and installs an already-downloaded update (only valid once onUpdateStatus reports "downloaded"). */
+  /** Quits and installs an already-downloaded update — only when the main
+   *  process's install guard allows it (no unsynced sales, online, signed in,
+   *  no sale in progress). Otherwise resolves { ok: false, blocked }. */
   installUpdate: () => ipcRenderer.invoke("updates:install"),
+
+  /** Owner's recovery path: install although entries are unsynced, allowed
+   *  only after they were exported in this session; main asks for a native
+   *  confirmation first. */
+  installUpdateRecovery: () => ipcRenderer.invoke("updates:install-recovery"),
+
+  /** Reports the facts the install guard needs (counts and flags only). */
+  reportAppState: (state) => {
+    const s = state && typeof state === "object" ? state : {};
+    const n = (v) => (Number.isInteger(v) && v >= 0 ? v : undefined);
+    ipcRenderer.send("updates:app-state", {
+      unsynced: n(s.unsynced), pending: n(s.pending), conflict: n(s.conflict), quarantined: n(s.quarantined),
+      online: s.online === true, authenticated: s.authenticated === true,
+      saleInProgress: s.saleInProgress === true, exportCoversQueue: s.exportCoversQueue === true,
+    });
+  },
+
+  /** Requests from the update notice: { action: "open-export" | "sync-now" }. */
+  onUpdateRequest: (callback) => {
+    const listener = (_event, request) => callback(request);
+    ipcRenderer.on("updates:request", listener);
+    return () => ipcRenderer.removeListener("updates:request", listener);
+  },
 
   /**
    * Saves an already-ENCRYPTED pending-queue export (see

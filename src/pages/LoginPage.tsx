@@ -1,8 +1,11 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { isAppSetupNeeded, useAuthStore } from "../stores/authStore";
 import { useAppStore } from "../stores/appStore";
 import { backendHost } from "../lib/supabase";
+import { APP_VERSION, CAPABILITY_SUMMARY } from "../lib/clientInfo";
+import { getTillId } from "../lib/tillId";
+import { useSyncStore } from "../stores/syncStore";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
@@ -27,7 +30,14 @@ export const LoginPage = () => {
   // the queue is kept, and its encrypted export stays reachable here because
   // signing in needs the server (docs/selfhost-migration/phase-f/queue-export.md).
   const [queuedCount, setQueuedCount] = useState(0);
+  const [quarantinedCount, setQuarantinedCount] = useState(0);
+  // On screen only (per-till verification); never sent in any request.
+  const tillId = useMemo(() => getTillId(), []);
   const [exportOpen, setExportOpen] = useState(false);
+  // Only requests made while this screen is mounted open the dialog.
+  useEffect(() => useSyncStore.subscribe((state, prev) => {
+    if (state.exportRequestedAt > prev.exportRequestedAt) setExportOpen(true);
+  }), []);
 
   const login = useAuthStore((state) => state.login);
   const setAppShopId = useAppStore((state) => state.setShopId);
@@ -35,6 +45,8 @@ export const LoginPage = () => {
   useEffect(() => {
     let cancelled = false;
     void localDb.syncOutbox.count().then((n) => { if (!cancelled) setQueuedCount(n); }).catch(() => undefined);
+    void localDb.syncOutbox.where("status").equals("quarantined").count()
+      .then((n) => { if (!cancelled) setQuarantinedCount(n); }).catch(() => undefined);
     return () => {
       cancelled = true;
     };
@@ -99,6 +111,12 @@ export const LoginPage = () => {
                   screen so a mis-targeted build is caught at a glance. */}
               <div className="font-mono" data-testid="login-backend">
                 {t("auth", "backendLabel")}: {backendHost}
+              </div>
+              <div className="font-mono" data-testid="login-client-info">
+                v{APP_VERSION} · {CAPABILITY_SUMMARY}
+              </div>
+              <div className="font-mono" data-testid="login-till-id">
+                {tillId}
               </div>
             </div>
           </div>
@@ -179,6 +197,12 @@ export const LoginPage = () => {
                 t("auth", "staffCreatedByAdmin")
               )}
             </div>
+            {quarantinedCount > 0 && (
+              <div role="alert" className="mt-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-900" data-testid="login-quarantine">
+                {quarantinedCount} {quarantinedCount === 1 ? "transaction was" : "transactions were"} recorded on this till by an older
+                app version for a different server and will not be sent from here. Export them and give the file to the owner.
+              </div>
+            )}
             {queuedCount > 0 && (
               <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900" data-testid="login-queue-export">
                 {t("queueExport", "loginHint", { n: queuedCount })}{" "}

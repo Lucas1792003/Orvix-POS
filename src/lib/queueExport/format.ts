@@ -64,11 +64,20 @@ const entrySchema = z.object({
   createdAt: z.string(),
   /** The operation's own (ring-up) time, `p_created_at`, when it has one. */
   ringUpAt: z.string().nullable(),
-  status: z.enum(["pending", "syncing", "failed", "conflict"]),
+  /** "quarantined" (1.0.16): queued for another backend than the till's
+   *  current one (or by a build that did not record it); never sent by the
+   *  till. Replayed only on an explicit owner decision (tools/queue-recovery
+   *  --include-quarantined). */
+  status: z.enum(["pending", "syncing", "failed", "conflict", "quarantined"]),
   attempts: z.number().int().min(0),
   lastErrorClass: z.enum(["transient", "permanent"]).nullable(),
   lastError: z.string().nullable(),
   nextAttemptAt: z.string().nullable(),
+  /** Origin of the backend the entry was queued for (1.0.16+); null = not
+   *  recorded (v1.0.15 and earlier: hosted). Absent in older exports. */
+  backendOrigin: z.string().nullable().default(null),
+  /** Why the till quarantined it, when it did. */
+  quarantineReason: z.string().nullable().default(null),
 });
 
 export type QueueExportEntry = z.infer<typeof entrySchema>;

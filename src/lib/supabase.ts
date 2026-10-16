@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import { useToastStore } from "../stores/toastStore";
 import { getErrorMessage } from "./errors";
 import { resolveBackendConfig } from "./backendConfig";
+import { CLIENT_INFO } from "./clientInfo";
 
 // Fail closed: a missing/empty URL or key, or a host other than the one
 // this build was pinned to (VITE_SUPABASE_EXPECTED_HOST), throws here —
@@ -18,11 +19,22 @@ const backend = resolveBackendConfig({
  *  page and in the sidebar footer so a till shows what it is connected to. */
 export const backendHost = backend.host;
 
-export const supabase = createClient(backend.url, backend.anonKey);
+/** Origin (scheme://host[:port]) of the backend: what every queued outbox
+ *  entry is tagged with (stores/data/outbox.ts) and what lib/backendOrigin.ts
+ *  compares the till's local data against at startup. */
+export const backendOrigin = new URL(backend.url).origin;
+
+// `X-Client-Info` (exact spelling: supabase-js sets its own default under
+// this key, and the global header replaces it rather than adding a second
+// value) identifies the build on every REST / auth / storage / functions
+// request: "shwephala-pos/1.0.16 (validated-uploads; ...)", lib/clientInfo.ts.
+export const supabase = createClient(backend.url, backend.anonKey, {
+  global: { headers: { "X-Client-Info": CLIENT_INFO } },
+});
 
 /** Backend REST origin + public anon key, for the few calls that need the raw
  *  HTTP response (status code, Retry-After) that supabase-js does not expose. */
-export const backendRest = { url: backend.url, anonKey: backend.anonKey } as const;
+export const backendRest = { url: backend.url, anonKey: backend.anonKey, clientInfo: CLIENT_INFO } as const;
 
 // Fire-and-forget write — shows a friendly error toast + console log on failure.
 // Prefer dbExec for new code; this remains for legacy callers.

@@ -31,9 +31,23 @@ export interface SyncOutboxEntry {
   id?: string;
   shopId: string | null;
   createdAt: string;
-  status: "pending" | "syncing" | "failed" | "conflict";
+  // "quarantined" (1.0.16): the entry was queued for a different backend
+  // than the one this build talks to — or by a build that did not record
+  // its backend at all (v1.0.15, which targeted hosted Supabase). It is
+  // never sent, never retried and never deleted automatically; staff export
+  // it and the owner reconciles it (lib/backendOrigin.ts).
+  status: "pending" | "syncing" | "failed" | "conflict" | "quarantined";
   attempts: number;
   lastError?: string;
+  // Origin (scheme://host[:port]) of the backend this entry was queued for,
+  // stamped at enqueue time (1.0.16+). Absent on entries written by older
+  // builds. The drain only ever sends an entry whose origin equals the
+  // running build's backend origin.
+  backendOrigin?: string;
+  /** When / why the entry was quarantined, and the status it had before. */
+  quarantinedAt?: string;
+  quarantineReason?: string;
+  statusBeforeQuarantine?: "pending" | "syncing" | "failed" | "conflict";
   // Client-minted UUID v4, generated when the operation was created and
   // sent as `p_idempotency_key` on every attempt (online or replay) so the
   // server can return the original response instead of applying the
@@ -103,6 +117,9 @@ export interface CachedAuthUser {
 export const SYNC_STATE_KEYS = {
   needsReauth: "needs-reauth",
   drainLease: "drain-lease",
+  // Origin of the backend this profile's local data (snapshot, auth cache,
+  // session) belongs to. Written by lib/backendOrigin.ts at startup.
+  backendOrigin: "backend-origin",
 } as const;
 
 /** Small key/value table for sync-layer state that must survive a reload
@@ -114,6 +131,8 @@ export interface SyncStateEntry {
   expiresAt?: string;
   flag?: boolean;
   reason?: string;
+  /** Free-form value (the backend-origin marker stores the origin here). */
+  value?: string;
   updatedAt: string;
 }
 

@@ -1,7 +1,13 @@
+import { readFileSync } from 'node:fs'
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import { resolveBackendConfig } from './src/lib/backendConfig'
 import { assertElectronPhoneUploadOrigin } from './src/lib/phoneUploadOrigin'
+
+// The app version shown on the login page / sidebar and sent in the
+// X-Client-Info header (src/lib/clientInfo.ts) comes from package.json, the
+// same value electron-builder stamps into the installer and app.getVersion().
+const APP_VERSION: string = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
 
 // https://vite.dev/config/
 export default defineConfig(({ mode, command }) => {
@@ -36,6 +42,9 @@ export default defineConfig(({ mode, command }) => {
 
   return {
     plugins: [react()],
+    define: {
+      __APP_VERSION__: JSON.stringify(APP_VERSION),
+    },
     // The web build (Vercel) needs absolute asset paths ("/assets/...", the
     // default) — vercel.json rewrites every path to index.html, and a
     // relative path would resolve against whatever route the browser is on

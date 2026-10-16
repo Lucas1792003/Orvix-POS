@@ -26,10 +26,12 @@ installHostedBackendGuard();
 const USAGE = `usage:
   queue-recovery inspect <file.spqx> [--json]
   queue-recovery replay  <file.spqx> --target <url> [--dry-run] [--email <user email>]
-                         [--confirm-host <host>] [--include-conflicts] [--rest-prefix /rest/v1]
-                         [--report <out.json>]
+                         [--confirm-host <host>] [--include-conflicts] [--include-quarantined]
+                         [--rest-prefix /rest/v1] [--report <out.json>]
   --target is mandatory (no default, no env fallback). A host different from the one
-  the till was built for must be repeated with --confirm-host.`;
+  the till was built for must be repeated with --confirm-host.
+  --include-quarantined replays entries the till QUARANTINED (queued for another backend,
+  e.g. by v1.0.15 for hosted); it always needs --confirm-host <target host> as well.`;
 
 interface Args { cmd: string; file: string; flags: Map<string, string | true> }
 
@@ -40,7 +42,7 @@ function parseArgs(argv: string[]): Args {
     const a = rest[i];
     if (!a.startsWith("--")) throw new Error(`unexpected argument: ${a}`);
     const name = a.slice(2);
-    if (["dry-run", "json", "include-conflicts"].includes(name)) flags.set(name, true);
+    if (["dry-run", "json", "include-conflicts", "include-quarantined"].includes(name)) flags.set(name, true);
     else if (["target", "email", "confirm-host", "rest-prefix", "report"].includes(name)) {
       const v = rest[++i];
       if (v === undefined) throw new Error(`--${name} needs a value`);
@@ -117,7 +119,7 @@ async function main(): Promise<number> {
       console.log(JSON.stringify({
         tillId: payload.tillId, exportedAt: payload.exportedAt, appVersion: payload.appVersion,
         backendHost: payload.backendHost, session: payload.session, summary: summarize(payload.entries),
-        entries: payload.entries.map((e) => ({ seq: e.seq, opId: e.opId, opType: e.opType, status: e.status, idempotencyKey: e.idempotencyKey, attempts: e.attempts })),
+        entries: payload.entries.map((e) => ({ seq: e.seq, opId: e.opId, opType: e.opType, status: e.status, idempotencyKey: e.idempotencyKey, attempts: e.attempts, backendOrigin: e.backendOrigin })),
       }, null, 1));
     } else printSummary(payload);
     return 0;
@@ -129,6 +131,11 @@ async function main(): Promise<number> {
   const restPrefixFlag = args.flags.get("rest-prefix");
   const restPrefix = typeof restPrefixFlag === "string" ? restPrefixFlag.replace(/\/+$/, "") : "/rest/v1";
   const dryRun = args.flags.has("dry-run");
+  const includeQuarantined = args.flags.has("include-quarantined");
+  if (includeQuarantined && (typeof confirm !== "string" || confirm.trim().toLowerCase() !== new URL(target.origin).host)) {
+    console.error("--include-quarantined replays entries queued for ANOTHER backend; repeat the target host with --confirm-host <host>");
+    return 2;
+  }
   printSummary(payload);
 
   let accessToken = "";
@@ -148,6 +155,7 @@ async function main(): Promise<number> {
     accessToken,
     ledgerToken: process.env.QUEUE_RECOVERY_SERVICE_KEY || null,
     includeConflicts: args.flags.has("include-conflicts"),
+    includeQuarantined,
     dryRun,
   });
   console.log(`\n${formatReport(report)}`);
