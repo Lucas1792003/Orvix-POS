@@ -64,6 +64,7 @@ test.afterAll(async () => {
 });
 
 const byName = (r: OutboxRow[], name: string) => r.find((x) => x.name === name)!;
+const byId = (r: OutboxRow[], localId: string) => r.find((x) => x.localId === localId)!;
 
 /** The update guard's report as the renderer would send it now. */
 async function guardReport(): Promise<{ unsynced: number }> {
@@ -93,10 +94,12 @@ async function queueOfflineSale(): Promise<OutboxRow> {
   await A.openShift(0);
   await A.gotoPos();
   await A.posScan(st.barcodeValue);
+  const before = new Set((await A.outbox()).map((e) => e.localId));
   expect((await A.posCheckout(1000)).receiptNo).toBe("PENDING");
-  const queued = await A.outbox();
-  expect(queued.map((e) => e.name)).toEqual(["open_shift", "complete_sale"]);
-  return byName(queued, "complete_sale");
+  // earlier tests leave their reconciled / set-aside rows on the till BY DESIGN; only look at this test's new rows
+  const queued = (await A.outbox()).filter((e) => !before.has(e.localId) || e.status === "pending");
+  expect(queued.filter((e) => e.status === "pending").map((e) => e.name).sort()).toEqual(["complete_sale", "open_shift"]);
+  return byName(queued.filter((e) => e.status === "pending"), "complete_sale");
 }
 
 /** Close the test's shift server-side (as the manager), as beforeAll does. */
@@ -186,7 +189,7 @@ test("I2 response lost: server committed, reply cut; owner sets it aside and rec
   await A.loginAdminWithTotp(emails.admin, pw, qaTotpSecret());
   await A.navigate("/app/admin/sync-conflicts");
   await A.exportAndSetAside("POS Sale", path.join(EXPORT_DIR, "i2.spqx"), PASSPHRASE);
-  expect(byName(await A.outbox(), "complete_sale").status).toBe("archived");
+  expect(byId(await A.outbox(), sale.localId).status).toBe("archived");
   expect((await guardReport()).unsynced).toBe(1); // unresolved set aside still blocks
 
   await A.page.getByTestId("set-aside-reconcile").click();
@@ -200,14 +203,14 @@ test("I2 response lost: server committed, reply cut; owner sets it aside and rec
   await A.page.getByTestId("reconcile-submit").click();
   await A.toast("Reconciled");
 
-  const r = byName(await A.outbox(), "complete_sale") as any;
+  const r = byId(await A.outbox(), sale.localId) as any;
   expect(r).toMatchObject({ status: "reconciled", idempotencyKey: sale.idempotencyKey, statusBeforeReconcile: "archived" });
   expect(r.reconciliation).toMatchObject({ resolution: "matched", serverRef: { saleId: serverSale.id, receiptNo: serverSale.receipt_no }, check: { result: "recorded" } });
   expect((await guardReport()).unsynced).toBe(0);
 
   await A.unroutePath(g503);
   await A.page.waitForTimeout(5_000); // a drain pass: a reconciled row is never sent
-  expect(byName(await A.outbox(), "complete_sale").status).toBe("reconciled");
+  expect(byId(await A.outbox(), sale.localId).status).toBe("reconciled");
   expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore + 1);
   expect(await keyRows([sale.idempotencyKey!])).toHaveLength(1);
   record("I", "I2 response lost -> check recorded -> reconciled as matched (cancelled not offered)", "PASS",
