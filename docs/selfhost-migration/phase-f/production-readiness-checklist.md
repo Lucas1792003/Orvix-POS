@@ -20,7 +20,7 @@ States: **DONE** (verified, evidence linked) · **READY** (prepared and tested, 
 | A6e | Follow-ups from G5: desktop uploads through the validated flow (then drop staff direct-write), sweep abandoned phone uploads | READY — needs approval. Order: ship the validated-upload client to every till → wait/confirm builds → migration 084 (drops staff INSERT/UPDATE on product-images; readiness guard); sweep script (dry run default) not scheduled | [g5-followups.md](g5-followups.md); harness 710/0, audit at 084 458/0/0 (gate 118/118), Deno 81, vitest 958 |
 | A7 | Review 7 orphan auth accounts (no app user; can never be linked after 082) — keep or delete | OWNER | [qa-data-inventory.md C2](qa-data-inventory.md), migration-082.md |
 | A8 | Owner's own migrated TOTP factor tested on the self-hosted backend | OWNER | [owner-totp-test.md](../next-phase/owner-totp-test.md) |
-| A9 | Version handshake `app_backend_info()` (proposed 083) so a client refuses writes on a wrong/older backend | OPEN — decision | [electron-compatibility.md](electron-compatibility.md) |
+| A9 | Version handshake `app_backend_info()` (proposed; number TBD — 083 is now G5) so a client refuses writes on a wrong/older backend | OPEN — decision | [electron-compatibility.md](electron-compatibility.md) |
 
 ## B. Encrypted off-server backup and restoration
 | # | Item | State | Evidence |
@@ -55,10 +55,10 @@ States: **DONE** (verified, evidence linked) · **READY** (prepared and tested, 
 ## E. Code, tests and repository
 | # | Item | State | Evidence |
 |---|---|---|---|
-| E1 | Unit / type checks / function tests / DB harness green | DONE (re-run before release) | vitest 936, functions 64, harness 647/0 (capped 081: 601/0) |
-| E2 | Full e2e suite green in one run | DONE 2026-10-16: 44/44 normal ×2 + reverse ×1, cleanup CLEAN each; one earlier D300 failure unexplained (desktop modal closed; diagnostics added, 7 later D300 passes) | [app-bugfixes.md](app-bugfixes.md) |
+| E1 | Unit / type checks / function tests / DB harness green | DONE 2026-10-16 (re-run before release) | vitest 972, functions 94, harness 747/0 (capped 083: 672/0), audit at 085 454/0/2 low |
+| E2 | Full e2e suite green in one run | DONE 2026-10-16 08:27 UTC: 49 passed, 1 skipped (084-only), cleanup CLEAN; D300 cause analysed (stray Escape/click), confirm-before-cancel + close diagnostics added | [G11](../evidence/G11/2026-10-16-migration-085-png.md), [app-bugfixes.md](app-bugfixes.md) |
 | E3 | Barcode-loss-on-product-save bug and upload-poll stall fixed | DONE (client-only; ships with 1.0.16) | app-bugfixes.md; 44 new unit tests |
-| E4 | Sanitized publication branch updated with all publishable changes; scans + fresh-clone tests | DONE 2026-10-16: 16 commits on main, unpushed; 0 private identifiers in tree/added lines/messages; 0 private commits reachable; fresh clone: tsc clean, vitest 936, functions 64, harness 647/0, build guards refuse bad config. Tolerated: generic `~/shwephala-migration/<ts>/` path in 13 lines of the first 12 commits' history (not in the tree) | coordinator scan + sync report |
+| E4 | Sanitized publication branch updated with all publishable changes; scans + fresh-clone tests | OPEN — last synced 2026-10-16 ~04:30 UTC; lags the security audit, 082–085 tests, G5 follow-ups, D300 fix; re-sync + re-scan before any push | sync report 2026-10-16 |
 | E5 | Vercel Git integration disconnected; GitHub Pages workflow absent on the publication branch; main branch protection | OWNER (dashboards) | [vercel-github-controls.md](vercel-github-controls.md) |
 | E6 | Push branch / PR / merge (as Lucas1792003) | approval | release-checklist Phase 4 |
 
