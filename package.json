@@ -68,7 +68,8 @@
     "productName": "Shwe Pha La POS",
     "files": [
       "dist/**/*",
-      "electron/**/*"
+      "electron/**/*",
+      "!electron/test/**"
     ],
     "directories": {
       "output": "release"
