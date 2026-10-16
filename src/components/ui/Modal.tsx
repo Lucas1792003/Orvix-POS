@@ -1,12 +1,14 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { cn } from "../../lib/utils";
+import { isBackdropDismiss, isEscapeDismiss, type ModalCloseDetail, type ModalCloseReason } from "./modalDismiss";
 
 interface ModalProps {
   open: boolean;
   title: string;
   description?: string;
-  onClose: () => void;
+  /** Called with why the modal asked to close (Escape, backdrop, X). */
+  onClose: (reason: ModalCloseReason, detail: ModalCloseDetail) => void;
   children?: ReactNode;
   footer?: ReactNode;
   size?: "sm" | "md" | "lg" | "xl";
@@ -20,10 +22,12 @@ const sizes: Record<string, string> = {
 };
 
 export const Modal = ({ open, title, description, onClose, children, footer, size = "md" }: ModalProps) => {
+  // Did the current press start on the backdrop? (see isBackdropDismiss)
+  const pressOnBackdrop = useRef(false);
   useEffect(() => {
     if (!open) return;
     const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (isEscapeDismiss(event)) onClose("escape", { trusted: event.isTrusted });
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
@@ -34,9 +38,14 @@ export const Modal = ({ open, title, description, onClose, children, footer, siz
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-3 backdrop-blur-sm md:p-4"
+      onMouseDown={(e) => {
+        pressOnBackdrop.current = e.target === e.currentTarget;
+      }}
       onClick={(e) => {
-        // Close when clicking the backdrop
-        if (e.target === e.currentTarget) onClose();
+        // Close when clicking the backdrop (a press that started there too)
+        const dismiss = isBackdropDismiss(pressOnBackdrop.current, e.target, e.currentTarget);
+        pressOnBackdrop.current = false;
+        if (dismiss) onClose("backdrop", { trusted: e.isTrusted });
       }}
     >
       <div
@@ -53,7 +62,7 @@ export const Modal = ({ open, title, description, onClose, children, footer, siz
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={(e) => onClose("x-button", { trusted: e.isTrusted })}
             className="flex h-8 w-8 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
           >
             <span className="material-symbols-rounded text-xl">close</span>
