@@ -31,6 +31,7 @@ export type Outcome =
   | "skipped-redacted"        // payload was altered by the exporter's credential redaction
   | "skipped-quarantined"     // the till quarantined it: queued for ANOTHER backend (e.g. v1.0.15 → hosted);
                               // replayed only with --include-quarantined + --confirm-host (owner decision)
+  | "skipped-set-aside"       // an owner set it aside on the till (RC2); replayed only with --include-set-aside
   | "blocked-unresolved-ref"  // depends on an entry that did not succeed / unknown provisional id
   | "not-attempted"           // the run stopped earlier on a transient failure
   | "planned";                // --dry-run
@@ -76,6 +77,10 @@ export interface ReplayOptions {
   /** Also replay entries the till quarantined (queued for another backend).
    *  An explicit owner decision: the CLI requires --confirm-host with it. */
   includeQuarantined?: boolean;
+  /** Also replay entries an owner SET ASIDE on the till (status "archived",
+   *  RC2). They are then treated by the status they had before (a former
+   *  quarantined / conflict entry still needs its own flag). */
+  includeSetAside?: boolean;
   dryRun?: boolean;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
@@ -177,7 +182,7 @@ const shortKey = (k: string | null) => (k ? k.slice(0, 8) : "-");
 function emptyCounts(): Record<Outcome, number> {
   return {
     applied: 0, "already-applied": 0, accepted: 0, rejected: 0, "skipped-conflict": 0,
-    "skipped-redacted": 0, "skipped-quarantined": 0, "blocked-unresolved-ref": 0, "not-attempted": 0, planned: 0,
+    "skipped-redacted": 0, "skipped-quarantined": 0, "skipped-set-aside": 0, "blocked-unresolved-ref": 0, "not-attempted": 0, planned: 0,
   };
 }
 
@@ -238,13 +243,21 @@ export async function replayExport(payload: QueueExportPayload, options: ReplayO
       push(e, "not-attempted", { detail: `run stopped at seq ${report.stoppedOn}` });
       continue;
     }
-    if (e.status === "quarantined" && !options.includeQuarantined) {
+    if (e.status === "archived" && !options.includeSetAside) {
+      push(e, "skipped-set-aside", {
+        detail: `set aside on the till${e.archivedAt ? ` at ${e.archivedAt}` : ""} (was ${e.statusBeforeArchive ?? "unknown"})${e.archiveReason ? `: ${e.archiveReason}` : ""}`,
+      });
+      continue;
+    }
+    // A set-aside entry included on purpose is judged by its former status.
+    const status = e.status === "archived" ? e.statusBeforeArchive ?? "pending" : e.status;
+    if (status === "quarantined" && !options.includeQuarantined) {
       push(e, "skipped-quarantined", {
         detail: `queued for ${e.backendOrigin ?? "an unrecorded backend (pre-1.0.16 build)"}; ${e.quarantineReason ?? "quarantined by the till"}`,
       });
       continue;
     }
-    if (e.status === "conflict" && !options.includeConflicts) {
+    if (status === "conflict" && !options.includeConflicts) {
       push(e, "skipped-conflict", { detail: e.lastError ?? undefined });
       continue;
     }

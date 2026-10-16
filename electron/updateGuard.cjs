@@ -20,8 +20,9 @@
 //
 // Normal install: queue empty AND online AND authenticated AND no sale in
 // progress. Recovery install (owner chose it explicitly, main shows a native
-// confirmation): no sale in progress AND (queue empty OR export covers the
-// queue). Nothing else ever installs.
+// confirmation): no sale in progress AND an owner verified by the main
+// process (RC2) AND (queue empty OR export covers the queue). Nothing else
+// ever installs, and no path changes or discards an outbox entry.
 // ----------------------------------------------------------------------
 
 /** A renderer report older than this is not trusted (heartbeat is 30 s). */
@@ -59,7 +60,7 @@ function waitingMessage(n) {
 
 /**
  * @param {ReturnType<typeof sanitizeAppState>} state
- * @param {{ now?: number, recovery?: boolean }} [opts]
+ * @param {{ now?: number, recovery?: boolean, ownerVerified?: boolean, ownerMessage?: string }} [opts]
  * @returns {{ allowed: boolean, code: string, unsynced: number, message: string }}
  */
 function evaluateInstallGuard(state, opts = {}) {
@@ -79,6 +80,16 @@ function evaluateInstallGuard(state, opts = {}) {
     };
   }
   if (recovery) {
+    // RC2 (D4): the recovery path is for the owner only. `ownerVerified` is
+    // decided by the main process itself (electron/ownerVerify.cjs: the
+    // backend's app_role() for the session's access token), never by a
+    // renderer flag. Absent = refused.
+    if (opts.ownerVerified !== true) {
+      return {
+        allowed: false, code: "recovery-needs-owner", unsynced: n,
+        message: opts.ownerMessage || "Only the owner (administrator), signed in on this till, can install anyway.",
+      };
+    }
     if (n === 0 || state.exportCoversQueue) {
       return { allowed: true, code: "recovery", unsynced: n, message: n === 0 ? "Nothing waiting to sync." : `${n} unsynced entries were exported in this session.` };
     }

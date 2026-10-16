@@ -18,7 +18,10 @@
 //     "Sync now".
 //   * Recovery path (owner, documented in docs/desktop-app/release-1.0.16.md):
 //     export pending → "Install anyway" → native confirmation here. Allowed
-//     only when the export covers every unsynced entry and no sale is open.
+//     only when the export covers every unsynced entry, no sale is open, and
+//     (RC2, D4) main itself verified the signed-in user as the owner
+//     (deps.verifyOwner, electron/ownerVerify.cjs) — checked before the
+//     dialog and again after it. Never changes or discards outbox entries.
 // Updater settings: no prerelease, no downgrade, no channel (a channel would
 // force allowDowngrade in electron-updater 6.x).
 // ----------------------------------------------------------------------
@@ -28,6 +31,9 @@ const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
 
 function setupUpdater(deps) {
   const { autoUpdater, app, dialog, ipcMain, getWindow, log, isDev = false } = deps;
+  // Without a verifier (older wiring, or a build without backend config)
+  // the recovery path is refused: fail closed.
+  const verifyOwner = deps.verifyOwner ?? (async () => ({ ok: false, code: "unavailable", message: "Owner verification is not available in this build." }));
   const now = deps.now ?? (() => Date.now());
   const platform = deps.platform ?? process.platform;
 
@@ -56,7 +62,25 @@ function setupUpdater(deps) {
     if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
   };
   const sendUpdateStatus = (status) => send("updates:status", status);
-  const guard = (recovery = false) => evaluateInstallGuard(appState, { now: now(), recovery });
+  const guard = (recovery = false, owner = null) => evaluateInstallGuard(appState, {
+    now: now(), recovery, ownerVerified: Boolean(owner && owner.ok), ownerMessage: owner && !owner.ok ? owner.message : undefined,
+  });
+  const fromAppWindow = (event) => {
+    const win = getWindow();
+    return !(win && event && event.sender && event.sender !== win.webContents);
+  };
+  const tokenOf = (request) => (request && typeof request === "object" && typeof request.accessToken === "string" ? request.accessToken : null);
+  async function checkOwner(request, step) {
+    let owner;
+    try {
+      owner = await verifyOwner(tokenOf(request));
+    } catch (err) {
+      owner = { ok: false, code: "error", message: "Owner verification failed." };
+      log("error", "owner verification error", err);
+    }
+    log(owner.ok ? "info" : "warn", "recovery owner check", `step=${step}`, `result=${owner.code}`, `source=${owner.source ?? "-"}`);
+    return owner;
+  }
 
   function checkForUpdates() {
     if (updateCheckInFlight) return;
@@ -117,9 +141,10 @@ function setupUpdater(deps) {
     if (result.response === 2) send("updates:request", { action: "sync-now" });
   }
 
-  async function requestRecoveryInstall() {
+  async function requestRecoveryInstall(request) {
     if (!downloadedVersion) return { ok: false, error: "No update has been downloaded." };
-    const decision = guard(true);
+    const owner = await checkOwner(request, "before-confirm");
+    const decision = guard(true, owner);
     if (!decision.allowed) {
       log("warn", "recovery install refused", `code=${decision.code}`, `unsynced=${decision.unsynced}`);
       return { ok: false, blocked: decision };
@@ -144,10 +169,15 @@ function setupUpdater(deps) {
       log("info", "recovery install cancelled by the user");
       return { ok: false, canceled: true };
     }
-    // Re-check: the state may have changed while the dialog was open.
-    const again = guard(true);
-    if (!again.allowed) return { ok: false, blocked: again };
-    log("warn", "recovery install confirmed by the user", `unsynced=${n}`);
+    // Re-check: the state (and the session) may have changed while the
+    // dialog was open.
+    const ownerAgain = await checkOwner(request, "after-confirm");
+    const again = guard(true, ownerAgain);
+    if (!again.allowed) {
+      log("warn", "recovery install refused after confirmation", `code=${again.code}`, `unsynced=${again.unsynced}`);
+      return { ok: false, blocked: again };
+    }
+    log("warn", "recovery install confirmed by the owner", `unsynced=${n}`, `ownerSource=${ownerAgain.source ?? "-"}`, "entries kept on the till, none marked synced");
     return { ok: doInstall("recovery", { isSilent: false, forceRunAfter: true }) };
   }
 
@@ -238,10 +268,20 @@ function setupUpdater(deps) {
     return { ok: true };
   });
   ipcMain.handle("updates:install", () => requestInstall("button"));
-  ipcMain.handle("updates:install-recovery", () => requestRecoveryInstall());
+  ipcMain.handle("updates:install-recovery", (event, request) => {
+    if (!fromAppWindow(event)) return { ok: false, error: "Refused: not the app window." };
+    return requestRecoveryInstall(request);
+  });
+  // The bridge primes main's own owner verification while the server is
+  // reachable, so a later recovery install during an outage can still be
+  // checked against what main itself verified (ownerVerify.cjs).
+  ipcMain.handle("updates:verify-owner", async (event, request) => {
+    if (!fromAppWindow(event)) return { ok: false };
+    const owner = await checkOwner(request, "prime");
+    return { ok: owner.ok, code: owner.code };
+  });
   ipcMain.on("updates:app-state", (event, raw) => {
-    const win = getWindow();
-    if (win && event && event.sender && event.sender !== win.webContents) return;
+    if (!fromAppWindow(event)) return;
     onAppState(raw);
   });
   app.on("before-quit", onBeforeQuit);

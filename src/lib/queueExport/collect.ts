@@ -53,6 +53,10 @@ function toEntry(row: StoredRow, counter: { n: number }): QueueExportEntry {
     nextAttemptAt: row.nextAttemptAt ?? null,
     backendOrigin: row.backendOrigin ?? null,
     quarantineReason: row.quarantineReason ?? null,
+    archivedAt: row.archivedAt ?? null,
+    archivedBy: row.archivedBy ?? null,
+    archiveReason: row.archiveReason ?? null,
+    statusBeforeArchive: row.statusBeforeArchive ?? null,
   };
 }
 

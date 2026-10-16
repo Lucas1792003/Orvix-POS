@@ -40,8 +40,22 @@ export default defineConfig(({ mode, command }) => {
     }
   }
 
+  // Electron build (RC2, D4): the main process verifies the owner for the
+  // updater's recovery path against the SAME pinned backend, reading its
+  // origin and the public anon key (both already inlined in the bundle)
+  // from dist/backend.json — never from the renderer (electron/ownerVerify.cjs).
+  const electronBackendFile = {
+    name: 'electron-backend-json',
+    apply: 'build' as const,
+    generateBundle(this: { emitFile: (f: { type: 'asset'; fileName: string; source: string }) => void }) {
+      if (process.env.ELECTRON_BUILD !== 'true') return
+      const cfg = resolveBackendConfig(env)
+      this.emitFile({ type: 'asset', fileName: 'backend.json', source: `${JSON.stringify({ url: cfg.url, anonKey: cfg.anonKey })}\n` })
+    },
+  }
+
   return {
-    plugins: [react()],
+    plugins: [react(), electronBackendFile],
     define: {
       __APP_VERSION__: JSON.stringify(APP_VERSION),
     },

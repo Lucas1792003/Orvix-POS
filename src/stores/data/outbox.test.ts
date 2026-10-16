@@ -15,9 +15,10 @@ vi.mock("../../lib/supabase", () => ({
 import { localDb } from "../../lib/localDb";
 import { currentBackendOrigin } from "../../lib/backendOrigin";
 import {
-  enqueueOutbox, drainOutbox, listOutboxConflicts, listOutboxEntries, retryOutboxEntry, dismissOutboxEntry,
-  recordIdMapping,
+  enqueueOutbox, drainOutbox, listOutboxConflicts, listOutboxEntries, retryOutboxEntry, setAsideOutboxEntry,
+  restoreSetAsideEntry, recordIdMapping, countUnsyncedOutbox,
 } from "./outbox";
+import { useAuthStore } from "../authStore";
 
 beforeEach(async () => {
   rpc.mockReset();
@@ -281,7 +282,7 @@ describe("provisionalIdMap pruning", () => {
 });
 
 describe("conflict management", () => {
-  it("lists conflicts, retries them back to pending, and dismisses them", async () => {
+  it("lists conflicts, retries them back to pending, sets them aside (kept) and restores them", async () => {
     await enqueueOutbox({ kind: "rpc", name: "complete_sale", args: {}, shopId: "shop-1" });
     rpc.mockResolvedValue({ data: null, error: { message: "boom" } });
     await drainOutbox();
@@ -292,7 +293,15 @@ describe("conflict management", () => {
     await retryOutboxEntry(conflicts[0].localId);
     expect((await localDb.syncOutbox.get(conflicts[0].localId))?.status).toBe("pending");
 
-    await dismissOutboxEntry(conflicts[0].localId);
-    expect(await localDb.syncOutbox.get(conflicts[0].localId)).toBeUndefined();
+    useAuthStore.setState({ currentUserId: "admin-1", currentRole: "ADMIN" });
+    try {
+      await setAsideOutboxEntry(conflicts[0].localId, { wasExported: () => true });
+      expect(await localDb.syncOutbox.get(conflicts[0].localId)).toMatchObject({ status: "archived", statusBeforeArchive: "pending" });
+      expect(await countUnsyncedOutbox()).toBe(1);
+      await restoreSetAsideEntry(conflicts[0].localId);
+      expect((await localDb.syncOutbox.get(conflicts[0].localId))?.status).toBe("pending");
+    } finally {
+      useAuthStore.setState({ currentUserId: null, currentRole: null });
+    }
   });
 });

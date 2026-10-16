@@ -68,7 +68,7 @@ const entrySchema = z.object({
    *  current one (or by a build that did not record it); never sent by the
    *  till. Replayed only on an explicit owner decision (tools/queue-recovery
    *  --include-quarantined). */
-  status: z.enum(["pending", "syncing", "failed", "conflict", "quarantined"]),
+  status: z.enum(["pending", "syncing", "failed", "conflict", "quarantined", "archived"]),
   attempts: z.number().int().min(0),
   lastErrorClass: z.enum(["transient", "permanent"]).nullable(),
   lastError: z.string().nullable(),
@@ -78,6 +78,15 @@ const entrySchema = z.object({
   backendOrigin: z.string().nullable().default(null),
   /** Why the till quarantined it, when it did. */
   quarantineReason: z.string().nullable().default(null),
+  /** RC2: "archived" = set aside by an owner on the till (never sent by the
+   *  till; replayed only with tools/queue-recovery --include-set-aside).
+   *  When, by which app user, why, and the status it had before. Absent in
+   *  older exports (additive; formatVersion stays 1 — read RC2 files with
+   *  the RC2 recovery tool, an older one rejects the "archived" status). */
+  archivedAt: z.string().nullable().default(null),
+  archivedBy: z.string().nullable().default(null),
+  archiveReason: z.string().nullable().default(null),
+  statusBeforeArchive: z.enum(["pending", "syncing", "failed", "conflict", "quarantined"]).nullable().default(null),
 });
 
 export type QueueExportEntry = z.infer<typeof entrySchema>;

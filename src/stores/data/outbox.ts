@@ -4,7 +4,7 @@ import { localDb, SYNC_STATE_KEYS, type SyncOutboxEntry } from "../../lib/localD
 import { newId } from "../../lib/id";
 import { isDuplicateError, isNetworkError } from "../../lib/errors";
 import { replayTableWrite } from "./tableWrite";
-import { callRpc, IDEMPOTENCY_KEY_ARG, newIdempotencyKey, runRequest, type RpcOutcome } from "./idempotentRpc";
+import { callRpc, IDEMPOTENCY_KEY_ARG, newIdempotencyKey, RPC_TIMEOUT_MS, runRequest, type RpcOutcome } from "./idempotentRpc";
 import { useAuthStore } from "../authStore";
 import { useSyncStore } from "../syncStore";
 import { touchAuthCache } from "../authCache";
@@ -101,16 +101,85 @@ export async function recordIdMapping(provisionalId: string, realId: string): Pr
   await localDb.provisionalIdMap.put({ provisionalId, realId, createdAt: new Date().toISOString() });
 }
 
-const PROVISIONAL_MAP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+export const PROVISIONAL_MAP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Every provisional id an outbox entry may still need resolved: its `refs`
+ *  (exactly what resolveArgs here and the recovery replay resolve) plus,
+ *  defensively, any string anywhere in its payload. Collected over EVERY
+ *  remaining row, whatever its status — pending, syncing, failed, conflict,
+ *  quarantined and set aside alike — since all of them can still be
+ *  exported and replayed. */
+export function referencedProvisionalIds(rows: readonly SyncOutboxEntry[]): Set<string> {
+  const ids = new Set<string>();
+  const walk = (v: unknown, depth: number): void => {
+    if (typeof v === "string") ids.add(v);
+    else if (depth < 8 && Array.isArray(v)) for (const x of v) walk(x, depth + 1);
+    else if (depth < 8 && v && typeof v === "object") for (const x of Object.values(v)) walk(x, depth + 1);
+  };
+  for (const row of rows) {
+    for (const ref of row.refs ?? []) ids.add(ref.provisionalId);
+    walk(row.args, 0);
+    walk(row.row, 0);
+  }
+  return ids;
+}
 
 /** Low volume (one row per offline-created shift/sale/etc. that something
- *  else referenced), but otherwise unbounded — sweep out anything old
- *  enough that nothing still queued could plausibly need it. */
-async function pruneProvisionalIdMap(): Promise<void> {
-  const cutoff = Date.now() - PROVISIONAL_MAP_MAX_AGE_MS;
-  const stale = await localDb.provisionalIdMap.filter((m) => Date.parse(m.createdAt) < cutoff).primaryKeys();
-  if (stale.length) await localDb.provisionalIdMap.bulkDelete(stale);
+ *  else referenced), but otherwise unbounded — sweep out mappings older
+ *  than a week that NO remaining outbox entry references (RC2, D3: a
+ *  quarantined or set-aside entry can sit for weeks; its export must still
+ *  resolve). One transaction, so an entry queued meanwhile is seen. */
+export async function pruneProvisionalIdMap(now: number = Date.now()): Promise<number> {
+  const cutoff = now - PROVISIONAL_MAP_MAX_AGE_MS;
+  return localDb.transaction("rw", localDb.syncOutbox, localDb.provisionalIdMap, async () => {
+    const referenced = referencedProvisionalIds(await localDb.syncOutbox.toArray());
+    const stale = (await localDb.provisionalIdMap.toArray())
+      .filter((m) => Date.parse(m.createdAt) < cutoff && !referenced.has(m.provisionalId))
+      .map((m) => m.provisionalId);
+    if (stale.length) await localDb.provisionalIdMap.bulkDelete(stale);
+    return stale.length;
+  });
 }
+
+// ----------------------------------------------------------------------
+// Stranded `syncing` entries (RC2, D2)
+// ----------------------------------------------------------------------
+
+/** A `syncing` row older than this is a request whose response never came
+ *  back (the app quit, crashed or lost power mid-request): longer than the
+ *  RPC timeout twice over plus the drain lease, so a live request of
+ *  another instance is never touched. */
+export const SYNCING_STALE_MS = 2 * RPC_TIMEOUT_MS + 2 * 60_000;
+
+/**
+ * Return stranded `syncing` entries to `pending`: with `olderThanMs: 0`
+ * every one (startup — the first drain pass of this app instance, under
+ * the drain lock, so no request of ours is in flight), otherwise those that
+ * entered `syncing` longer ago than the threshold (a row with no
+ * `syncingSince`, written before RC2, counts as old). The entry keeps its
+ * payload and idempotency key — the resend is answered by the server's
+ * idempotency ledger with the original result if the first attempt
+ * committed — and its attempt counter goes up by one. Returns how many.
+ */
+export async function recoverStrandedSyncing(olderThanMs: number = SYNCING_STALE_MS, now: number = Date.now()): Promise<number> {
+  return localDb.transaction("rw", localDb.syncOutbox, async () => {
+    let n = 0;
+    await localDb.syncOutbox.where("status").equals("syncing").modify((entry: SyncOutboxEntry) => {
+      const since = entry.syncingSince ? Date.parse(entry.syncingSince) : Number.NaN;
+      if (olderThanMs > 0 && Number.isFinite(since) && now - since < olderThanMs) return;
+      entry.status = "pending";
+      entry.attempts = (entry.attempts ?? 0) + 1;
+      entry.failureKind = "transient";
+      entry.lastError = "Interrupted while sending (no reply from the server). Resent with the same idempotency key, so it cannot be applied twice.";
+      entry.nextAttemptAt = undefined;
+      delete entry.syncingSince;
+      n += 1;
+    });
+    return n;
+  });
+}
+
+let startupRecoveryDone = false;
 
 // Resolves an entry's `refs` against provisionalIdMap and returns the args
 // to actually send — or null if a reference hasn't synced yet (e.g. a sale
@@ -375,6 +444,16 @@ export async function drainOutbox(): Promise<DrainResult> {
 }
 
 async function runDrainPass(): Promise<DrainResult> {
+  // D2: we hold the drain lock, so a `syncing` row is not a request of this
+  // instance in flight. The first pass after startup frees them all; every
+  // later pass (the loop resuming after an error, offline period, backoff)
+  // frees those past the stale threshold.
+  const recovered = await recoverStrandedSyncing(startupRecoveryDone ? SYNCING_STALE_MS : 0);
+  startupRecoveryDone = true;
+  if (recovered > 0) {
+    console.warn(`[sync] ${recovered} entr${recovered === 1 ? "y" : "ies"} left 'syncing' by an interrupted request returned to the queue (same idempotency key).`);
+    await refreshSyncStatus();
+  }
   await pruneProvisionalIdMap();
   // Never send an entry to a backend other than the one it was queued for
   // (main.tsx does this at startup too; repeated here so the drain does not
@@ -452,7 +531,7 @@ async function runDrainPass(): Promise<DrainResult> {
       await localDb.syncOutbox.update(entry.localId, { idempotencyKey: key, args: entry.args });
     }
 
-    await localDb.syncOutbox.update(entry.localId, { status: "syncing" });
+    await localDb.syncOutbox.update(entry.localId, { status: "syncing", syncingSince: new Date().toISOString() });
 
     const outcome: RpcOutcome = entry.kind === "table_write"
       ? await runRequest(replayTableWrite(entry.table!, entry.op!, entry.row, entry.id!), entry.name)
@@ -469,6 +548,7 @@ async function runDrainPass(): Promise<DrainResult> {
         const attempts = entry.attempts + 1;
         await localDb.syncOutbox.update(entry.localId, {
           status: "pending",
+          syncingSince: undefined,
           attempts,
           failureKind: "transient",
           lastError: outcome.error.message,
@@ -481,6 +561,7 @@ async function runDrainPass(): Promise<DrainResult> {
       if (!alreadyApplied) {
         await localDb.syncOutbox.update(entry.localId, {
           status: "conflict",
+          syncingSince: undefined,
           attempts: entry.attempts + 1,
           failureKind: "permanent",
           nextAttemptAt: undefined,
@@ -530,6 +611,9 @@ export async function retryOutboxEntry(localId: string): Promise<void> {
   // send it to the wrong server. It can only be exported and reconciled.
   const entry = await localDb.syncOutbox.get(localId);
   if (!entry) return;
+  if (entry.status === "archived") {
+    throw new Error("This entry is set aside. An owner restores it first (Set aside list), then it syncs again.");
+  }
   if (entry.status === "quarantined" || !belongsToBackend(entry, currentBackendOrigin())) {
     throw new Error("This entry was queued for another server and cannot be retried here. Export it for the owner.");
   }
@@ -538,14 +622,95 @@ export async function retryOutboxEntry(localId: string): Promise<void> {
   });
 }
 
-/** Stop retrying an entry. The provisional record it created (e.g. a sale
- *  flagged pendingSync) is deliberately left in place — the local write
- *  already happened and is real till activity; only the queued server
- *  replay is abandoned. A manager reconciles the record itself (refund,
- *  stock correction, etc.) separately. */
-export async function dismissOutboxEntry(localId: string): Promise<void> {
-  await localDb.syncOutbox.delete(localId);
+// ----------------------------------------------------------------------
+// Set aside / restore (RC2, D1 — replaces RC1's hard-deleting "Dismiss")
+// ----------------------------------------------------------------------
+// No staff action deletes an unsynced entry. "Set aside" only takes it out
+// of the sync queue: the row keeps its payload, idempotency key and
+// history, is listed under "Set aside", is part of every export and still
+// counts as unsynced for the updater guard. Owner (ADMIN) only, and only
+// for an entry exported in this app session. Permanent removal does not
+// exist in the app; the owner reconciles from the export file
+// (tools/queue-recovery) and the row stays until then.
+
+export type OutboxActionErrorCode = "not-found" | "not-owner" | "export-first" | "already-set-aside" | "not-set-aside";
+
+export class OutboxActionError extends Error {
+  readonly code: OutboxActionErrorCode;
+  constructor(code: OutboxActionErrorCode, message: string) {
+    super(message);
+    this.name = "OutboxActionError";
+    this.code = code;
+  }
+}
+
+/** Owner = ADMIN, as resolved from the server-verified app user at sign-in
+ *  (authStore.currentRole). */
+export function isOwnerSession(): boolean {
+  const { currentUserId, currentRole } = useAuthStore.getState();
+  return Boolean(currentUserId) && currentRole === "ADMIN";
+}
+
+export async function setAsideOutboxEntry(
+  localId: string,
+  opts: { wasExported: (localId: string) => boolean; reason?: string; now?: Date },
+): Promise<SyncOutboxEntry> {
+  if (!isOwnerSession()) {
+    throw new OutboxActionError("not-owner", "Only the owner (administrator) can set an entry aside.");
+  }
+  if (!opts.wasExported(localId)) {
+    throw new OutboxActionError("export-first", "Export pending transactions first (in this session), keep the file, then set the entry aside.");
+  }
+  const actor = useAuthStore.getState().currentUserId ?? undefined;
+  const updated = await localDb.transaction("rw", localDb.syncOutbox, async () => {
+    const entry = await localDb.syncOutbox.get(localId);
+    if (!entry) throw new OutboxActionError("not-found", "This entry is no longer in the queue (it may have synced).");
+    if (entry.status === "archived") throw new OutboxActionError("already-set-aside", "This entry is already set aside.");
+    const next: SyncOutboxEntry = {
+      ...entry,
+      status: "archived",
+      statusBeforeArchive: entry.status,
+      archivedAt: (opts.now ?? new Date()).toISOString(),
+      archivedBy: actor,
+      archiveReason: opts.reason?.slice(0, 500),
+      nextAttemptAt: undefined,
+    };
+    await localDb.syncOutbox.put(next);
+    return next;
+  });
   void refreshSyncStatus();
+  return updated;
+}
+
+/** Put a set-aside entry back where it was (owner only). A former
+ *  `syncing` entry comes back as `pending`; a former quarantined one stays
+ *  quarantined (and an entry for another backend is re-quarantined by the
+ *  next drain). Same payload and idempotency key. */
+export async function restoreSetAsideEntry(localId: string): Promise<SyncOutboxEntry> {
+  if (!isOwnerSession()) {
+    throw new OutboxActionError("not-owner", "Only the owner (administrator) can restore a set-aside entry.");
+  }
+  const restored = await localDb.transaction("rw", localDb.syncOutbox, async () => {
+    const entry = await localDb.syncOutbox.get(localId);
+    if (!entry) throw new OutboxActionError("not-found", "This entry is no longer on this till.");
+    if (entry.status !== "archived") throw new OutboxActionError("not-set-aside", "This entry is not set aside.");
+    const before = entry.statusBeforeArchive ?? "pending";
+    const next: SyncOutboxEntry = { ...entry, status: before === "syncing" ? "pending" : before };
+    delete next.statusBeforeArchive;
+    delete next.archivedAt;
+    delete next.archivedBy;
+    delete next.archiveReason;
+    delete next.syncingSince;
+    await localDb.syncOutbox.put(next);
+    return next;
+  });
+  void refreshSyncStatus();
+  return restored;
+}
+
+export async function listSetAsideEntries(): Promise<SyncOutboxEntry[]> {
+  const rows = (await localDb.syncOutbox.where("status").equals("archived").toArray()) as OutboxRow[];
+  return rows.sort(byQueueOrder);
 }
 
 export async function countPendingOutbox(): Promise<number> {
@@ -553,7 +718,7 @@ export async function countPendingOutbox(): Promise<number> {
 }
 
 /** Everything the server does not have yet, whatever the status (pending,
- *  syncing, failed, conflict, quarantined). The desktop updater guard
+ *  syncing, failed, conflict, quarantined, set aside). The desktop updater guard
  *  (electron/updateGuard.cjs) refuses to install while this is non-zero. */
 export async function countUnsyncedOutbox(): Promise<number> {
   return localDb.syncOutbox.count();

@@ -205,3 +205,16 @@ The client also identifies itself on every request:
 | tsc | app, e2e, tools clean |
 | Electron-level updater-guard test | 3/3 |
 | Packaged arm64 smoke, all requests aborted | version / backend / till id shown; 0 hosted requests; quarantine shown for a v1.0.15-style entry |
+
+## RC1 audit (D1-D4) → fixed in RC2 (2026-10-16)
+
+RC1 (`b777345`, frozen) keeps the defects; RC2 fixes them without a server change, migration or Dexie schema change. Details and test counts: [`../../desktop-app/release-1.0.16.md`](../../desktop-app/release-1.0.16.md) §9; findings: [`../../desktop-app/risks.md`](../../desktop-app/risks.md) "Found 2026-10-16".
+
+| | RC1 audit finding (code ref at RC1) | RC2 |
+|---|---|---|
+| D1 | Dismiss = one-click hard delete of any unsynced row (`SyncConflictsPage.tsx:130-145` → `outbox.ts:546`) | **fixed**: "Set aside" (status `archived`, row + payload + key kept, excluded from sync, in every export, counted by the guard), owner-only, export-in-this-session, confirmation naming the entry, single action at a time; owner Restore; no delete path in the app; recovery tool `--include-set-aside` |
+| D2 | `syncing` row never drained (`outbox.ts:36,383,455`) | **fixed**: returned to `pending` (same key, attempts + 1) on the first drain pass of an instance and, later, past `SYNCING_STALE_MS`; duplicate-proof test (server committed, reply lost, restart → 1 sale) |
+| D3 | 7-day id-map prune under quarantined entries (`outbox.ts:104-113`) | **fixed**: mappings referenced by any remaining outbox row (refs + payload strings) are never pruned; historical-queue export + dry-run replay: 0 `blocked-unresolved-ref` |
+| D4 | override not owner-only (`updateGuard.cjs:81-88`, `CheckForUpdatesButton.tsx:187`) | **fixed**: recovery guard needs `ownerVerified` from the main process (`electron/ownerVerify.cjs`: backend `app_role()` with the session token, origin/anon key from the build's `dist/backend.json`; offline only for a token main verified online within 12 h); button shown to ADMIN only; fail closed |
+
+Compatibility impact: export format stays v1 (additive `archived*` fields); files with set-aside entries need the RC2 recovery tool. The till ↔ server contract is unchanged (`app_role()` exists since migration 003, granted to `authenticated`).

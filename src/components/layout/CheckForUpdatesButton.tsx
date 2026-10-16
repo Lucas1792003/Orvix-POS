@@ -4,7 +4,9 @@ import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { useSyncStore } from "../../stores/syncStore";
 import { drainOutbox } from "../../stores/data/outbox";
-import { APP_VERSION } from "../../lib/clientInfo";
+import { APP_VERSION, BUILD_LABEL } from "../../lib/clientInfo";
+import { useAuthStore } from "../../stores/authStore";
+import { currentAccessToken } from "../../lib/updateGuardBridge";
 
 type Phase = "idle" | "checking" | "downloading" | "downloaded" | "waiting" | "not-available" | "error";
 
@@ -34,6 +36,10 @@ export const CheckForUpdatesButton = () => {
   const [blocked, setBlocked] = useState<ElectronUpdateGuardDecision | null>(null);
   const [noticeOpen, setNoticeOpen] = useState(false);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  // Owner = ADMIN (server-verified app user). Only decides whether the
+  // button is offered; main verifies the owner with the backend itself.
+  const isOwner = useAuthStore((s) => Boolean(s.currentUserId) && s.currentRole === "ADMIN");
 
   useEffect(() => {
     const api = window.electronAPI;
@@ -97,9 +103,16 @@ export const CheckForUpdatesButton = () => {
   };
 
   const installRecovery = async () => {
+    if (recoveryBusy) return;
     setRecoveryError(null);
-    const result = await window.electronAPI?.installUpdateRecovery?.();
-    if (result && !result.ok && result.blocked) setRecoveryError(result.blocked.message);
+    setRecoveryBusy(true);
+    try {
+      const accessToken = await currentAccessToken();
+      const result = await window.electronAPI?.installUpdateRecovery?.({ accessToken });
+      if (result && !result.ok) setRecoveryError(result.blocked?.message ?? result.error ?? null);
+    } finally {
+      setRecoveryBusy(false);
+    }
   };
 
   const handleClick = () => {
@@ -168,7 +181,7 @@ export const CheckForUpdatesButton = () => {
         <span className="material-symbols-rounded">{ICONS[phase]}</span>
         <span>{label}</span>
       </button>
-      <div className="update-version" data-testid="app-version">v{version ?? APP_VERSION}</div>
+      <div className="update-version" data-testid="app-version">v{version ?? APP_VERSION}{BUILD_LABEL ? ` ${BUILD_LABEL}` : ""}</div>
       <Modal
         open={noticeOpen}
         title="Update waiting"
@@ -183,17 +196,20 @@ export const CheckForUpdatesButton = () => {
             <Button variant="secondary" size="sm" onClick={() => void drainOutbox().catch(() => undefined)}>
               Sync now
             </Button>
-            <Button variant="danger" size="sm" onClick={() => void installRecovery()} data-testid="update-install-recovery">
-              Install anyway (after export)
-            </Button>
+            {isOwner && (
+              <Button variant="danger" size="sm" disabled={recoveryBusy} onClick={() => void installRecovery()} data-testid="update-install-recovery">
+                Install anyway (after export)
+              </Button>
+            )}
           </div>
         }
       >
         <p className="text-sm text-slate-700" data-testid="update-guard-message">{blocked?.message}</p>
         <p className="mt-3 text-xs text-slate-500">
           Nothing is lost by waiting: the app keeps working on this version and installs the update on the next
-          restart once every sale has synced. Owner only: if sales cannot sync (server down), export them first,
-          keep the file, then use "Install anyway".
+          restart once every sale has synced. Owner only (signed in as administrator; the app checks this with the
+          server): if sales cannot sync, export them first, keep the file, then use "Install anyway". It never
+          deletes or marks anything as synced.
         </p>
         {recoveryError && <p className="mt-3 text-xs text-rose-700" role="alert">{recoveryError}</p>}
       </Modal>
