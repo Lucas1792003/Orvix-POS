@@ -89,3 +89,5 @@ gitleaks 8.30.1 over `main..publish/selfhost-support` (fresh single-branch clone
 | K7 | Gateway access log: no query strings/credentials (L1) | DONE 2026-10-16 10:37 UTC; old log discarded with the container; revert keeps minimal logging | G12 |
 | K8 | Publication branch gitleaks findings harmless | DONE | §"Publication branch" above |
 | K9 | Owner action list by location | DONE | [owner-actions.md](owner-actions.md) |
+
+| K10 | RC3 owner-controlled reconciliation (`reconciled` status; owner verified by the server; export + server check + documented resolution; matched only on an unambiguous result) | DONE — RC3 `a722aa3` frozen, full suite green | release-1.0.16.md §11–§12 |

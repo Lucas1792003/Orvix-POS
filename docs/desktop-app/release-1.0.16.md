@@ -504,3 +504,22 @@ E2E prepared, not run: `e2e/i-reconcile.e2e.ts`. Needs `E2E_QA_TOTP_SECRET`. Con
 2. Run spec I (and H, A8/C3 for the unchanged set-aside flow) live. Then build with `VITE_BUILD_LABEL=rc3` into `ShwePhaLa-artifacts/rc3-1.0.16-<commit>/`.
 3. Artifact scan: expectations unchanged (`dist/backend.json` as in RC2). The seal key is created on the till at the first reconciliation and never shipped.
 4. Decide whether to schedule the optional 086/087 (§11.7) for server-side tamper evidence. RC3 does not need them.
+
+## 12. RC3 built and frozen (coordinator, 2026-10-16 ~15:05 UTC) — NOT published
+Built from commit **`a722aa3`** (RC3 reconciliation `579ece5` + strict-resolution fix `c8a8c88` + e2e test fixes) with `VITE_BUILD_LABEL=rc3`, real anon key, self-hosted origin, `--mac --arm64 --win --x64 --publish never`. Frozen read-only at `/Users/waiyan/Projects/personal/ShwePhaLa-artifacts/rc3-1.0.16-a722aa3/` (`SHA256SUMS`, 13 OK). RC1 (13 OK) and RC2 (13 OK) unchanged. An untracked `docs/audits/orvix-pos-completeness-audit.md` (not created by this work, not in the bundle) was present in the checkout and left untouched.
+
+| Artifact | sha256 |
+|---|---|
+| `Shwe-Pha-La-POS-Setup-1.0.16.exe` | `0730ac9aec2a47ce3ab14dfa9b7fc3ee83e00ef73af38e02b816251fd5154599` |
+| `Shwe-Pha-La-POS-1.0.16-arm64.dmg` | `fe85d9be587da35baa2888ece3ca5e15e5050d75eab4f6f658eef64a5942cc17` |
+| `Shwe-Pha-La-POS-1.0.16-x64.dmg` | `63fa2de3acaa7d538dec7c9baeacc42fde9eafc887a0fade603e1936167c67fb` |
+| `Shwe-Pha-La-POS-1.0.16-arm64.zip` | `be9d45b7fe598fecf4a1a1d27b8d06c7b0cd22fbc38b0a554765e70453237fff` |
+| `Shwe-Pha-La-POS-1.0.16-x64.zip` | `4e1ae0782eeac6e09a929965c721ecea0affc51d3fab460f9a8b4c2336468160` |
+
+**Pre-freeze verification (owner's six checks)**
+1. Live reconciliation e2e executed (not skipped): I1 (rejected sale → `cancelled`) and I2 (response lost → `matched`) passed 3× standalone and in the full suite.
+2. Full suite: on `579ece5` — tsc, vitest 1091, Deno 94, harness 747/0 (083-capped 672/0), isolation audit (083+085) 454/0/2 low + parity PASS, live suites all pass, e2e 51/1 failed (I2: test-only setup assumption); on the final `a722aa3` — tsc, vitest **1092**, Deno **94**, e2e **52 passed, 1 skipped (084-only)**, CLEAN. Server-side suites unchanged since `579ece5` (only client policy + tests changed afterwards); production fingerprint identical.
+3. **Fixed before build (`c8a8c88`)**: RC3 as merged let the owner pick a candidate and mark `matched` after an INCONCLUSIVE check. Now `matched` requires an unambiguous result (`recorded`: exactly one exact match, no other candidates); the dialog disables it otherwise and the stored-record check treats a matched-from-ambiguous record as unresolved (blocks updates). Regression test covers two exact matches, exact + candidate, and read error.
+4. A server lookup failure is always `inconclusive`, never `not recorded` (every read path returns inconclusive on error; tested).
+5. No silent suppression: `cancelled` requires a definite `not recorded` check (both exact and time-shifted searches succeeded and empty), an export containing the entry, the server-verified owner, a reason; `recreated` now also requires `not recorded` (prevents double counting after an inconclusive check); inconclusive entries cannot be reconciled at all and keep blocking updates; reconciled rows stay on the till with payload + key + record and in every export; reconciliation never writes stock, payments or sales.
+6. Installer archives (`app.asar` of the Windows and macOS builds, extracted): hosted project ref **0**; service key **0**; JWT secret **0**; the only JWT is the anon key; no `@qa.invalid`, TOTP test secrets, export test passphrases, `sb_secret_`, `.env` or PEM files; none of our tests ship. The 45 `supabase.co` mentions are inside `node_modules/@supabase` and one bundled copy of supabase-js's default tracing targets (`"*.supabase.co"`, a host pattern, not an endpoint).
