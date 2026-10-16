@@ -394,6 +394,29 @@ export class Terminal {
    *  appeared after the last `toastsNow()` call — a toast lives ~3 s and its
    *  timer is re-armed by every later toast, so a stale one with the very
    *  same text can still be on screen. Returns its full text. */
+  /**
+   * RC2 (audit D1): the owner's way to take a conflict out of the queue
+   * without deleting it — export this session's queue first (native save
+   * dialog stubbed), then "Set aside" the matching row and confirm. The row
+   * stays on the till (status "archived", same key/payload). Electron only.
+   */
+  async exportAndSetAside(rowText: string | RegExp, exportFile: string, passphrase: string): Promise<string> {
+    if (!this.app) throw new Error("exportAndSetAside needs the Electron terminal");
+    await this.app.evaluate(({ dialog }, file) => {
+      (dialog as any).showSaveDialog = async () => ({ canceled: false, filePath: file });
+    }, exportFile);
+    await this.page.getByTestId("export-queue-open").click();
+    await this.page.getByTestId("queue-export-passphrase").fill(passphrase);
+    await this.page.getByTestId("queue-export-passphrase-confirm").fill(passphrase);
+    await this.page.getByTestId("queue-export-submit").click();
+    await this.page.getByTestId("queue-export-result").waitFor({ state: "visible", timeout: 60_000 });
+    await this.page.getByTestId("queue-export-close").click();
+    const row = this.page.getByTestId("outbox-row").filter({ hasText: rowText });
+    await row.getByTestId("outbox-set-aside").click();
+    await this.page.getByTestId("set-aside-confirm").click();
+    return this.toast("Set aside (not deleted)");
+  }
+
   async toast(text: string | RegExp, timeout = 15_000): Promise<string> {
     const deadline = Date.now() + timeout;
     for (;;) {

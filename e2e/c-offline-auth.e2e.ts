@@ -179,9 +179,11 @@ test("C3 cashier deactivated while offline -> queued sale rejected on replay as 
   await expect(A.page.getByText("Needs action")).toBeVisible();
   await expect(A.page.getByText("1 conflict · 0 entries still syncing")).toBeVisible();
   await A.toastsNow();
-  await A.page.getByRole("button", { name: "Dismiss" }).click();
-  await A.toast(/Dismissed/);
-  expect(await A.outbox()).toHaveLength(0);
+  // RC2 (audit D1): export, then set the rejected sale aside — kept on the till, never sent
+  await A.exportAndSetAside("POS Sale", path.join(RESULTS_DIR, `c3-export-${Date.now()}.spqx`), "qa-c3-export-pass");
+  const keptC3 = await A.outbox();
+  expect(keptC3).toHaveLength(1);
+  expect(keptC3[0].status).toBe("archived");
   await A.logout();
   await A.login(emails.cashA, pw);
   const tLogin = Date.now();

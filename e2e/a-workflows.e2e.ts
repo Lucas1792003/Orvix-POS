@@ -508,16 +508,18 @@ test("A8 sync badges + Sync Conflicts page: pending count, transient vs permanen
   expect((await keyRows([entry2.idempotencyKey!])).length).toBe(0);
   expect(await count("sales", { shift_id: adminShiftId })).toBe(adminSalesBefore + 1);
   await A.toastsNow();
-  await A.page.getByRole("button", { name: "Dismiss" }).click();
-  const dismissed = await A.toast(/Dismissed/);
-  await expect(A.page.getByText("Nothing waiting. Everything recorded on this device has synced cleanly.")).toBeVisible();
-  expect(await A.outbox()).toHaveLength(0);
+  // RC2 (audit D1): no Dismiss; the owner exports, then sets the conflict aside (kept, never sent)
+  const dismissed = await A.exportAndSetAside("POS Sale", path.join(RESULTS_DIR, `a8-export-${Date.now()}.spqx`), "qa-a8-export-pass");
+  await expect(A.page.getByTestId("set-aside-row")).toHaveCount(1);
+  const afterSetAside = await A.outbox();
+  expect(afterSetAside).toHaveLength(1); // not deleted
+  expect(afterSetAside[0]).toMatchObject({ localId: entry2.localId, status: "archived", idempotencyKey: entry2.idempotencyKey });
   const keptLocal = (await A.localSales()).find((s: any) => s.receiptNo === "PENDING");
   expect(keptLocal?.pendingSync).toBe(true);
   expect(await count("sales", { shift_id: adminShiftId })).toBe(adminSalesBefore + 1);
   expect(await inv(ids.shop, ids.prod3)).toBe(q0 - 1);
-  record("A", "sync conflicts: permanent rejection -> Needs action -> Dismiss", "PASS",
-    `second offline sale queued, its shift ${adminShiftId} closed server-side; reconnect -> badge "1 sync conflict needs attention", page "1 conflict · 0 entries still syncing", Needs action, last error "${lastError}", entry status=conflict/permanent, no key row, DB still 1 sale; Dismiss -> toast "${dismissed}", outbox empty, local PENDING record kept flagged pendingSync, stock unchanged (${q0 - 1})`);
+  record("A", "sync conflicts: permanent rejection -> Needs action -> export + Set aside", "PASS",
+    `second offline sale queued, its shift ${adminShiftId} closed server-side; reconnect -> badge "1 sync conflict needs attention", page "1 conflict · 0 entries still syncing", Needs action, last error "${lastError}", entry status=conflict/permanent, no key row, DB still 1 sale; export + Set aside -> toast "${dismissed}", row kept as archived (same key), local PENDING record kept flagged pendingSync, stock unchanged (${q0 - 1})`);
 });
 
 test("A9 close shift: variance reason gate, then close (cashier A)", async () => {
