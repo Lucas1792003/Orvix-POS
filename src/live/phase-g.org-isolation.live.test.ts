@@ -295,6 +295,8 @@ SELECT format('products=%s inventory=%s inv_qty_sum=%s users=%s shops=%s busines
     process.stdout.write(`[seed A] ${seed}\n`);
     ev.info("setup A (seed.sql)", seed);
     A.admin = await signedInClient(cfg, A.emails.admin, password);
+    // 082: an ADMIN without TOTP must have entered an emailed code after this session signed in.
+    runSql(cfg, `INSERT INTO admin_login_codes (auth_id, code_hash, expires_at, consumed_at) VALUES ('${A.adminAuth}', repeat('0', 64), now() + interval '10 minutes', now());`);
     A.mgr = await signedInClient(cfg, A.emails.mgr, password);
     A.cash = await signedInClient(cfg, A.emails.cash, password);
 
@@ -542,7 +544,7 @@ SELECT format('products=%s inventory=%s inv_qty_sum=%s users=%s shops=%s busines
       expect(await inv(o.shop, pid)).toBe(q0 + 7);
       // create staff
       const staffEmail = `qa-${which.toLowerCase()}-staff-${ts}@qa.invalid`;
-      const staffAuth = await createAuthUser(cfg, staffEmail, password);
+      const staffAuth = await createAuthUser(cfg, staffEmail, password, { created_via: "staff-admin", org_id: o.orgId });
       const staffId = `qa-${which.toLowerCase()}-user-staff-${ts}`;
       const cu = await rpc(o.admin, "create_app_user", { p_id: staffId, p_name: `QA ${which} Staff`, p_email: staffEmail, p_role: "CASHIER", p_shop_id: o.shop, p_auth_id: staffAuth, p_granted_permissions: null, p_revoked_permissions: null, p_idempotency_key: uuid() });
       expect(cu.error).toBeNull();
@@ -796,7 +798,7 @@ SELECT format('products=%s inventory=%s inv_qty_sum=%s users=%s shops=%s busines
     expect(fp()).toBe(fp0);
     // buyer: created by the ADMIN (positive), may create a PO for its own shop, nothing else
     const buyerEmail = `qa-buyer-${ts}@qa.invalid`;
-    const buyerAuth = await createAuthUser(cfg, buyerEmail, password);
+    const buyerAuth = await createAuthUser(cfg, buyerEmail, password, { created_via: "staff-admin", org_id: A.orgId });
     const buyerId = `qa-user-buyer-${ts}`;
     ok(await rpc(A.admin, "create_app_user", { p_id: buyerId, p_name: "QA Buyer", p_email: buyerEmail, p_role: "BUYER", p_shop_id: A.shop, p_auth_id: buyerAuth, p_granted_permissions: null, p_revoked_permissions: null, p_idempotency_key: uuid() }), "create buyer");
     const buyer = await signedInClient(cfg, buyerEmail, password);
@@ -1008,7 +1010,7 @@ ROLLBACK;`).trim().split("\n").filter((l) => /^\d+\/\d+$/.test(l))[0];
     const notes: string[] = [];
     const fp0 = fp();
     const xEmail = `qa-xstaff-${ts}@qa.invalid`;
-    const xAuth = await createAuthUser(cfg, xEmail, password);
+    const xAuth = await createAuthUser(cfg, xEmail, password, { created_via: "staff-admin", org_id: A.orgId });
     const into = await rpc(A.admin, "create_app_user", { p_id: `qa-user-xstaff-${ts}`, p_name: "QA X Staff", p_email: xEmail, p_role: "CASHIER", p_shop_id: B.shop, p_auth_id: xAuth, p_granted_permissions: null, p_revoked_permissions: null, p_idempotency_key: uuid() });
     expect(into.error?.message).toMatch(NOT_IN_ORG);
     expect(await svcCount("users", (q) => q.eq("id", `qa-user-xstaff-${ts}`))).toBe(0);
