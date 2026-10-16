@@ -1,6 +1,6 @@
 # Production-readiness checklist — Shwe Pha Lar POS on the self-hosted backend
 
-Private. Created 2026-10-15. One list; every item has an owner, a state and the evidence that closes it. **Nothing on this list is executed by the engineer without the owner's explicit approval for that item.** Supersedes the ordering in [`../next-phase/release-checklist.md`](../next-phase/release-checklist.md) where they differ; that file keeps the detailed release mechanics (version, rollback build, pre-release, promotion).
+Private. Created 2026-10-15, updated 2026-10-16. One list; every item has an owner, a state and the evidence that closes it. **Nothing on this list is executed by the engineer without the owner's explicit approval for that item.** Supersedes the ordering in [`../next-phase/release-checklist.md`](../next-phase/release-checklist.md) where they differ; that file keeps the detailed release mechanics (version, rollback build, pre-release, promotion).
 
 States: **DONE** (verified, evidence linked) · **READY** (prepared and tested, waiting for approval) · **OWNER** (needs the owner's own action) · **OPEN** (work or decision outstanding).
 
@@ -50,9 +50,9 @@ States: **DONE** (verified, evidence linked) · **READY** (prepared and tested, 
 ## E. Code, tests and repository
 | # | Item | State | Evidence |
 |---|---|---|---|
-| E1 | Unit / type checks / function tests / DB harness green | DONE (re-run before release) | vitest 892, functions 64, harness 647/0 |
-| E2 | Full e2e suite green **in one run, both orders, twice** | OPEN (in progress 2026-10-15) | app-bugfixes.md |
-| E3 | Barcode-loss-on-product-save bug and upload-poll stall fixed | OPEN (in progress) | app-bugfixes.md |
+| E1 | Unit / type checks / function tests / DB harness green | DONE (re-run before release) | vitest 936, functions 64, harness 647/0 (capped 081: 601/0) |
+| E2 | Full e2e suite green in one run | DONE 2026-10-16: 44/44 normal ×2 + reverse ×1, cleanup CLEAN each; one earlier D300 failure unexplained (desktop modal closed; diagnostics added, 7 later D300 passes) | [app-bugfixes.md](app-bugfixes.md) |
+| E3 | Barcode-loss-on-product-save bug and upload-poll stall fixed | DONE (client-only; ships with 1.0.16) | app-bugfixes.md; 44 new unit tests |
 | E4 | Sanitized publication branch updated with all publishable changes; scans + fresh-clone tests | OPEN (after E2/E3) | — |
 | E5 | Vercel Git integration disconnected; GitHub Pages workflow absent on the publication branch; main branch protection | OWNER (dashboards) | [vercel-github-controls.md](vercel-github-controls.md) |
 | E6 | Push branch / PR / merge (as Lucas1792003) | approval | release-checklist Phase 4 |
