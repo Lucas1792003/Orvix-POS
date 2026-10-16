@@ -53,7 +53,7 @@ States: **DONE** (verified, evidence linked) · **READY** (prepared and tested, 
 | E1 | Unit / type checks / function tests / DB harness green | DONE (re-run before release) | vitest 936, functions 64, harness 647/0 (capped 081: 601/0) |
 | E2 | Full e2e suite green in one run | DONE 2026-10-16: 44/44 normal ×2 + reverse ×1, cleanup CLEAN each; one earlier D300 failure unexplained (desktop modal closed; diagnostics added, 7 later D300 passes) | [app-bugfixes.md](app-bugfixes.md) |
 | E3 | Barcode-loss-on-product-save bug and upload-poll stall fixed | DONE (client-only; ships with 1.0.16) | app-bugfixes.md; 44 new unit tests |
-| E4 | Sanitized publication branch updated with all publishable changes; scans + fresh-clone tests | OPEN (after E2/E3) | — |
+| E4 | Sanitized publication branch updated with all publishable changes; scans + fresh-clone tests | DONE 2026-10-16: 16 commits on main, unpushed; 0 private identifiers in tree/added lines/messages; 0 private commits reachable; fresh clone: tsc clean, vitest 936, functions 64, harness 647/0, build guards refuse bad config. Tolerated: generic `~/shwephala-migration/<ts>/` path in 13 lines of the first 12 commits' history (not in the tree) | coordinator scan + sync report |
 | E5 | Vercel Git integration disconnected; GitHub Pages workflow absent on the publication branch; main branch protection | OWNER (dashboards) | [vercel-github-controls.md](vercel-github-controls.md) |
 | E6 | Push branch / PR / merge (as Lucas1792003) | approval | release-checklist Phase 4 |
 
