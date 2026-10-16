@@ -436,6 +436,89 @@ if [ "$((10#$MAX_MIG))" -ge 84 ]; then
 else
   log "skipping t21_validated_writes_only / sweep (migrations capped at $MAX_MIG < 084)"
 fi
+# 085: the completion RPC accepts image/png (same size rule). 085 re-applied
+# first (t21's guard cycles re-applied 083, resetting the COMMENT), part A,
+# then guard cycles on the populated database: a drifted body -> 085 aborts,
+# nothing changed; 080 re-applied (anon EXECUTE back = 083 missing) -> 085
+# aborts; 083 + 078 re-applied = production's exact 083 state (no 084) ->
+# 085 applies; 084 on top of 085 applies; 085 re-run on 083+084 is a no-op.
+# Part B: final state, no session/object row changed.
+if [ "$((10#$MAX_MIG))" -ge 85 ]; then
+  M080="$REPO/supabase/migrations/080_upload_completion_trusted_url.sql"
+  M078="$REPO/supabase/migrations/078_storage_org_paths.sql"
+  M083="$REPO/supabase/migrations/083_product_images_upload_limits.sql"
+  M084="$REPO/supabase/migrations/084_product_images_validated_writes_only.sql"
+  M085="$REPO/supabase/migrations/085_png_completion.sql"
+  SIG085="public.complete_product_image_upload_session(text,text,text,integer,text)"
+  t22_check() { local n; n="$(printf '%s' "$1" | sed "s/'/''/g")"; su_psql -Atc "SELECT test.check('$n', $2)" | grep -E '^(PASS|FAIL)'; }
+  t22_md5() { su_psql -Atc "SELECT md5(prosrc) FROM pg_proc WHERE oid = '$SIG085'::regprocedure"; }
+  t22_rows() { t22_check "$1" "(SELECT count(*)::text || ':' || md5(coalesce(string_agg(s::text, E'\\n' ORDER BY s.id), '')) FROM product_image_upload_sessions s) || '/' || (SELECT count(*)::text || ':' || md5(coalesce(string_agg(o::text, E'\\n' ORDER BY o.id), '')) FROM storage.objects o) = test.var('t22_rows_a')"; }
+  # t22_apply FILE TAG [PGOPTIONS]: 0 if the apply succeeded
+  t22_apply() { PGOPTIONS="${3:-}" pg_psql -f "$1" > "$WORK/mig_t22_$2.log" 2>&1; }
+
+  log "re-applying 085 (t21 re-applied 083; must succeed on the 085 body)"
+  if t22_apply "$M085" pre; then
+    grep -h -E '085:' "$WORK/mig_t22_pre.log" | sed 's/^.*NOTICE: */INFO /'
+  else
+    tail -10 "$WORK/mig_t22_pre.log"; fail "t22: re-apply of 085 before part A"
+  fi
+  run_sql_test "$SQL/t22_png_completion.sql"
+
+  log "t22 guard 1: a drifted completion body (not 080, not 085) -> 085 must abort, nothing changed"
+  su_psql -Atc "DO \$d\$ BEGIN EXECUTE replace(pg_get_functiondef('$SIG085'::regprocedure), 'RAISE EXCEPTION ''Invalid upload link'';', 'RAISE EXCEPTION ''Invalid upload link (drift)'';'); END \$d\$" >/dev/null || fail "t22: drift setup"
+  DRIFT_MD5="$(t22_md5)"
+  if t22_apply "$M085" g1; then
+    t22_check "t22 guard: 085 aborts on an unexpected completion body" "false"
+  else
+    ok=false; grep -q "085: complete_product_image_upload_session has an unexpected body" "$WORK/mig_t22_g1.log" && ok=true
+    grep -h -E '085:' "$WORK/mig_t22_g1.log" | sed 's/^.*ERROR: */INFO aborted as expected: /' | head -1
+    t22_check "t22 guard: 085 aborts on an unexpected completion body (md5 named, nothing else)" "$ok"
+  fi
+  t22_check "t22 guard: the aborted 085 left the drifted body in place (nothing replaced)" "'$(t22_md5)' = '$DRIFT_MD5' AND '$DRIFT_MD5' NOT IN ('7c9c65a96a057189ee84ff850183b627', 'dc822a6435c3e512acdc933c4a2995a8')"
+  t22_rows "t22 guard: the aborted 085 changed no session / object row"
+
+  log "t22 guard 2: 080 re-applied (anon/authenticated EXECUTE back = 083 not in place) -> 085 must abort"
+  t22_apply "$M080" r080 || { tail -5 "$WORK/mig_t22_r080.log"; fail "t22: re-apply 080"; }
+  t22_check "t22 guard: after re-applying 080 the body is the production 080 body (md5 7c9c65a9...)" "'$(t22_md5)' = '7c9c65a96a057189ee84ff850183b627'"
+  if t22_apply "$M085" g2; then
+    t22_check "t22 guard: 085 aborts while 083's service_role-only grants are not in place" "false"
+  else
+    ok=false; grep -q "085: migration 083 is not applied" "$WORK/mig_t22_g2.log" && ok=true
+    t22_check "t22 guard: 085 aborts while 083's service_role-only grants are not in place" "$ok AND has_function_privilege('anon', '$SIG085', 'EXECUTE')"
+  fi
+  t22_check "t22 guard: the aborted 085 left the 080 body" "'$(t22_md5)' = '7c9c65a96a057189ee84ff850183b627'"
+
+  log "t22 guard 3: production's exact 083 state (080 body, 083 grants, 078 policies = NO 084) -> 085 applies"
+  t22_apply "$M083" r083 || { tail -5 "$WORK/mig_t22_r083.log"; fail "t22: re-apply 083"; }
+  t22_apply "$M078" r078 || { tail -5 "$WORK/mig_t22_r078.log"; fail "t22: re-apply 078"; }
+  t22_check "t22 guard: state before 085 = production 083 (080 body, service_role only, 083 comment, 084 NOT applied: 4 storage policies)" \
+    "'$(t22_md5)' = '7c9c65a96a057189ee84ff850183b627' AND test.m083() AND NOT test.m084() AND NOT has_function_privilege('anon', '$SIG085', 'EXECUTE') AND (SELECT count(*) FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects') = 4"
+  if t22_apply "$M085" g3; then
+    grep -h -E '085:' "$WORK/mig_t22_g3.log" | sed 's/^.*NOTICE: */INFO /' | head -2
+    t22_check "t22 guard: 085 applies on 083 without 084 (no dependency on 084)" \
+      "'$(t22_md5)' = 'dc822a6435c3e512acdc933c4a2995a8' AND NOT test.m084() AND (SELECT count(*) FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects') = 4 AND NOT has_function_privilege('anon', '$SIG085', 'EXECUTE') AND has_function_privilege('service_role', '$SIG085', 'EXECUTE')"
+    grep -q '085: current completion body is the 080 body' "$WORK/mig_t22_g3.log" && t22_check "t22 guard: 085 reported replacing the 080 body" "true" || t22_check "t22 guard: 085 reported replacing the 080 body" "false"
+  else
+    tail -10 "$WORK/mig_t22_g3.log"; t22_check "t22 guard: 085 applies on 083 without 084 (no dependency on 084)" "false"
+  fi
+  t22_rows "t22 guard: 085 on the 083 state changed no session / object row"
+
+  log "t22 guard 4: 084 on top of 085 (its 083-marker guard must still pass), then 085 re-run on 083+084"
+  if t22_apply "$M084" g4 "-c phf.g5_084_force=on"; then
+    t22_check "t22 guard: 084 applies after 085 (085 keeps the 083: comment prefix 084 checks)" "test.m084()"
+  else
+    tail -5 "$WORK/mig_t22_g4.log"; t22_check "t22 guard: 084 applies after 085 (085 keeps the 083: comment prefix 084 checks)" "false"
+  fi
+  if t22_apply "$M085" g5; then
+    t22_check "t22 guard: 085 re-run on 083+084 succeeds (idempotent)" "'$(t22_md5)' = 'dc822a6435c3e512acdc933c4a2995a8'"
+    grep -q '085: current completion body is the 085 (re-run) body' "$WORK/mig_t22_g5.log" && t22_check "t22 guard: the re-run recognised its own body" "true" || t22_check "t22 guard: the re-run recognised its own body" "false"
+  else
+    tail -5 "$WORK/mig_t22_g5.log"; t22_check "t22 guard: 085 re-run on 083+084 succeeds (idempotent)" "false"
+  fi
+  run_sql_test "$SQL/t22_png_completion_b.sql"
+else
+  log "skipping t22_png_completion (migrations capped at $MAX_MIG < 085)"
+fi
 # Concurrent first-time setup (076). MUST RUN LAST: t12_bootstrap_prep
 # empties public.users (TRUNCATE ... CASCADE) to recreate a fresh install in
 # this throwaway database. Two sessions call bootstrap_first_admin(); A holds

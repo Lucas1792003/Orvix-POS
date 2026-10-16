@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { checkUploadedImage, sniffImageType } from "../../supabase/functions/phone-upload-token/imageCheck.ts";
 import {
   BUCKET_MAX_BYTES, COMPLETION_MAX_BYTES, HTML_DOC, JPEG_HTML_POLYGLOT, JPEG_OVER_BUCKET_LIMIT,
-  JPEG_OVER_COMPLETION_LIMIT, SVG_DOC, TINY_JPEG, TINY_PNG, TINY_WEBP, jpegWithComment,
+  JPEG_OVER_COMPLETION_LIMIT, SVG_DOC, TINY_JPEG, TINY_PNG, TINY_WEBP, jpegWithComment, pngCrc32, pngOfSize,
 } from "./imageFixtures";
 
 describe("live image fixtures vs imageCheck.ts", () => {
@@ -13,9 +13,10 @@ describe("live image fixtures vs imageCheck.ts", () => {
     expect(checkUploadedImage(TINY_WEBP, "image/webp")).toEqual({ ok: true, type: "image/webp" });
     expect(checkUploadedImage(TINY_JPEG, "image/jpeg")).toEqual({ ok: true, type: "image/jpeg" });
     expect(checkUploadedImage(jpegWithComment({ totalBytes: COMPLETION_MAX_BYTES }), "image/jpeg")).toEqual({ ok: true, type: "image/jpeg" });
-    // PNG is a real image (the bucket allows it) but not a completion type
+    // 085: PNG is a completion type like JPEG / WebP
     expect(sniffImageType(TINY_PNG)).toBe("image/png");
-    expect(checkUploadedImage(TINY_PNG, "image/png", { allowedTypes: ["image/png"] })).toEqual({ ok: true, type: "image/png" });
+    expect(checkUploadedImage(TINY_PNG, "image/png")).toEqual({ ok: true, type: "image/png" });
+    expect(checkUploadedImage(pngOfSize(COMPLETION_MAX_BYTES), "image/png")).toEqual({ ok: true, type: "image/png" });
   });
 
   it("padded JPEGs have the exact requested size and stay well-formed", () => {
@@ -44,6 +45,27 @@ describe("live image fixtures vs imageCheck.ts", () => {
     expect(checkUploadedImage(JPEG_OVER_COMPLETION_LIMIT(), "image/jpeg")).toEqual({ ok: false, reason: "too_large" });
     expect(checkUploadedImage(TINY_WEBP, "image/jpeg")).toEqual({ ok: false, reason: "magic_mismatch" });
     expect(checkUploadedImage(TINY_JPEG, "image/webp")).toEqual({ ok: false, reason: "magic_mismatch" });
-    expect(checkUploadedImage(TINY_PNG, "image/png")).toEqual({ ok: false, reason: "type_not_allowed" });
+    expect(checkUploadedImage(TINY_PNG, "image/jpeg")).toEqual({ ok: false, reason: "magic_mismatch" });
+    expect(checkUploadedImage(pngOfSize(150 * 1024), "image/png")).toEqual({ ok: false, reason: "too_large" });
+  });
+
+  it("padded PNGs have the exact size and every chunk CRC is valid", () => {
+    for (const n of [TINY_PNG.length + 12, 5000, COMPLETION_MAX_BYTES, 150 * 1024]) {
+      const b = pngOfSize(n);
+      expect(b.length).toBe(n);
+      let at = 8;
+      const types: string[] = [];
+      while (at < b.length) {
+        const len = b.readUInt32BE(at);
+        const td = b.subarray(at + 4, at + 8 + len);
+        expect(b.readUInt32BE(at + 8 + len)).toBe(pngCrc32(td));
+        types.push(td.subarray(0, 4).toString("ascii"));
+        at += 12 + len;
+      }
+      expect(at).toBe(b.length);
+      expect(types[0]).toBe("IHDR");
+      expect(types[1]).toBe("phFp");
+      expect(types.at(-1)).toBe("IEND");
+    }
   });
 });

@@ -115,7 +115,7 @@ export interface ProductImageUploadDeps {
  * `business_profile.logo_url`).
  *
  * Throws a friendly `Error` if the image is over the 100 KB cap, if no
- * product id is given, if the server refuses the bytes (not a real JPEG/WebP
+ * product id is given, if the server refuses the bytes (not a real JPEG/PNG/WebP
  * photo), or if any step fails. A session that did not complete is cancelled
  * (best effort), so its object becomes eligible for the abandoned-upload sweep.
  */

@@ -39,14 +39,28 @@ import { checkUploadedImage, MAX_COMPLETION_BYTES, normaliseContentType } from "
 // body { token, action: "complete" }. Same session / organization / path
 // checks as above (no rate-limit claim: completing does not issue a token).
 // The object is read back with the service role and its BYTES are checked
-// (imageCheck.ts: declared type jpeg/webp, <= 100 KB, magic number, container
-// sanity, no HTML/SVG markup). A failing object is DELETED and the session
-// stays PENDING (422 invalid_image; the phone may upload another photo). A
-// passing object is completed through complete_product_image_upload_session
-// called with the service role: from 083 on, anon/authenticated can no
-// longer call that RPC, so every completion passes this check.
+// (imageCheck.ts: declared type jpeg/png/webp, <= 100 KB, magic number,
+// container sanity, no HTML/SVG markup). A failing object is DELETED and the
+// session stays PENDING (422 invalid_image; the phone may upload another
+// photo). A passing object is completed through
+// complete_product_image_upload_session called with the service role: from
+// 083 on, anon/authenticated can no longer call that RPC, so every completion
+// passes this check.
 // Response (200): the RPC's own answer (sessionId, storagePath, publicUrl,
 // bytes, mimeType, expiresAt, status) - what the phone received before.
+//
+// Refused objects never stay behind (docs/selfhost-migration/phase-f/
+// migration-085-png.md): when the byte check refuses (422 invalid_image) OR
+// the RPC refuses after it confirmed the session is PENDING (422
+// completion_refused: type - e.g. PNG before migration 085 -, size, object
+// missing, not configured), discardRefusedObject() deletes the object - only
+// at the server-derived session path, only while that session is still
+// PENDING and was never completed, never when a product / logo / session URL
+// or another session names that path, and only if the object is still
+// exactly the one that was validated (same bytes, type, ETag, Last-Modified).
+// "No longer active" (another completion won the race, expired, cancelled)
+// and unknown RPC failures (503) never delete. The phone's signed URL has
+// upsert false, so the freed path takes a fresh upload.
 //
 // Rate limits (migration 081, docs/selfhost-migration/phase-f/rate-limiting.md):
 // before storage is touched, the issue is claimed atomically in the database
@@ -216,7 +230,7 @@ Deno.serve(async (request) => {
   }
 
   if (action === "complete") {
-    return await completeUpload(supabase, supabaseUrl, serviceRoleKey, token, expectedPath);
+    return await completeUpload(supabase, supabaseUrl, serviceRoleKey, token, session.id, expectedPath);
   }
 
   // ---- rate limit: claim this issue atomically in the database (081) ----
@@ -279,11 +293,16 @@ Deno.serve(async (request) => {
 
 const invalidImage = () =>
   jsonResponse(
-    { error: "The uploaded file is not a valid JPEG or WebP photo under 100 KB. Please choose another photo.", code: "invalid_image" },
+    { error: "The uploaded file is not a valid JPEG, PNG or WebP photo under 100 KB. Please choose another photo.", code: "invalid_image" },
     422,
   );
 
-/** Read at most `limit` + 1 bytes of a response body (the caller rejects anything longer). */
+/**
+ * Read at most `limit` + 1 bytes of a response body (the caller rejects
+ * anything longer). The result is cut to exactly `limit` + 1 bytes, so two
+ * reads of the same oversized object give the same bytes whatever the chunk
+ * boundaries were (085: discardRefusedObject compares them).
+ */
 const readCapped = async (res: Response, limit: number): Promise<Uint8Array> => {
   const reader = res.body?.getReader();
   if (!reader) return new Uint8Array(0);
@@ -299,24 +318,147 @@ const readCapped = async (res: Response, limit: number): Promise<Uint8Array> => 
       break;
     }
   }
-  const out = new Uint8Array(total);
+  const out = new Uint8Array(Math.min(total, limit + 1));
   let at = 0;
   for (const p of parts) {
-    out.set(p, at);
-    at += p.length;
+    if (at >= out.length) break;
+    const take = Math.min(p.length, out.length - at);
+    out.set(take === p.length ? p : p.subarray(0, take), at);
+    at += take;
   }
   return out;
 };
 
+const sha256Hex = async (b: Uint8Array): Promise<string> =>
+  Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", b)), (x) => x.toString(16).padStart(2, "0")).join("");
+
+/** What was validated: enough to recognise exactly that object again before deleting it. */
+interface ObjectIdentity {
+  sha256: string;
+  length: number;
+  type: string;
+  etag: string | null;
+  lastModified: string | null;
+}
+
+const identityOf = async (res: Response, bytes: Uint8Array): Promise<ObjectIdentity> => ({
+  sha256: await sha256Hex(bytes),
+  length: bytes.length,
+  type: normaliseContentType(res.headers.get("content-type")),
+  etag: res.headers.get("etag"),
+  lastModified: res.headers.get("last-modified"),
+});
+
+// The 080 RPC's refusals that are raised only AFTER it locked the session row
+// and confirmed it is PENDING and unexpired; the RAISE rolls the call back, so
+// the session is still PENDING. Only these lead to a cleanup. "Invalid upload
+// link" and "Upload link is no longer active" never do.
+const PENDING_REFUSALS = new Set([
+  "Upload path does not match this session",
+  "Uploaded image must be 100 KB or smaller",
+  "Unsupported uploaded image type",
+  "Uploaded image URL must be a Storage URL",
+  "Uploaded image URL must point to the product-images bucket",
+  "Uploaded image URL does not match this upload session",
+  "Uploaded image was not found in storage",
+  "Phone image upload is not configured on this server",
+]);
+
+type Discard =
+  | "deleted" | "gone" | "kept_session" | "kept_referenced" | "kept_replaced" | "kept_check_failed" | "kept_delete_failed";
+
+/**
+ * Delete a refused object, defensively. `path` is the server-derived session
+ * path (never anything from the request), `validated` identifies the object
+ * that was checked. Every condition is re-read with the service role right
+ * before the DELETE; any doubt keeps the object (the abandoned-upload sweep,
+ * deploy/lucashome/backup/sweep-abandoned-uploads.sh, removes it after the
+ * session expired, with the same guarantees).
+ */
+async function discardRefusedObject(
+  supabase: ReturnType<typeof createClient>,
+  objectUrl: string,
+  storageHeaders: Record<string, string>,
+  sessionId: string,
+  path: string,
+  validated: ObjectIdentity,
+): Promise<Discard> {
+  // 1. the session: still PENDING, never completed, still owns exactly this path
+  const { data: row, error: rowError } = await supabase
+    .from("product_image_upload_sessions")
+    .select("id, status, storage_path, completed_at, public_url")
+    .eq("id", sessionId)
+    .maybeSingle<{ id: string; status: string; storage_path: string; completed_at: string | null; public_url: string | null }>();
+  if (rowError) return "kept_check_failed";
+  if (!row || row.status !== "PENDING" || row.completed_at || row.public_url || row.storage_path !== path) return "kept_session";
+
+  // 2. nothing may reference the path: a product image, a logo, a session URL,
+  //    or another session holding the same path. ilike '*<path>*' is
+  //    deliberately broad ('_' matches any character): it can only keep more.
+  const pattern = `*${path}*`;
+  const refs = await Promise.all([
+    supabase.from("products").select("id").ilike("image_url", pattern).limit(1),
+    supabase.from("business_profile").select("id").ilike("logo_url", pattern).limit(1),
+    supabase.from("product_image_upload_sessions").select("id").ilike("public_url", pattern).limit(1),
+    supabase.from("product_image_upload_sessions").select("id").eq("storage_path", path).neq("id", sessionId).limit(1),
+  ]);
+  for (const r of refs) {
+    if (r.error || !Array.isArray(r.data)) return "kept_check_failed";
+    if (r.data.length > 0) return "kept_referenced";
+  }
+
+  // 3. the object must still be exactly the validated one (after an earlier
+  //    refusal freed the path, a retry may have uploaded a new object)
+  const again = await fetch(objectUrl, { method: "GET", headers: storageHeaders });
+  if (again.status === 400 || again.status === 404) {
+    await again.body?.cancel();
+    return "gone";
+  }
+  if (!again.ok) {
+    await again.body?.cancel();
+    return "kept_check_failed";
+  }
+  const now = await identityOf(again, await readCapped(again, MAX_COMPLETION_BYTES));
+  if (
+    now.sha256 !== validated.sha256 || now.length !== validated.length || now.type !== validated.type ||
+    now.etag !== validated.etag || now.lastModified !== validated.lastModified
+  ) {
+    return "kept_replaced";
+  }
+
+  // 4. delete exactly that path
+  const del = await fetch(objectUrl, { method: "DELETE", headers: storageHeaders });
+  await del.body?.cancel();
+  if (del.status === 400 || del.status === 404) return "gone";
+  if (!del.ok) return "kept_delete_failed";
+
+  // A completion committing between step 1 and the DELETE would need the RPC
+  // to accept the very object it (or the byte check) just refused - only a
+  // configuration change in that window could do that. Say so loudly.
+  const { data: after } = await supabase
+    .from("product_image_upload_sessions").select("status").eq("id", sessionId).maybeSingle<{ status: string }>();
+  if (after?.status === "COMPLETED") {
+    console.error("[phone-upload-token] a refused object was deleted while its session completed concurrently");
+  }
+  return "deleted";
+}
+
+const logDiscard = (what: string, reason: string, outcome: Discard) => {
+  console.log(`[phone-upload-token] ${what}`, reason, outcome);
+  if (outcome.startsWith("kept")) console.error("[phone-upload-token] refused object NOT deleted", outcome);
+};
+
 /**
  * G5 / 083: validate the stored object's bytes, then complete the session
- * with the service role. `path` is the server-derived session path.
+ * with the service role. `path` is the server-derived session path of
+ * `sessionId` (checked by the caller).
  */
 async function completeUpload(
   supabase: ReturnType<typeof createClient>,
   supabaseUrl: string,
   serviceRoleKey: string,
   token: string,
+  sessionId: string,
   path: string,
 ): Promise<Response> {
   const storageHeaders = { apikey: serviceRoleKey, Authorization: `Bearer ${serviceRoleKey}` };
@@ -334,16 +476,13 @@ async function completeUpload(
   }
   const declared = normaliseContentType(got.headers.get("content-type"));
   const bytes = await readCapped(got, MAX_COMPLETION_BYTES);
+  const validated = await identityOf(got, bytes);
   const verdict = checkUploadedImage(bytes, declared);
   if (!verdict.ok) {
     // Never leave a refused object on the public origin. The phone's signed
     // URL has upsert false, so the freed path takes another attempt.
-    const del = await fetch(objectUrl, { method: "DELETE", headers: storageHeaders });
-    await del.body?.cancel();
-    console.log("[phone-upload-token] refused uploaded object", verdict.reason, del.status);
-    if (!del.ok && del.status !== 400 && del.status !== 404) {
-      console.error("[phone-upload-token] could not delete the refused object", del.status);
-    }
+    logDiscard("refused uploaded object", verdict.reason,
+      await discardRefusedObject(supabase, objectUrl, storageHeaders, sessionId, path, validated));
     return invalidImage();
   }
 
@@ -359,14 +498,20 @@ async function completeUpload(
   if (error) {
     const message = typeof error.message === "string" ? error.message : "";
     if (/no longer active/i.test(message)) {
+      // another completion won the race, or expired / cancelled: never delete
       const { data: current } = await supabase.rpc("get_product_image_upload_session_by_token", { p_token: token });
       const status = (current as { status?: string } | null)?.status;
       return inactive(status && status !== "PENDING" ? status : "EXPIRED");
     }
     if (error.code === "P0001" && message) {
-      // the 080 RPC's own generic refusals (not found / type / size / not configured)
+      // the 080 RPC's own generic refusals (not found / type / size / not
+      // configured), raised while the session is PENDING: the object goes
+      if (PENDING_REFUSALS.has(message)) {
+        logDiscard("completion refused", "rpc", await discardRefusedObject(supabase, objectUrl, storageHeaders, sessionId, path, validated));
+      }
       return jsonResponse({ error: message, code: "completion_refused" }, 422);
     }
+    // unknown outcome (the call may even have committed): never delete
     console.error("[phone-upload-token] completion failed", error.code ?? "", message);
     return unavailable();
   }

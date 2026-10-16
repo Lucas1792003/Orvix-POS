@@ -1,6 +1,6 @@
 // imageCheck.ts (phone-upload-token, 083 / G5) - pure byte checks.
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { checkUploadedImage, containsActiveContent, sniffImageType } from "../../functions/phone-upload-token/imageCheck.ts";
+import { checkUploadedImage, COMPLETION_TYPES, containsActiveContent, sniffImageType } from "../../functions/phone-upload-token/imageCheck.ts";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const cat = (...p: (number[] | Uint8Array | string)[]) => {
@@ -68,8 +68,16 @@ Deno.test("imageCheck: verdicts", () => {
   assertEquals(checkUploadedImage(jpeg, "text/html"), { ok: false, reason: "type_not_allowed" });
   assertEquals(checkUploadedImage(jpeg, ""), { ok: false, reason: "type_not_allowed" });
   assertEquals(checkUploadedImage(cat([0xff, 0xd8, 0xff, 0xe0], "<html>"), "image/jpeg"), { ok: false, reason: "active_content" });
-  // PNG is a valid bucket type, but completes only when explicitly allowed
+  // 085: PNG completes like JPEG / WebP (same list as the bucket and the RPC)
   const png = cat([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13], "IHDR", new Uint8Array(30));
-  assertEquals(checkUploadedImage(png, "image/png").ok, false);
-  assertEquals(checkUploadedImage(png, "image/png", { allowedTypes: ["image/png"] }), { ok: true, type: "image/png" });
+  assertEquals(checkUploadedImage(png, "image/png"), { ok: true, type: "image/png" });
+  assertEquals(checkUploadedImage(png, "image/png", { allowedTypes: ["image/jpeg"] }), { ok: false, reason: "type_not_allowed" });
+  assertEquals(checkUploadedImage(png, "image/jpeg"), { ok: false, reason: "magic_mismatch" });
+  assertEquals(checkUploadedImage(cat([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], new Uint8Array(40)), "image/png"), { ok: false, reason: "malformed" });
+  assertEquals(checkUploadedImage(cat(png, "<svg onload=x>"), "image/png"), { ok: false, reason: "active_content" });
+  assertEquals(checkUploadedImage(cat(png, new Uint8Array(102400)), "image/png"), { ok: false, reason: "too_large" });
+});
+
+Deno.test("imageCheck 085: the completion types are exactly JPEG, PNG, WebP (= bucket allowed_mime_types of 083 = the 085 RPC)", () => {
+  assertEquals([...COMPLETION_TYPES].sort(), ["image/jpeg", "image/png", "image/webp"]);
 });

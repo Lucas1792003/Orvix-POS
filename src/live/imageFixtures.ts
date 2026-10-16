@@ -4,7 +4,8 @@
 //
 // From 083 the phone's completion goes through phone-upload-token
 // {action:"complete"}, which reads the stored object back and refuses
-// anything that is not a real JPEG/WebP of at most 100 KB without markup
+// anything that is not a real JPEG/PNG/WebP of at most 100 KB without markup
+// (PNG completes from migration 085)
 // (supabase/functions/phone-upload-token/imageCheck.ts). The VALID payloads
 // here pass that check (proven by imageFixtures.test.ts against the
 // function's own module); the NEGATIVE ones each fail it, or the bucket's
@@ -21,7 +22,7 @@ export const TINY_JPEG = Buffer.from(
   "base64",
 );
 
-/** 8x8 RGB PNG (zlib-deflated IDAT, valid CRCs). The bucket accepts PNG; phone completion does not. */
+/** 8x8 RGB PNG (zlib-deflated IDAT, valid CRCs). The bucket accepts PNG; phone completion from migration 085 on. */
 export const TINY_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAfElEQVR42g3JIQFEIRQAsAvxa9AAjaYBhhAvBIYG02gaYIh1zO73yUkucpNDnvKSj/z71KQWtamhTnWpR33Rk170poc+9aUf/UUkUUQTIaZY4ogXIxnFaEYY01jGMV5IFBrBZHF4sZNd7GaHPe1lH/vFTW5xmxvudJd73D/cBWNhI0fX4AAAAABJRU5ErkJggg==",
   "base64",
@@ -61,6 +62,35 @@ export function jpegWithComment(opts: { payload?: Buffer; totalBytes?: number } 
     need -= data + 4;
   }
   return Buffer.concat([head, ...parts, tail]);
+}
+
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+/** PNG chunk CRC (CRC-32 over type + data). */
+export const pngCrc32 = (b: Buffer): number => {
+  let c = 0xffffffff;
+  for (const x of b) c = CRC_TABLE[(c ^ x) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+};
+
+/**
+ * TINY_PNG padded to exactly `totalBytes` with one private ancillary chunk
+ * ("phFp", zero bytes, valid CRC) right after IHDR: still a decodable PNG
+ * with the same pixels (decoders skip unknown ancillary chunks).
+ */
+export function pngOfSize(totalBytes: number): Buffer {
+  const ihdrEnd = 8 + 25; // signature + IHDR (len 4, type 4, data 13, crc 4)
+  const data = totalBytes - TINY_PNG.length - 12;
+  if (data < 0) throw new Error(`pngOfSize: totalBytes must be >= ${TINY_PNG.length + 12}`);
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data, 0);
+  const typeAndData = Buffer.concat([Buffer.from("phFp", "ascii"), Buffer.alloc(data)]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(pngCrc32(typeAndData), 0);
+  return Buffer.concat([TINY_PNG.subarray(0, ihdrEnd), len, typeAndData, crc, TINY_PNG.subarray(ihdrEnd)]);
 }
 
 // ---- negative payloads (each refused for one reason) -----------------------

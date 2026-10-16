@@ -499,7 +499,7 @@ const invokePhoneUploadComplete: PhoneUploadCompleteCall = async (sessionToken) 
 /**
  * Phone (anonymous): complete the session. From migration 083 (G5) this goes
  * through the phone-upload-token Edge Function, which reads the stored object
- * back, checks its bytes (JPEG/WebP magic number, <= 100 KB, no HTML/SVG
+ * back, checks its bytes (JPEG/PNG/WebP magic number, <= 100 KB, no HTML/SVG
  * markup), deletes a refused object, and only then runs
  * complete_product_image_upload_session with the service role (anon can no
  * longer call that RPC). The URL stored for the desktop is derived

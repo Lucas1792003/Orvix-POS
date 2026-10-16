@@ -17,7 +17,7 @@
 //
 // Gates (test.skip, never a failure on an older stack):
 //   * schema (max supabase_migrations version) >= "083" for the first two,
-//     >= "084" for the third;
+//     084 actually applied (ledger row + no staff INSERT policy) for the third;
 //   * the deployed phone-upload-token has the completion action: a POST
 //     {token:"short", action:"probe"} answers 400 bad_request (an older
 //     function ignores `action` and answers 404 invalid).
@@ -45,6 +45,7 @@ const STORAGE_FP = `SELECT count(*) || ' objects, md5 ' || md5(string_agg((to_js
 
 let A: Terminal;
 let schemaVersion = "";
+let has084 = false;
 let functionReady = false;
 let trustedBase = "";
 let storageBefore = "";
@@ -53,6 +54,10 @@ const sessionStatus = (id: string) => sql1(`SELECT status FROM product_image_upl
 
 test.beforeAll(async () => {
   schemaVersion = sql1(`SELECT max(version) FROM supabase_migrations.schema_migrations;`);
+  // 084 by its catalog effect, not max(version): 085 may be applied before 084
+  // (they are independent), so max(version) >= 084 does not imply 084
+  has084 = sql1(`SELECT version FROM supabase_migrations.schema_migrations WHERE version = '084';`) === "084"
+    && sql1(`SELECT count(*) FROM pg_policies WHERE schemaname = 'storage' AND tablename = 'objects' AND policyname = 'product_images_insert';`) === "0";
   const probe = await fetch(`${cfg.url}/functions/v1/phone-upload-token`, {
     method: "POST",
     headers: { Authorization: `Bearer ${cfg.anonKey}`, apikey: cfg.anonKey, "content-type": "application/json" },
@@ -137,7 +142,7 @@ test("G-desktop-polyglot [083]: the desktop module refuses a polyglot: 422, obje
     }
   });
   test.skip(out === "module-unavailable", "packaged build: source modules are not importable from the renderer (covered by the audit suite on the disposable stack)");
-  expect(out).toMatch(/^rejected:Image upload failed: The uploaded file is not a valid JPEG or WebP photo/);
+  expect(out).toMatch(/^rejected:Image upload failed: The uploaded file is not a valid JPEG(, PNG)? or WebP photo/);
   const last = sql1(`SELECT s.id || '|' || s.status || '|' || s.storage_path FROM product_image_upload_sessions s JOIN users u ON u.id = s.created_by WHERE u.org_id = '${ids.org}' ORDER BY s.created_at DESC LIMIT 1;`).split("|");
   expect(last[1]).toBe("CANCELED");
   expect(sql1(`SELECT count(*) FROM storage.objects WHERE bucket_id = '${BUCKET}' AND name = '${last[2]}';`)).toBe("0");
@@ -145,7 +150,7 @@ test("G-desktop-polyglot [083]: the desktop module refuses a polyglot: 422, obje
 });
 
 test("G-084-direct-refused [084]: the QA ADMIN's JWT cannot write product-images directly any more", async () => {
-  test.skip(schemaVersion < "084", `schema ${schemaVersion} < 084: staff write policies still in place`);
+  test.skip(!has084, `schema ${schemaVersion}: 084 not applied, staff write policies still in place`);
   const c = await userClient(emails.admin, qaPassword());
   const live = await c.rpc("create_product_image_upload_session", { p_shop_id: ids.shop, p_product_id: ids.prod1 });
   expect(live.error).toBeNull();

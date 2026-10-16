@@ -323,7 +323,8 @@ export class MockPostgrest {
 export class MockStorage {
   objects = new Set<string>(); // "<bucket>/<path>"
   /** Stored bytes + storage-api content type (G5/083: GET + DELETE by the completion step). */
-  contents = new Map<string, { bytes: Uint8Array; type: string }>();
+  /** + storage-api's per-upload ETag and Last-Modified (085: the function re-identifies an object before deleting it). */
+  contents = new Map<string, { bytes: Uint8Array; type: string; etag: string; lastModified: string }>();
   deleted: string[] = [];
   calls: LoggedCall[] = [];
   signed: { bucket: string; path: string; upsert: boolean; token: string }[] = [];
@@ -331,9 +332,20 @@ export class MockStorage {
   failSign: number | null = null;
   failGet: number | null = null;
   failDelete: number | null = null;
+  /** Called on every object GET before it is answered (tests: change the world mid-request). */
+  onGet: ((key: string, nth: number) => void) | null = null;
+  gets = 0;
+  /** Serve GET bodies as streams whose chunk size differs per GET. */
+  chunked = false;
+  private uploads = 0;
   put(key: string, bytes: Uint8Array, type: string) {
     this.objects.add(key);
-    this.contents.set(key, { bytes, type });
+    this.uploads++;
+    this.contents.set(key, {
+      bytes, type,
+      etag: `"mock-etag-${this.uploads}"`,
+      lastModified: new Date(Date.UTC(2026, 9, 16, 0, 0, this.uploads)).toUTCString(),
+    });
   }
   handle(call: LoggedCall): Response {
     this.calls.push(call);
@@ -346,6 +358,7 @@ export class MockStorage {
       return new Response(null, { status: call.status });
     }
     if (call.method === "GET") {
+      this.onGet?.(rest, ++this.gets);
       if (this.failGet) {
         call.status = this.failGet;
         return json({ statusCode: String(this.failGet), error: "Error", message: "simulated storage failure" }, this.failGet);
@@ -356,7 +369,20 @@ export class MockStorage {
         return json({ statusCode: "404", error: "not_found", message: "Object not found" }, 400);
       }
       call.status = 200;
-      return new Response(c.bytes.slice(), { status: 200, headers: { "Content-Type": c.type, "Content-Length": String(c.bytes.length) } });
+      // chunked: like a real network body, each GET arrives in differently sized chunks
+      const body = this.chunked
+        ? new ReadableStream<Uint8Array>({
+          start: (ctl) => {
+            const size = 1000 + 777 * this.gets;
+            for (let at = 0; at < c.bytes.length; at += size) ctl.enqueue(c.bytes.slice(at, at + size));
+            ctl.close();
+          },
+        })
+        : c.bytes.slice();
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": c.type, "Content-Length": String(c.bytes.length), ETag: c.etag, "Last-Modified": c.lastModified },
+      });
     }
     if (call.method === "DELETE") {
       if (this.failDelete) {

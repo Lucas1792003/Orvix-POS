@@ -30,7 +30,8 @@ INSERT INTO fx VALUES
   ('wrong-org-old',      'u-admin',   'org-two',  'EXPIRED',   '3 days',  '3 days',  false, NULL),
   ('legacy-temp-old',    'u-admin',   NULL,       'EXPIRED',   '3 days',  '3 days',  false, 'temp/' || test.t21_sid('legacy-temp-old')),
   ('bad-id-old',         'u-admin',   'org-test', 'EXPIRED',   '3 days',  '3 days',  false, 'org/org-test/temp/pimg-NOTHEX0000000000000000000000000'),
-  ('subpath-old',        'u-admin',   'org-test', 'EXPIRED',   '3 days',  '3 days',  false, 'org/org-test/temp/' || test.t21_sid('subpath-old') || '/x.webp');
+  ('subpath-old',        'u-admin',   'org-test', 'EXPIRED',   '3 days',  '3 days',  false, 'org/org-test/temp/' || test.t21_sid('subpath-old') || '/x.webp'),
+  ('dup-path-old',       'u-admin',   'org-test', 'EXPIRED',   '3 days',  '3 days',  false, NULL);
 
 INSERT INTO product_image_upload_sessions (id, token_hash, created_by, shop_id, product_id, storage_path, public_url, bytes, mime_type,
                                            status, created_at, expires_at, completed_at)
@@ -46,6 +47,12 @@ INSERT INTO storage.objects (bucket_id, name, owner, owner_id, metadata, created
 SELECT 'product-images', coalesce(f.path, 'org/' || f.path_org || '/temp/' || test.t21_sid(f.label)), NULL, NULL,
        jsonb_build_object('size', 1000 + row_number() OVER (ORDER BY f.label), 'mimetype', 'image/jpeg'), now() - f.o_age
   FROM fx f;
+
+-- 085 review: a SECOND (completed, URL-less) session row holding the same
+-- path as the abandoned 'dup-path-old' session -> that object is "referenced"
+INSERT INTO product_image_upload_sessions (id, token_hash, created_by, storage_path, status, created_at, expires_at, completed_at)
+VALUES (test.t21_sid('dup-path-twin'), md5('t21-sweep-tok-dup-path-twin'), 'u-admin', 'org/org-test/temp/' || test.t21_sid('dup-path-old'),
+        'COMPLETED', now() - interval '3 days', now() - interval '3 days' + interval '10 minutes', now() - interval '3 days' + interval '1 minute');
 
 -- an object at a session-shaped path WITHOUT any session row (never touched)
 INSERT INTO storage.objects (bucket_id, name, metadata, created_at)

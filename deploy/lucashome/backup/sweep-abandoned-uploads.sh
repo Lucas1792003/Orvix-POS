@@ -14,7 +14,9 @@
 #     EXPIRED / CANCELED / PENDING past expiry, and session + object older than
 #     the grace period (default 24 h);
 #   * objects that any products.image_url / business_profile.logo_url /
-#     session public_url points at are KEPT (reported as "referenced");
+#     session public_url points at, or whose path another session row also
+#     holds, are KEPT (reported as "referenced"; a name referenced on any row
+#     is never deleted);
 #   * every name whose sha256 is in the allow-list (the 574 objects that
 #     existed at the self-host migration, sweep-protected-objects.sha256) is
 #     KEPT, whatever the database says;
@@ -60,7 +62,7 @@ NAME_RE='^org/[A-Za-z0-9_-]+/temp/pimg-[0-9a-f]{32}$'
 
 log() { printf '%s [sweep-abandoned-uploads] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
-usage() { sed -n 2,45p "$0"; exit 2; }
+usage() { sed -n 2,44p "$0"; exit 2; }
 
 sha256_stdin() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi
@@ -135,6 +137,7 @@ pat = re.compile(name_re)
 c = {"rows": 0, "delete": 0, "delete_bytes": 0, "referenced": 0, "allow_listed": 0, "bad_name": 0}
 by_status = {}
 keep = []
+referenced = set()
 for line in open(src):
     line = line.rstrip("\n")
     if not line:
@@ -149,12 +152,22 @@ for line in open(src):
         continue
     if verdict != "delete":
         c["referenced"] += 1
+        referenced.add(name)
         continue
+    keep.append((name, status, int(size or 0)))
+# a name that is "referenced" on ANY row (e.g. two sessions holding one path)
+# is never deleted, and a name is deleted at most once
+seen = set()
+final = []
+for name, status, size in keep:
+    if name in referenced or name in seen:
+        continue
+    seen.add(name)
     c["delete"] += 1
-    c["delete_bytes"] += int(size or 0)
+    c["delete_bytes"] += size
     by_status[status] = by_status.get(status, 0) + 1
-    keep.append(name)
-open(out_delete, "w").write("".join(n + "\n" for n in sorted(keep)))
+    final.append(name)
+open(out_delete, "w").write("".join(n + "\n" for n in sorted(final)))
 statuses = ",".join(f"{k}={v}" for k, v in sorted(by_status.items())) or "-"
 open(out_summary, "w").write(
     f"candidates={c['rows']} delete={c['delete']} delete_bytes={c['delete_bytes']} by_status={statuses} "
