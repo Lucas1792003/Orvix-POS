@@ -30,7 +30,7 @@
 //   G5-1..3 migration 083 (run ONLY when the schema is >= 083;
 //     docs/selfhost-migration/phase-f/migration-083-g5.md; placed before 9-13
 //     so the 081 tests' org-window / per-user fillers cannot starve them):
-//     the function completes only real JPEG/WebP <= 100 KB without markup and
+//     the function completes only real JPEG/WebP (+ PNG from 085) <= 100 KB without markup and
 //     DELETES what it refuses; the bucket refuses other declared types and
 //     > 5 MiB; cross-org tokens / paths complete nothing
 //
@@ -55,11 +55,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { Evidence, liveConfig, makeClient, randomPassword, runSql, createAuthUser, signedInClient, type LiveConfig } from "./liveHelpers";
 import {
   BUCKET_MAX_BYTES, COMPLETION_MAX_BYTES, HTML_DOC, JPEG_HTML_POLYGLOT, JPEG_OVER_BUCKET_LIMIT, JPEG_OVER_COMPLETION_LIMIT,
-  SVG_DOC, TINY_JPEG, TINY_PNG, TINY_WEBP, jpegWithComment,
+  SVG_DOC, TINY_JPEG, TINY_PNG, TINY_WEBP, jpegWithComment, pngOfSize,
 } from "./imageFixtures";
 import {
-  completeThroughFunction, completeThroughRpc, describeCompletion, exactRpcArgs, isInactive, isInvalidImage, isNotUploaded,
-  isPermissionDenied, isPost083, phoneCompleter, schemaVersion, signedPut, type PhoneCompletion,
+  completeThroughFunction, completeThroughRpc, describeCompletion, exactRpcArgs, isCompletionRefused, isInactive, isInvalidImage, isNotUploaded,
+  isPermissionDenied, isPost083, isPost085, phoneCompleter, schemaVersion, signedPut, type PhoneCompletion,
 } from "./phoneCompletion";
 
 const LIVE = Boolean(process.env.LIVE_SUPABASE_URL);
@@ -106,6 +106,9 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
   let schema = "";
   const has081 = () => schema >= "081";
   const has083 = () => isPost083(schema);
+  /** 085 by its ledger row (085 does not need 084, so max(version) alone could mislead), and >= 085 */
+  let png085 = false;
+  const has085 = () => png085 && isPost085(schema);
 
   const sql1 = (q: string): string => runSql(cfg, q).trim();
   const derived = (p: string) => `${trusted}/storage/v1/object/public/${BUCKET}/${p}`;
@@ -194,6 +197,7 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     svc = makeClient(cfg, cfg.serviceKey);
     anon = makeClient(cfg, cfg.anonKey);
     schema = schemaVersion(cfg);
+    png085 = sql1("SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '085';") === "1";
     expect(schema >= "080", `schema ${schema} must be >= 080`).toBe(true);
     phoneComplete = phoneCompleter(cfg, anon, has083);
     // 083's grants are present exactly when the schema says so (anon|authenticated|service_role)
@@ -546,13 +550,16 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     expect(sessRow(s.sessionId), `${what}: session`).toBe("PENDING|<null>|<null>|false");
   };
 
-  it("G5-1. [083] bucket limits; the phone completes real JPEG / WebP (up to exactly 100 KB) through the function; the RPC refuses anon and authenticated", async (ctx) => {
+  it("G5-1. [083] bucket limits; the phone completes real JPEG / WebP (+ PNG at >= 085; up to exactly 100 KB) through the function; the RPC refuses anon and authenticated", async (ctx) => {
     if (!has083()) ctx.skip();
     const bucket = sql1(`SELECT public || '|' || file_size_limit || '|' || allowed_mime_types::text FROM storage.buckets WHERE id = '${BUCKET}';`);
     expect(bucket).toBe(`true|${BUCKET_MAX_BYTES}|{image/jpeg,image/png,image/webp}`);
     const notes: string[] = [];
     const boundary = jpegWithComment({ totalBytes: COMPLETION_MAX_BYTES });
-    for (const [what, body, type] of [["WebP 34 B", TINY_WEBP, "image/webp"], ["JPEG", TINY_JPEG, "image/jpeg"], [`JPEG exactly ${COMPLETION_MAX_BYTES} B`, boundary, "image/jpeg"]] as const) {
+    // 085: PNG completes like JPEG / WebP (same size rule); below 085 it is a G5-2 case
+    const valid: (readonly [string, Buffer, string])[] = [["WebP 34 B", TINY_WEBP, "image/webp"], ["JPEG", TINY_JPEG, "image/jpeg"], [`JPEG exactly ${COMPLETION_MAX_BYTES} B`, boundary, "image/jpeg"]];
+    if (has085()) valid.push(["PNG", TINY_PNG, "image/png"], [`PNG exactly ${COMPLETION_MAX_BYTES} B`, pngOfSize(COMPLETION_MAX_BYTES), "image/png"]);
+    for (const [what, body, type] of valid) {
       const s = await createSession(A);
       const locked = await expectRpcLocked(s, { p_bytes: body.length, p_mime_type: type });
       const put = await signedPut(cfg, s.storagePath, await uploadToken(s), body, type);
@@ -573,10 +580,10 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
     ev.pass("G5-1 [083] valid completions", `bucket public|limit|types = ${bucket}; ${notes.join(" || ")}`);
   });
 
-  it("G5-2. [083] refused content (disguised HTML, SVG, JPEG+HTML polyglot, > function limit, > 5 MiB, wrong magic, PNG): no completed session, no object left", async (ctx) => {
+  it("G5-2. [083] refused content (disguised HTML, SVG, JPEG+HTML polyglot, > function limit, > 5 MiB, wrong magic, PNG below 085): no completed session, no object left", async (ctx) => {
     if (!has083()) ctx.skip();
     const html = Buffer.from(HTML_DOC);
-    type Case = { what: string; body: Buffer; type: string; fileName?: string; at: "storage" | "completion" };
+    type Case = { what: string; body: Buffer; type: string; fileName?: string; at: "storage" | "completion"; pre085Png?: boolean };
     const cases: Case[] = [
       { what: "disguised HTML (qa-photo.jpg, image/jpeg, HTML body, multipart)", body: html, type: "image/jpeg", fileName: "qa-photo.jpg", at: "completion" },
       { what: "HTML declared image/jpeg (raw PUT)", body: html, type: "image/jpeg", at: "completion" },
@@ -588,7 +595,12 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
       { what: `real JPEG ${BUCKET_MAX_BYTES + 1} B (> 5 MiB bucket limit)`, body: JPEG_OVER_BUCKET_LIMIT(), type: "image/jpeg", at: "storage" },
       { what: "WebP bytes declared image/jpeg (wrong magic)", body: TINY_WEBP, type: "image/jpeg", at: "completion" },
       { what: "JPEG bytes declared image/webp (wrong magic)", body: TINY_JPEG, type: "image/webp", at: "completion" },
-      { what: "PNG declared image/png (bucket allows, completion does not)", body: TINY_PNG, type: "image/png", at: "completion" },
+      // 085: a real PNG completes (G5-1). Before 085 the RPC refuses it; the 083 function's
+      // byte check refuses it first (invalid_image), the 085 function after the RPC
+      // (completion_refused) - either way the object is deleted.
+      ...(has085() ? [] : [{ what: "PNG declared image/png (schema < 085: completion does not accept PNG)", body: TINY_PNG, type: "image/png", at: "completion" as const, pre085Png: true }]),
+      { what: "PNG bytes declared image/jpeg (wrong magic)", body: TINY_PNG, type: "image/jpeg", at: "completion" },
+      { what: `real PNG ${150 * 1024} B (> ${COMPLETION_MAX_BYTES} B function limit)`, body: pngOfSize(150 * 1024), type: "image/png", at: "completion" },
     ];
     const notes: string[] = [];
     const sessions: Sess[] = [];
@@ -610,15 +622,18 @@ describe.skipIf(!LIVE)("Phase G4 live checks for 080 + the deployed phone-upload
         const stored = objMeta(s.storagePath);
         expect(stored).toBe(`${k.type}/${k.body.length}`);
         const c = await completeThroughFunction(cfg, s.token);
-        expect(isInvalidImage(c), `${k.what}: ${describeCompletion(c)}`).toBe(true);
+        const refused = isInvalidImage(c) || (k.pre085Png === true && isCompletionRefused(c, "Unsupported uploaded image type"));
+        expect(refused, `${k.what}: ${describeCompletion(c)}`).toBe(true);
         expectNothingLeft(s, k.what); // the function DELETED the refused object
         // the RPC as its only caller would also not complete it now: the object is gone
         const r = await complete(s, { p_bytes: k.body.length, p_mime_type: k.type });
-        // refused either because the object is gone or (claimed size > 100 KB) by the RPC's own size check first
+        // refused because the object is gone, or by the RPC's own caller-value checks that come first
+        // (claimed size > 100 KB; claimed image/png below 085)
         expect(r.error, `${k.what}: the RPC must refuse`).not.toBeNull();
-        expect(r.error?.message === NOT_FOUND || /^Uploaded image must be 100 KB or smaller/.test(r.error?.message ?? ""), `${k.what}: ${r.error?.message}`).toBe(true);
+        expect(r.error?.message === NOT_FOUND || /^Uploaded image must be 100 KB or smaller/.test(r.error?.message ?? "")
+          || (k.pre085Png === true && r.error?.message === "Unsupported uploaded image type"), `${k.what}: ${r.error?.message}`).toBe(true);
         expectNothingLeft(s, `${k.what} (after RPC)`);
-        notes.push(`${k.what}: PUT 200 (stored ${stored}) -> function 422 invalid_image, object deleted, PENDING`);
+        notes.push(`${k.what}: PUT 200 (stored ${stored}) -> function ${c.httpStatus} ${c.code}, object deleted, PENDING`);
         if (!recovered) {
           // the freed path takes a real photo; the same session then completes
           const again = await signedPut(cfg, s.storagePath, await uploadToken(s), TINY_WEBP, "image/webp");

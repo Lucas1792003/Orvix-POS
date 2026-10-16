@@ -28,7 +28,12 @@ const BUCKET = "product-images";
 export const RPC_INACTIVE = "Upload link is no longer active";
 export const RPC_NOT_FOUND = "Uploaded image was not found in storage";
 export const RPC_INVALID_LINK = "Invalid upload link";
-export const FN_INVALID_IMAGE = "The uploaded file is not a valid JPEG or WebP photo under 100 KB. Please choose another photo.";
+export const FN_INVALID_IMAGE = "The uploaded file is not a valid JPEG, PNG or WebP photo under 100 KB. Please choose another photo.";
+/** The 083 function's wording (before the 085 function deploy); still accepted so the suites run against either build. */
+export const FN_INVALID_IMAGE_083 = "The uploaded file is not a valid JPEG or WebP photo under 100 KB. Please choose another photo.";
+/** First schema version where the completion RPC accepts image/png. */
+export const PNG_SCHEMA = "085";
+export const isPost085 = (version: string): boolean => version >= PNG_SCHEMA;
 
 /** max(supabase_migrations.schema_migrations.version), e.g. "082" / "083". */
 export function schemaVersion(cfg: LiveConfig): string {
@@ -148,7 +153,10 @@ export const isNotUploaded = (c: PhoneCompletion) =>
 export const isInvalidLink = (c: PhoneCompletion) =>
   c.via === "rpc" ? c.message === RPC_INVALID_LINK : c.httpStatus === 404 && c.code === "invalid";
 export const isInvalidImage = (c: PhoneCompletion) =>
-  c.via === "function" && c.httpStatus === 422 && c.code === "invalid_image" && c.message === FN_INVALID_IMAGE;
+  c.via === "function" && c.httpStatus === 422 && c.code === "invalid_image" && (c.message === FN_INVALID_IMAGE || c.message === FN_INVALID_IMAGE_083);
+/** 085 function on a schema < 085: the RPC refused (e.g. PNG type) and the function deleted the object. */
+export const isCompletionRefused = (c: PhoneCompletion, message?: string) =>
+  c.via === "function" && c.httpStatus === 422 && c.code === "completion_refused" && (message === undefined || c.message === message);
 /** 083: the RPC refused for lack of EXECUTE (not for its arguments). */
 export const isPermissionDenied = (c: PhoneCompletion) =>
   c.via === "rpc" && c.code === "42501" && /permission denied/i.test(c.message);

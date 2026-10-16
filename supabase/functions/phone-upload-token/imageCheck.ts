@@ -6,9 +6,12 @@
 // free (also imported by the hermetic tests).
 //
 // An object passes only if ALL hold:
-//   1. declared type is one of the completion types (image/jpeg, image/webp;
-//      PNG is accepted by the bucket but never produced by the clients and
-//      never accepted by complete_product_image_upload_session);
+//   1. declared type is one of the completion types: image/jpeg, image/png,
+//      image/webp - the same list as the bucket (083) and, from migration 085,
+//      complete_product_image_upload_session. (Both clients re-encode photos
+//      to WebP/JPEG, so PNG reaches this check only from other uploaders. On
+//      a database before 085 the RPC still refuses PNG; the function then
+//      deletes the object, index.ts discardRefusedObject.)
 //   2. 1 <= size <= maxBytes (the clients' 100 KB cap);
 //   3. the magic number matches the declared type
 //        JPEG  FF D8 FF
@@ -23,7 +26,7 @@
 
 export type ImageType = "image/jpeg" | "image/png" | "image/webp";
 
-export const COMPLETION_TYPES: readonly ImageType[] = ["image/jpeg", "image/webp"];
+export const COMPLETION_TYPES: readonly ImageType[] = ["image/jpeg", "image/png", "image/webp"];
 export const MAX_COMPLETION_BYTES = 100 * 1024; // = the 080 RPC and both clients
 
 export type ImageCheck =

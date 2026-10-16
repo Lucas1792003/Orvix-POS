@@ -9,8 +9,10 @@
 -- verdict:
 --   delete      abandoned upload: may be removed
 --   referenced  abandoned-shaped but some products.image_url /
---               business_profile.logo_url / session public_url points at it:
---               KEPT, reported for manual review
+--               business_profile.logo_url / session public_url points at it,
+--               or ANOTHER session row holds the same storage_path (085
+--               review: defensive - storage_path is not unique, and a second
+--               row could be a completed one): KEPT, reported for manual review
 --
 -- An object is a candidate ONLY when ALL of these hold:
 --   1. bucket product-images, name = org/<org>/temp/pimg-<32 hex>
@@ -45,6 +47,8 @@ SELECT CASE WHEN r.referenced THEN 'referenced' ELSE 'delete' END,
                         WHERE b.logo_url IS NOT NULL AND position('/product-images/' || o.name IN b.logo_url) > 0)
             OR EXISTS (SELECT 1 FROM public.product_image_upload_sessions s2
                         WHERE s2.public_url IS NOT NULL AND position('/product-images/' || o.name IN s2.public_url) > 0)
+            OR EXISTS (SELECT 1 FROM public.product_image_upload_sessions s3
+                        WHERE s3.storage_path = o.name AND s3.id <> s.id)
            ) AS referenced
       FROM storage.objects o
       JOIN public.product_image_upload_sessions s ON s.storage_path = o.name

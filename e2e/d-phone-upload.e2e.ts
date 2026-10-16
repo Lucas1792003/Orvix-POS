@@ -765,7 +765,11 @@ test("D-ratelimit-used-up [081]: the session reached its lifetime cap -> 429 unt
 // service_role-only) - which also implies the validating phone-upload-token
 // and the new page are deployed (deploy order: functions first). QA session
 // objects only; a refused object is deleted by the function itself.
-const G5_REFUSED = "The uploaded file is not a valid JPEG or WebP photo under 100 KB. Please choose another photo.";
+// the 085 function's wording, and the 083 function's (either build may be deployed)
+const G5_REFUSED = [
+  "The uploaded file is not a valid JPEG, PNG or WebP photo under 100 KB. Please choose another photo.",
+  "The uploaded file is not a valid JPEG or WebP photo under 100 KB. Please choose another photo.",
+];
 
 /** The phone page's own upload code with an arbitrary blob (as the D-race case). */
 const pageUpload = (P: Terminal, b64: string, type: string) =>
@@ -816,7 +820,7 @@ test("D-g5-html-as-jpeg [083]: HTML bytes declared image/jpeg are stored by the 
     ] as const;
     for (const [label, bytes] of cases) {
       const out = await pageUpload(P, bytes.toString("base64"), "image/jpeg");
-      expect(out, label).toBe(`rejected:${G5_REFUSED}`);
+      expect(G5_REFUSED.map((m) => `rejected:${m}`), label).toContain(out);
       expect(objectsUnder(s), `${label}: the function deleted the refused object`).toBe(0);
       expect(sessionRow(s.sessionId).split("|")[0], label).toBe("PENDING");
     }

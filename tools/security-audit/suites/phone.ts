@@ -169,4 +169,113 @@ async function phoneUploadContent(w: World) {
     if (up.path) await removeObject(up.path);
   }
   if (!G5) record("phone", "G5 bucket / grant assertions above are GAPs below migration 083 (production 081/082)", "INFO", []);
+  if (G5) await phonePngAndCleanup(w, { newSession, signedPut, complete, objectRows, statusOf, covers });
+}
+
+// ---------------------------------------------------------------- 085
+// PNG completes like JPEG/WebP from 085; below 085 the (new) function's RPC
+// refusal deletes the object. Every refusal leaves nothing behind; retries,
+// concurrent completions, referenced paths and other orgs' objects are safe.
+// docs/selfhost-migration/phase-f/migration-085-png.md
+type Ctx = {
+  newSession: () => Promise<{ id: string; token: string; path: string }>;
+  signedPut: (s: { token: string }, body: Buffer, type: string) => Promise<{ status: number; text: string; path: string; uploadToken?: string }>;
+  complete: (s: { token: string }) => Promise<{ status: number; json: any; text: string }>;
+  objectRows: (path: string) => string;
+  statusOf: (id: string) => string;
+  covers: string[];
+};
+async function phonePngAndCleanup(w: World, x: Ctx) {
+  const P085 = MAX_MIG >= 85;
+  const A = w.A, B = w.B;
+  const covers = [...x.covers, "migration:085"];
+  const bigPng = () => Buffer.concat([fixtures.png(), Buffer.alloc(150 * 1024, 0x22)]);
+  const pngHtml = () => Buffer.concat([fixtures.png(), fixtures.html()]);
+
+  // 1. a valid PNG
+  {
+    const s = await x.newSession();
+    const up = await x.signedPut(s, fixtures.png(), "image/png");
+    const c = await x.complete(s);
+    if (P085) {
+      check("phone", "085 phone: a valid PNG via the signed URL completes (200 COMPLETED image/png, object kept)",
+        up.status < 300 && c.status === 200 && c.json?.status === "COMPLETED" && c.json?.mimeType === "image/png"
+          && x.statusOf(s.id) === "COMPLETED" && x.objectRows(s.path) === "1", covers, `put ${up.status}, complete ${c.status} ${c.text.slice(0, 120)}`);
+    } else {
+      check("phone", "pre-085 schema: a valid PNG is refused by the RPC (422 completion_refused) and the function DELETES the object, session PENDING",
+        up.status < 300 && c.status === 422 && c.json?.code === "completion_refused" && x.objectRows(s.path) === "0" && x.statusOf(s.id) === "PENDING",
+        covers, `put ${up.status}, complete ${c.status} ${c.json?.code ?? ""}, rows ${x.objectRows(s.path)}`);
+    }
+  }
+
+  // 2. malicious / oversize PNG: byte check refuses, object deleted
+  for (const [label, body] of [["PNG with an HTML payload", pngHtml()], ["PNG of 150 KB (> 100 KB completion limit, < 5 MiB bucket limit)", bigPng()]] as const) {
+    const s = await x.newSession();
+    const up = await x.signedPut(s, body, "image/png");
+    const c = await x.complete(s);
+    check("phone", `085 phone: ${label} -> 422 invalid_image, object DELETED, session PENDING`,
+      up.status < 300 && c.status === 422 && c.json?.code === "invalid_image" && x.objectRows(s.path) === "0" && x.statusOf(s.id) === "PENDING",
+      covers, `put ${up.status}, complete ${c.status} ${c.json?.code ?? ""}`);
+  }
+
+  // 3. RPC refusal (server not configured) -> object deleted; retry on the freed path completes
+  const cfg = sql(`SELECT value FROM public.app_config WHERE key = 'supabase_public_url'`);
+  {
+    const s = await x.newSession();
+    const otherOrg = await (async () => {
+      const r = await rpc(w.adminB2, "create_product_image_upload_session", { p_shop_id: B.shops[0], p_product_id: B.products[0] });
+      return r.status < 300 ? { id: String(r.json.sessionId), token: String(r.json.token), path: String(r.json.storagePath) } : null;
+    })();
+    const bUp = otherOrg ? await x.signedPut(otherOrg, fixtures.jpeg(), "image/jpeg") : null;
+    const up = await x.signedPut(s, fixtures.jpeg(), "image/jpeg");
+    sql(`DELETE FROM public.app_config WHERE key = 'supabase_public_url'`);
+    let c: Awaited<ReturnType<Ctx["complete"]>>;
+    try {
+      c = await x.complete(s);
+    } finally {
+      sql(`INSERT INTO public.app_config (key, value) VALUES ('supabase_public_url', ${q(cfg)}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
+    }
+    check("phone", "085 phone: an RPC refusal for a PENDING session (not configured) -> 422 completion_refused, the session's object DELETED",
+      up.status < 300 && c.status === 422 && c.json?.code === "completion_refused" && x.objectRows(s.path) === "0" && x.statusOf(s.id) === "PENDING",
+      covers, `put ${up.status}, complete ${c.status} ${c.json?.code ?? ""}, rows ${x.objectRows(s.path)}`);
+    if (otherOrg && bUp) {
+      check("phone", "085 phone: that cleanup left the other organization's pending object alone",
+        bUp.status < 300 && x.objectRows(otherOrg.path) === "1" && x.statusOf(otherOrg.id) === "PENDING", covers, `B put ${bUp.status}, rows ${x.objectRows(otherOrg.path)}`);
+      await removeObject(otherOrg.path);
+    } else {
+      record("phone", "085 phone: cross-org cleanup check skipped (no org B admin session available)", "INFO", covers);
+    }
+    // retry: the freed path takes a fresh token (not alreadyUploaded) and a new photo completes
+    const t = await fn(ANON, "phone-upload-token", { token: s.token });
+    const again = await x.signedPut(s, fixtures.webp(), "image/webp");
+    const c2 = await x.complete(s);
+    check("phone", "085 phone: retry after the refusal - fresh token for the freed path, new WebP uploads (upsert false) and completes",
+      t.status === 200 && typeof t.json?.token === "string" && !t.json?.alreadyUploaded && again.status < 300 && c2.status === 200
+        && x.statusOf(s.id) === "COMPLETED" && x.objectRows(s.path) === "1", covers, `token ${t.status}, put ${again.status}, complete ${c2.status}`);
+  }
+
+  // 4. a referenced path is never deleted, even on a refusal
+  {
+    const s = await x.newSession();
+    const up = await x.signedPut(s, fixtures.html(), "image/jpeg");
+    const before = sql(`SELECT coalesce(image_url, '') FROM products WHERE id = ${q(A.products[1])}`);
+    sql(`UPDATE products SET image_url = ${q(`${cfg}/storage/v1/object/public/product-images/${s.path}`)} WHERE id = ${q(A.products[1])}`);
+    const c = await x.complete(s);
+    sql(`UPDATE products SET image_url = ${before ? q(before) : "NULL"} WHERE id = ${q(A.products[1])}`);
+    check("phone", "085 phone: a refused object whose path a products.image_url names is NOT deleted (422, object kept)",
+      up.status < 300 && c.status === 422 && x.objectRows(s.path) === "1", covers, `complete ${c.status}, rows ${x.objectRows(s.path)}`);
+    await removeObject(s.path);
+  }
+
+  // 5. concurrent completions of one session: exactly one COMPLETED, the object stays
+  {
+    const s = await x.newSession();
+    const up = await x.signedPut(s, P085 ? fixtures.png() : fixtures.jpeg(), P085 ? "image/png" : "image/jpeg");
+    const all = await Promise.all(Array.from({ length: 4 }, () => x.complete(s)));
+    const ok = all.filter((r) => r.status === 200).length;
+    const lost = all.filter((r) => r.status === 410 && r.json?.status === "COMPLETED").length;
+    check("phone", `085 phone: 4 concurrent completions of one ${P085 ? "PNG" : "JPEG"} session -> exactly one 200, the rest 410 COMPLETED, object kept`,
+      up.status < 300 && ok === 1 && lost === 3 && x.statusOf(s.id) === "COMPLETED" && x.objectRows(s.path) === "1",
+      covers, `statuses ${all.map((r) => r.status).join(",")}, rows ${x.objectRows(s.path)}`);
+  }
 }
