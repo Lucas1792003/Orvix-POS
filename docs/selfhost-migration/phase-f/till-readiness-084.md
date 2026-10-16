@@ -36,9 +36,9 @@ upload on which till, and when.
 
 **Reading the till id on the device** (in order of preference):
 1. the version line of 1.0.16 (login page / sidebar: version, backend,
-   "validated uploads: yes"). **Request to the 1.0.16 client work:** add the
-   till id to that line (or to an About panel). It stays UI-only: not in the
-   header, not in any request.
+   "validated uploads: yes"). 1.0.16 shows the till id there (sidebar
+   footer, the line under the version; login page). It stays UI-only: not in
+   the header, not in any request.
 2. the queue-export file name: `pending-queue-<till id>-<UTC>.spqx`
    ([queue-export.md](queue-export.md)). Only offered while the queue holds
    entries, so it fits the canary's offline step (canary checklist §5.3).
@@ -61,6 +61,74 @@ till that is, or was, in use:
 
 Lines starting with `#` are comments. The file is copied to the server only
 for a run (`~/till-readiness/`), never kept in the stack directory.
+
+### 2.1 1.0.16 migration columns and the "migrated" rule (added 2026-10-16, RC1 audit)
+
+The same file is the per-till **migration register**. The seven columns above
+stay first and keep their names: the script reads the register with
+`csv.DictReader` **by header name** and ignores every other column, so the
+parser did not need to change. Checked: the script's own test
+(`deploy/lucashome/tests/verify-till-readiness-test.sh`, 39/39) re-run with a
+register carrying all 27 columns, a comment line with commas and quoted values
+containing commas: 39 passed, the same tills PROVEN, the retired row ignored.
+Rules: no line breaks inside a value; quote a value that contains a comma; never
+a passphrase, token, e-mail or user id.
+
+| Column | Content |
+|---|---|
+| `label` | the till name (owner's) |
+| `till_id` | exactly as shown on screen: 1.0.16 sidebar footer (line under the version, tooltip "Till id: …") and the login page; also in the queue-export file name |
+| `updated_utc` | **date upgraded** to 1.0.16 |
+| `shop_name` | the shop, readable (`shop_id` stays the key) |
+| `os` | e.g. `Windows 11 23H2` |
+| `installed_version` | as shown on screen, e.g. `1.0.16` |
+| `pending_before_upgrade_1015` | sidebar pending count on 1.0.15 right before the upgrade (must be 0: the 1.0.15 updater has no guard) |
+| `pending_after_first_start_1016` | Sync Conflicts page, first start on 1.0.16: entries that are not quarantined |
+| `quarantined_count` | entries badged "Other server: not sent" on first start (1.0.15 leftovers) |
+| `hosted_queue_reconciliation` | `none` (nothing was quarantined) · `exported+replayed` · `exported+discarded-by-owner` |
+| `reconciliation_export_file` | the `.spqx` file name (`pending-queue-<till id>-<UTC>.spqx`) |
+| `reconciliation_by`, `reconciliation_utc` | who decided (owner) and when |
+| `reconciliation_evidence` | e.g. the replay report file name + sha256, or "owner decision: discarded, reason …"; then "dismissed on till <UTC>" |
+| `desktop_upload_result` | the script's register verdict for this till (`PROVEN (…, 1.0.16)`) |
+| `desktop_upload_session_utc` | time of the validated desktop upload (= `test_utc` window; the script prints the session time, never its id/path) |
+| `phone_upload_result`, `phone_upload_utc` | phone QR upload on the canary product: `ok` / failure text, and time |
+| `last_seen_utc`, `last_seen_source` | newest evidence the till is alive on 1.0.16: the PROVEN upload time, the user's last sign-in from the script's per-user table (only meaningful when that user signs in on this till only), or an on-site check (photo of the sidebar). The server cannot attribute traffic to a till (§1), so name the source |
+| `status` | `not-started` · `canary` · `migrated` · `blocked` |
+| `status_checked_utc` | when `status` was last evaluated |
+| `notes` | free text, e.g. `canary rows kept (KEEP)` |
+
+**Migrated** — a till may be set to `status=migrated` only when **all** hold,
+each with its evidence in the row:
+1. `installed_version` = 1.0.16 (as shown on screen; photo);
+2. pending = 0 on the Sync Conflicts page (nothing queued, retrying or in conflict);
+3. `quarantined_count` = 0, **or** quarantined > 0 and reconciled: `hosted_queue_reconciliation` is `exported+replayed` or `exported+discarded-by-owner` with `reconciliation_export_file`, `reconciliation_by`, `reconciliation_utc` and `reconciliation_evidence` filled — and the till now shows quarantined 0;
+4. a validated desktop upload seen: `desktop_upload_result` = PROVEN;
+5. `last_seen_utc` within the last 72 h at `status_checked_utc`.
+
+Otherwise `canary` (being tested), `blocked` (any check failed or a
+reconciliation is open), or `not-started`.
+
+**Why rule 3 needs the register (RC1 audit 1c).** The app has no
+"reconciled" state: a quarantined entry stays on the till (never sent, never
+retried, never deleted automatically) until someone presses **Dismiss** on the
+Sync Conflicts page, which deletes it and is allowed only after an export in
+the same app session. So "quarantined 0" alone does not prove reconciliation
+(Dismiss after export also gives 0). Reconciliation therefore means, in this
+order: (a) export on the till (file + passphrase to the owner); (b) the owner
+decides per entry — replay with `tools/queue-recovery replay --include-quarantined
+--confirm-host <self-hosted host>` after checking the migrated data does not
+already contain the sale (1.0.15 entries carry an idempotency key minted by
+1.0.16's database upgrade, not the one hosted saw, so the server cannot
+de-duplicate them — use `inspect` and compare against the migrated sales), or
+discard with a written reason; (c) keep the replay report; (d) only then
+Dismiss the entries on the till, in the same session as a fresh export. Export
+promptly: quarantined entries that depend on a provisional id (e.g. a sale in a
+shift opened offline) lose the id mapping from the till after 7 days (RC1 audit
+finding), and the replay then reports `blocked-unresolved-ref`.
+A UI indicator is proposed (not implemented, RC2 decision): a persistent
+sidebar/login badge "N entries from the previous server — not reconciled" while
+any quarantined entry exists, and an owner-only "Mark reconciled" that records
+the export file name and time on the entries instead of deleting them.
 
 ## 3. Evidence on the server (read-only)
 
