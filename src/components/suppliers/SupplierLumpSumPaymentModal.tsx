@@ -6,6 +6,7 @@ import { useToast } from "../ui/Toast";
 import { MoneyInput } from "../forms/MoneyInput";
 import { formatMmk } from "../../lib/utils";
 import { getErrorMessage } from "../../lib/errors";
+import { mayAlreadyBeRecorded, outcomeToast } from "../../lib/outcomeToast";
 import { useDataStore } from "../../stores/dataStore";
 import { useTranslation } from "../../hooks/useTranslation";
 import { getPurchaseOrderBalanceMmk } from "../../features/suppliers/debt";
@@ -100,9 +101,14 @@ export const SupplierLumpSumPaymentModal = ({
       });
       onClose();
     } catch (err) {
-      const message = getErrorMessage(err, t("suppliers", "couldNotRecord"));
-      setError(message);
-      toast({ variant: "error", title: t("suppliers", "paymentFailed"), description: message });
+      // Unknown outcome → "pending confirmation", never "payment failed";
+      // the form closes so the same payment is not entered again.
+      toast(outcomeToast(err, t, t("suppliers", "paymentFailed"), t("suppliers", "couldNotRecord")));
+      if (mayAlreadyBeRecorded(err)) {
+        onClose();
+      } else {
+        setError(getErrorMessage(err, t("suppliers", "couldNotRecord")));
+      }
     } finally {
       setSubmitting(false);
     }

@@ -127,15 +127,18 @@ describe("createSale offline", () => {
     expect(await localDb.syncOutbox.count()).toBe(0);
   });
 
-  it("falls back to offline when the RPC call fails as a network error, even if navigator looks online", async () => {
+  it("a transport failure while navigator looks online: kept (same key), staged under the offline rules, shown as UNCONFIRMED", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     rpc.mockRejectedValue(new TypeError("Failed to fetch"));
     const { get } = makeStore();
 
-    const saleId = await get().createSale({ ...baseInput, cartItems: [cartItem()] });
+    // "Failed to fetch" may come after the request left: the outcome is
+    // unknown — never "recorded", never "failed" (correction pass).
+    await expect(get().createSale({ ...baseInput, cartItems: [cartItem()] })).rejects.toMatchObject({ name: "PendingConfirmationError" });
 
-    expect(get().sales[0]).toMatchObject({ id: saleId, pendingSync: true });
-    expect(await localDb.syncOutbox.count()).toBe(1);
+    expect(get().sales[0]).toMatchObject({ pendingSync: true, pendingConfirmation: true });
+    const [row] = await localDb.syncOutbox.toArray();
+    expect(row).toMatchObject({ status: "pending", inDoubt: true, writeAhead: true });
   });
 
   it("does NOT fall back to offline for a genuine server rejection while online", async () => {

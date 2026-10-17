@@ -1,14 +1,14 @@
 import type { StateCreator } from "zustand";
 import type { DataState, SaleState, CreateSaleInput } from "../types";
 import type { AuditLog, Inventory, InventoryMovement, Refund, Sale, SaleItem } from "../../../types";
-import { isNetworkError } from "../../../lib/errors";
 import { newId } from "../../../lib/id";
 import { calculateCartTotals } from "../../../features/pos/service";
-import { enqueueOutbox, recordIdMapping } from "../outbox";
-import {
-  beginOperation, callRpc, newIdempotencyKey, ONLINE_ONLY_RETRIES, type OperationContext,
-} from "../idempotentRpc";
+import { recordIdMapping } from "../outbox";
+import { beginOperation, newIdempotencyKey, ONLINE_ONLY_RETRIES, type OperationContext } from "../idempotentRpc";
+import { callOnlineOnly } from "../onlineOnly";
 import { deleteLocalRows, putLocalRows } from "../localWrites";
+import { Stage, submitOfflineCapable } from "../writeAhead";
+import { assertStockKnown, serverStockRows } from "../stockLedger";
 import { assertOfflineWriteEligible } from "../../authStore";
 
 // Shape returned by the complete_sale RPC (keys are already camelCase).
@@ -114,27 +114,29 @@ const buildCompleteSaleArgs = (
 };
 
 export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set, get) => {
+  const isProvisionalShift = (shiftId: string): boolean =>
+    (get().shifts ?? []).find((s) => s.id === shiftId)?.pendingSync === true;
+
   // POS checkout: a single atomic Supabase RPC. The database validates
   // permission, shop scope, the open shift, stock and overrides, then writes
   // the sale, items, inventory, movements and audit rows in one transaction.
-  const createSaleOnline = async (input: CreateSaleInput, op: OperationContext): Promise<string> => {
-    const { data, error } = await callRpc("complete_sale", buildCompleteSaleArgs(input, get, op));
-    if (error) throw error;
-    if (!data) throw new Error("Checkout returned no data.");
-
+  // Apply complete_sale's (validated) reply to the store and the mirror.
+  const applyCompleteSale = async (data: unknown, ackId: string): Promise<string> => {
     const result = data as CompleteSaleResult;
+    // Server rows + the effects of other unresolved entries (stockLedger.ts).
+    const shownStock = serverStockRows(result.inventory, ackId);
 
     // Reconcile local state from the authoritative RPC result.
     set((state) => ({
       sales: [result.sale, ...state.sales],
       saleItems: [...result.items, ...state.saleItems],
-      inventory: mergeInventory(state.inventory, result.inventory),
+      inventory: mergeInventory(state.inventory, shownStock),
       movements: [...result.movements, ...state.movements],
       auditLogs: [...result.auditLogs, ...state.auditLogs],
     }));
-    void putLocalRows({
+    await putLocalRows({
       sales: [result.sale], saleItems: result.items,
-      inventory: result.inventory, movements: result.movements, auditLogs: result.auditLogs,
+      movements: result.movements, auditLogs: result.auditLogs,
     });
 
     return result.sale.id;
@@ -146,8 +148,11 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   // call for replay once back online. The server is still the final say:
   // reconcileCompleteSale() below replaces this provisional record with
   // whatever the server actually accepts.
-  const createSaleOffline = async (input: CreateSaleInput, op: OperationContext): Promise<string> => {
+  const stageSale = async (input: CreateSaleInput, op: OperationContext, stage: Stage): Promise<string> => {
+    // The offline rules apply in both modes: an unknown outcome never
+    // authorises a sale this till could not make offline (correction pass).
     await assertOfflineWriteEligible();
+    assertStockKnown();
     const { shopId, shiftId, cashierId, cartItems, cartDiscountPct, paymentMethod, paidMmk } = input;
     const now = op.createdAt;
     const saleId = newId("sale");
@@ -158,7 +163,7 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
     // deduct cumulatively, mirroring complete_sale's own running ledger.
     const runningQty = new Map<string, number>();
     const qtyFor = (productId: string) =>
-      runningQty.get(productId) ?? get().getInventoryQty(shopId, productId);
+      runningQty.get(productId) ?? stage.qty(get, shopId, productId);
 
     for (const item of cartItems) {
       const baseQuantitySold = item.qty * item.unitBaseQuantity;
@@ -216,22 +221,24 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
       subtotalMmk: subtotal, discountMmk: itemDiscount + cartDiscount, cartDiscountPct,
       totalMmk: total, paymentMethod, paidMmk, changeMmk: Math.max(0, paidMmk - total),
       createdAt: now, pendingSync: true, idempotencyKey: op.idempotencyKey,
+      // Outcome unknown: shown as unconfirmed, never as a recorded sale.
+      ...(stage.mode === "in-doubt" ? { pendingConfirmation: true } : {}),
     };
 
-    set((state) => ({
+    stage.set((state: DataState) => ({
       sales: [sale, ...state.sales],
       saleItems: [...items, ...state.saleItems],
       inventory: mergeInventory(state.inventory, inventoryUpdates),
       movements: [...movements, ...state.movements],
     }));
-    void putLocalRows({ sales: [sale], saleItems: items, inventory: inventoryUpdates, movements });
+    stage.put({ sales: [sale], saleItems: items, inventory: inventoryUpdates, movements });
 
     // If the shift itself was also opened offline and hasn't synced yet,
     // this sale has to wait for that RPC's real shift id — see resolveArgs()
     // in outbox.ts.
-    const shiftIsProvisional = get().shifts.find((s) => s.id === shiftId)?.pendingSync === true;
+    const shiftIsProvisional = isProvisionalShift(shiftId);
 
-    await enqueueOutbox({
+    stage.enqueue({
       kind: "rpc",
       name: "complete_sale",
       args: buildCompleteSaleArgs(input, get, op),
@@ -248,17 +255,16 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
     return saleId;
   };
 
-  const createRefundVoidRequestOnline = async (
+  // The ONE argument builder for create_refund_void_request (online and queued).
+  const buildRequestArgs = (
     saleId: string, type: "VOID" | "PARTIAL", reason: string,
-    items: { productId: string; qtyUnits: number; amountMmk: number }[] | null,
-    op: OperationContext,
-  ): Promise<void> => {
-    const { data, error } = await callRpc("create_refund_void_request", {
-      p_sale_id: saleId, p_type: type, p_reason: reason, p_items: items,
-      p_created_at: op.createdAt, p_idempotency_key: op.idempotencyKey,
-    });
-    if (error) throw error;
-    if (!data) throw new Error("Request returned no data.");
+    items: { productId: string; qtyUnits: number; amountMmk: number }[] | null | undefined, op: OperationContext,
+  ) => ({
+    p_sale_id: saleId, p_type: type, p_reason: reason, p_items: items ?? null,
+    p_created_at: op.createdAt, p_idempotency_key: op.idempotencyKey,
+  });
+
+  const applyRefundVoidRequest = async (data: unknown): Promise<void> => {
     const result = data as RequestResult;
 
     set((state) => ({
@@ -266,7 +272,7 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
       refundVoidRequests: mergeRefundRequest(state.refundVoidRequests, result.request),
       auditLogs: [...result.auditLogs, ...state.auditLogs],
     }));
-    void putLocalRows({ refunds: [result.request], auditLogs: result.auditLogs });
+    await putLocalRows({ refunds: [result.request], auditLogs: result.auditLogs });
   };
 
   // No network: stage the request locally (status REQUESTED, same as the
@@ -274,10 +280,10 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   // the sale itself is still provisional (rung up offline in this same
   // session), carry a ref so this waits for the sale's real id — see
   // reconcileCompleteSale's recordIdMapping call.
-  const createRefundVoidRequestOffline = async (
+  const stageRefundVoidRequest = async (
     saleId: string, type: "VOID" | "PARTIAL", reason: string,
     items: { productId: string; qtyUnits: number; amountMmk: number }[] | undefined, actorId: string,
-    op: OperationContext,
+    op: OperationContext, stage: Stage,
   ): Promise<void> => {
     await assertOfflineWriteEligible();
     const sale = get().sales.find((s) => s.id === saleId);
@@ -289,23 +295,36 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
       createdBy: actorId, createdAt: now,
       items, status: "REQUESTED", pendingSync: true, idempotencyKey: op.idempotencyKey,
     };
-    set((state) => ({
+    stage.set((state: DataState) => ({
       refunds: mergeRefundRequest(state.refunds, request),
       refundVoidRequests: mergeRefundRequest(state.refundVoidRequests, request),
     }));
-    void putLocalRows({ refunds: [request] });
+    stage.put({ refunds: [request] });
 
-    await enqueueOutbox({
+    stage.enqueue({
       kind: "rpc",
       name: "create_refund_void_request",
-      args: {
-        p_sale_id: saleId, p_type: type, p_reason: reason, p_items: items ?? null,
-        p_created_at: now, p_idempotency_key: op.idempotencyKey,
-      },
+      args: buildRequestArgs(saleId, type, reason, items, op),
       idempotencyKey: op.idempotencyKey,
       shopId: sale.shopId,
       refs: sale.pendingSync ? [{ field: "p_sale_id", provisionalId: saleId }] : undefined,
       provisional: [{ table: "refunds", ids: [request.id] }],
+    });
+  };
+
+  // Write-ahead lifecycle (writeAhead.ts), like checkout.
+  const submitRequest = (
+    saleId: string, type: "VOID" | "PARTIAL", reason: string,
+    items: { productId: string; qtyUnits: number; amountMmk: number }[] | undefined, actorId: string,
+  ): Promise<void> => {
+    const op = beginOperation();
+    const sale = get().sales.find((s) => s.id === saleId);
+    return submitOfflineCapable({
+      set, name: "create_refund_void_request", shopId: sale?.shopId ?? null, op,
+      args: buildRequestArgs(saleId, type, reason, items, op),
+      needsProvisionalRefs: sale?.pendingSync === true,
+      applyOnline: applyRefundVoidRequest,
+      stage: (stage) => stageRefundVoidRequest(saleId, type, reason, items, actorId, op, stage),
     });
   };
 
@@ -317,25 +336,26 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
 
   createSale: async (input: CreateSaleInput) => {
     // One key + one event time per checkout, minted before the first
-    // attempt: if the online call fails on the network after the server
-    // committed, the queued replay carries the same key and gets the
-    // original sale back instead of ringing it up twice.
+    // attempt and written to the outbox BEFORE it is sent (write-ahead,
+    // writeAhead.ts): a lost reply, a crash or a refused fallback can no
+    // longer leave a committed sale without a durable record, and pressing
+    // Confirm again while it is unresolved reuses it instead of a new key.
     const op = beginOperation();
-    if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      return createSaleOffline(input, op);
-    }
-    try {
-      return await createSaleOnline(input, op);
-    } catch (err) {
-      if (isNetworkError(err)) return createSaleOffline(input, op);
-      throw err;
-    }
+    return submitOfflineCapable({
+      set, name: "complete_sale", shopId: input.shopId, op,
+      args: buildCompleteSaleArgs(input, get, op),
+      needsProvisionalRefs: isProvisionalShift(input.shiftId),
+      applyOnline: applyCompleteSale,
+      stage: (stage) => stageSale(input, op, stage),
+    });
   },
 
   // Called by the outbox once a queued complete_sale actually runs — swaps
   // the provisional sale/items/movements for the server's authoritative rows.
-  reconcileCompleteSale: (data, provisional) => {
+  reconcileCompleteSale: (data, provisional, ackId) => {
     const result = data as CompleteSaleResult;
+    // Server rows + the effects of other unresolved entries (stockLedger.ts).
+    const shownStock = serverStockRows(result.inventory, ackId ?? null);
     const provisionalSaleIds = new Set(provisional.find((p) => p.table === "sales")?.ids ?? []);
     const provisionalItemIds = new Set(provisional.find((p) => p.table === "saleItems")?.ids ?? []);
     const provisionalMovementIds = new Set(provisional.find((p) => p.table === "movements")?.ids ?? []);
@@ -352,14 +372,14 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
     set((state) => ({
       sales: [result.sale, ...state.sales.filter((s) => !provisionalSaleIds.has(s.id) && s.id !== result.sale.id)],
       saleItems: [...result.items, ...state.saleItems.filter((i) => !i.id || (!provisionalItemIds.has(i.id) && !resultItemIds.has(i.id)))],
-      inventory: mergeInventory(state.inventory, result.inventory),
+      inventory: mergeInventory(state.inventory, shownStock),
       movements: [...result.movements, ...state.movements.filter((m) => !provisionalMovementIds.has(m.id) && !resultMovementIds.has(m.id))],
       auditLogs: [...result.auditLogs, ...state.auditLogs.filter((a) => !resultAuditIds.has(a.id))],
     }));
     void deleteLocalRows(provisional);
     void putLocalRows({
       sales: [result.sale], saleItems: result.items,
-      inventory: result.inventory, movements: result.movements, auditLogs: result.auditLogs,
+      movements: result.movements, auditLogs: result.auditLogs,
     });
     // A void/refund request raised offline against this same sale (before it
     // had synced) will be queued with a ref to its provisional id — resolve
@@ -369,7 +389,7 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   },
 
   voidSale: async ({ saleId, reason }) => {
-    const { data, error } = await callRpc("create_refund_void_request", {
+    const { data, error } = await callOnlineOnly("create_refund_void_request", {
       p_sale_id: saleId,
       p_type: "VOID",
       p_reason: reason,
@@ -387,33 +407,13 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
     }));
   },
 
-  requestVoid: async ({ saleId, reason, actorId }) => {
-    const op = beginOperation();
-    if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      return createRefundVoidRequestOffline(saleId, "VOID", reason, undefined, actorId, op);
-    }
-    try {
-      await createRefundVoidRequestOnline(saleId, "VOID", reason, null, op);
-    } catch (err) {
-      if (isNetworkError(err)) return createRefundVoidRequestOffline(saleId, "VOID", reason, undefined, actorId, op);
-      throw err;
-    }
-  },
+  requestVoid: async ({ saleId, reason, actorId }) => submitRequest(saleId, "VOID", reason, undefined, actorId),
 
   requestRefund: async ({ saleId, items, reason, actorId }) => {
     const payload = items.map((item) => ({
       productId: item.productId, qtyUnits: item.qtyUnits, amountMmk: item.amountMmk,
     }));
-    const op = beginOperation();
-    if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      return createRefundVoidRequestOffline(saleId, "PARTIAL", reason, payload, actorId, op);
-    }
-    try {
-      await createRefundVoidRequestOnline(saleId, "PARTIAL", reason, payload, op);
-    } catch (err) {
-      if (isNetworkError(err)) return createRefundVoidRequestOffline(saleId, "PARTIAL", reason, payload, actorId, op);
-      throw err;
-    }
+    return submitRequest(saleId, "PARTIAL", reason, payload, actorId);
   },
 
   // Called by the outbox once a queued create_refund_void_request actually
@@ -440,19 +440,22 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
     if (!request) throw new Error("Refund or void request not found.");
 
     const rpcName = request.type === "VOID" ? "approve_void_request" : "approve_refund_request";
-    const { data, error } = await callRpc(
+    const { data, error } = await callOnlineOnly(
       rpcName, { p_request_id: refundId, p_idempotency_key: newIdempotencyKey() }, { retries: ONLINE_ONLY_RETRIES },
     );
     if (error) throw error;
     if (!data) throw new Error("Approval returned no data.");
 
     const result = data as ApprovalResult;
+    // Server rows + the effects of other unresolved entries (stockLedger.ts);
+    // never queued, so no entry of this till is released.
+    const shownStock = serverStockRows(result.inventory, null);
 
     set((state) => ({
       refunds: mergeRefundRequest(state.refunds, result.request),
       refundVoidRequests: mergeRefundRequest(state.refundVoidRequests, result.request),
       sales: state.sales.map((sale) => (sale.id === result.sale.id ? result.sale : sale)),
-      inventory: mergeInventory(state.inventory, result.inventory),
+      inventory: mergeInventory(state.inventory, shownStock),
       movements: [...result.movements, ...state.movements],
       auditLogs: [...result.auditLogs, ...state.auditLogs],
     }));
@@ -461,7 +464,7 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   // Online only (a decision, like approval — never queued). The server
   // checks the request is still pending and the approver may decide it.
   rejectRefund: async ({ refundId, reason }) => {
-    const { data, error } = await callRpc(
+    const { data, error } = await callOnlineOnly(
       "reject_refund_void_request",
       { p_request_id: refundId, p_reason: reason, p_idempotency_key: newIdempotencyKey() },
       { retries: ONLINE_ONLY_RETRIES },

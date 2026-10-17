@@ -29,6 +29,7 @@ import { exportCovers, recordQueueExport, resetQueueExportRecord, wasExported } 
 import { buildAppState } from "../../src/lib/updateGuardBridge";
 import { replayExport } from "../../tools/queue-recovery/replay";
 import { TEST_BACKEND_URL } from "../../src/test/setup";
+import { validReply } from "../../src/stores/data/testing/validReplies";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { evaluateInstallGuard, sanitizeAppState } = require("../../electron/updateGuard.cjs");
 
@@ -69,7 +70,8 @@ describe("1.0.15 profile, every outbox status, opened by RC1 (audit 1a/1b)", () 
 
     await localDb.open(); // runs the RC1 v2 upgrade function
     await prepareLocalStateForBackend({ db: localDb, backendUrl: TEST_BACKEND_URL, storage: null });
-    rpc.mockResolvedValue({ data: { sale: { id: "x" } }, error: null });
+    // A complete complete_sale reply: replies are validated since Batch 2A.
+    rpc.mockResolvedValue({ data: validReply("complete_sale", { sale: { id: "x" } }), error: null });
     await drainOutbox();
     await drainOutbox();
     expect(rpc).not.toHaveBeenCalled();
@@ -138,7 +140,8 @@ describe("findings in the outbox (audit 1a/1b)", () => {
       shopId: "s", createdAt: new Date().toISOString(), status: "syncing", attempts: 0, backendOrigin: currentBackendOrigin(),
     });
     expect(await countUnsyncedOutbox()).toBe(1);
-    rpc.mockResolvedValue({ data: { sale: { id: "x" } }, error: null });
+    // A complete complete_sale reply: replies are validated since Batch 2A.
+    rpc.mockResolvedValue({ data: validReply("complete_sale", { sale: { id: "x" } }), error: null });
     // a pre-RC2 row has no syncingSince: it counts as stale on any pass
     await expect(drainOutbox()).resolves.toBe("drained");
     expect(rpc).toHaveBeenCalledTimes(1);

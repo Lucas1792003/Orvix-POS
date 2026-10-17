@@ -10,6 +10,7 @@
 //    See src/test/hostedGuard.ts for the incident this exists for.
 import { afterEach, vi } from "vitest";
 import { installHostedBackendGuard, takeHostedAttempts } from "./hostedGuard";
+import { clearStoreTimers } from "../stores/data/storeTimers";
 
 export const TEST_BACKEND_URL = "http://127.0.0.1:54321";
 export const TEST_BACKEND_ANON_KEY = "test-anon-key";
@@ -21,6 +22,8 @@ vi.stubEnv("VITE_SUPABASE_EXPECTED_HOST", "");
 installHostedBackendGuard();
 
 afterEach(() => {
+  // Follow-up refreshes a test's store scheduled must not fire in the next test.
+  clearStoreTimers();
   const attempted = takeHostedAttempts();
   if (attempted.length > 0) {
     throw new Error(

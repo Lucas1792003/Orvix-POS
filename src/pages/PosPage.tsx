@@ -30,7 +30,9 @@ import {
   validatePosCart,
 } from "../features/pos/cartStock";
 import { hasShopPermission } from "../lib/permissions";
-import { reportError } from "../lib/errors";
+import { getErrorMessage, reportError } from "../lib/errors";
+import { isPendingConfirmation, isUnresolvedOperation } from "../stores/data/operationPrompt";
+import { useUnresolvedSales } from "../hooks/useUnresolvedSales";
 import { printReceipt as triggerPrint } from "../lib/print";
 import { getEffectiveShopId } from "../lib/utils";
 import { useTranslation } from "../hooks/useTranslation";
@@ -90,6 +92,8 @@ export const PosPage = () => {
   // selector instead left the inventoryById memo with a stale closure that
   // only refreshed on a full reload.
   const inventory = useDataStore((state) => state.inventory);
+  const stockPendingConfirmation = useDataStore((state) => state.stockPendingConfirmation);
+  const stockUnverified = useDataStore((state) => state.stockUnverified);
   const getProductByBarcode = useDataStore((state) => state.getProductByBarcode);
   const createSale = useDataStore((state) => state.createSale);
   const shifts = useDataStore((state) => state.shifts);
@@ -104,6 +108,7 @@ export const PosPage = () => {
   }, [activePriceLevelId, activePriceLevels, priceLevels]);
 
   const shopId = getEffectiveShopId(currentUser, currentShopId, shops);
+  const unresolvedSales = useUnresolvedSales(shopId);
   const currentShop = shops.find((s) => s.id === shopId);
   const hasShop = !!shopId;
   // Cart safety: if the operator switches the selected shop, drop the cart
@@ -153,6 +158,16 @@ export const PosPage = () => {
     }
     return map;
   }, [inventory, shopId]);
+
+  // Unconfirmed deductions per product for this shop (D-NEW-1 indicator).
+  const pendingConfirmationById = useMemo(() => {
+    const map: Record<string, number> = {};
+    const prefix = `${shopId}|`;
+    for (const [key, units] of Object.entries(stockPendingConfirmation ?? {})) {
+      if (shopId && key.startsWith(prefix) && units > 0) map[key.slice(prefix.length)] = units;
+    }
+    return map;
+  }, [stockPendingConfirmation, shopId]);
 
   const cartUnitsByProductId = useMemo(() => getRequestedUnitsByProduct(cartItems), [cartItems]);
 
@@ -497,11 +512,23 @@ export const PosPage = () => {
         setPrintSaleId(saleId);
       }
     } catch (error) {
-      toast({
-        title: t("pos", "checkoutFailed"),
-        description: reportError("PosPage.checkout", error, t("pos", "couldNotComplete")),
-        variant: "error",
-      });
+      if (isPendingConfirmation(error)) {
+        // Outcome unknown: NOT "sale recorded", no receipt printed, and the
+        // cart is cleared so the same sale is not rung up again under a new
+        // key. The queue confirms it automatically with its original key.
+        setCartItems([]);
+        setCartDiscountPct(0);
+        setPaymentOpen(false);
+        toast({ title: t("unresolved", "pendingTitle"), description: t("unresolved", "pendingSaleBody"), variant: "warning" });
+      } else if (isUnresolvedOperation(error)) {
+        toast({ title: t("unresolved", "cancelledTitle"), description: getErrorMessage(error, t("pos", "couldNotComplete")), variant: "info" });
+      } else {
+        toast({
+          title: t("pos", "checkoutFailed"),
+          description: reportError("PosPage.checkout", error, t("pos", "couldNotComplete")),
+          variant: "error",
+        });
+      }
     } finally {
       setSubmitting(false);
     }
@@ -736,6 +763,21 @@ export const PosPage = () => {
         </div>
       )}
 
+      {/* Sales whose outcome is unknown (lost reply, restart mid-send): never
+          rung up again under a new key — the queue confirms them. */}
+      {unresolvedSales > 0 && (
+        <div role="status" className="mb-2 flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <span className="material-symbols-rounded text-base" aria-hidden>hourglass_top</span>
+          <span>{t("unresolved", "posBanner", { n: unresolvedSales })}</span>
+        </div>
+      )}
+      {stockUnverified && (
+        <div role="alert" className="mb-2 flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+          <span className="material-symbols-rounded text-base" aria-hidden>warning</span>
+          <span>{t("unresolved", "stockUnverified")}</span>
+        </div>
+      )}
+
       {/* Main Content */}
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(300px,34%)] lg:gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
         {/* Products Section */}
@@ -751,6 +793,7 @@ export const PosPage = () => {
             onCategory={setCategory}
             onBrand={setBrandId}
             inventoryById={inventoryById}
+            pendingConfirmationById={pendingConfirmationById}
             cartUnitsByProductId={cartUnitsByProductId}
             productUnits={productUnits}
             onAdd={handleAddToCart}

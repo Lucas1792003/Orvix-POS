@@ -13,6 +13,7 @@ vi.mock("../../../lib/supabase", () => ({
 import { createShiftSlice } from "./shiftSlice";
 import { localDb } from "../../../lib/localDb";
 import { drainOutbox, registerOutboxReconciler } from "../outbox";
+import { validReply } from "../testing/validReplies";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function makeStore(seed: Record<string, any> = {}) {
@@ -148,7 +149,7 @@ describe("shift opened offline, sale rung up against it, then both sync", () => 
       if (name === "open_shift") {
         return { data: { shift: { id: "shift-server-1", shopId: "shop-1", cashierId: "user-1", startedAt: "t0", openingCashMmk: 10000 }, auditLogs: [] }, error: null };
       }
-      return { data: { ok: true }, error: null };
+      return { data: validReply(name), error: null };
     });
 
     await drainOutbox();

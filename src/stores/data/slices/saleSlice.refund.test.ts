@@ -1,3 +1,4 @@
+import "fake-indexeddb/auto";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Flow test: refund/void approval through the data store with Supabase mocked.

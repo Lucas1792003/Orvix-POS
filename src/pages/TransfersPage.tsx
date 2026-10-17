@@ -15,6 +15,7 @@ import { useToast } from "../components/ui/Toast";
 import { useTranslation } from "../hooks/useTranslation";
 import { formatDateTime, getEffectiveShopId } from "../lib/utils";
 import { reportError } from "../lib/errors";
+import { mayAlreadyBeRecorded, outcomeToast } from "../lib/outcomeToast";
 import { getActiveProductUnits, getDefaultProductUnit } from "../features/catalog/productUnits";
 import { convertToBaseQuantity, formatStockQuantity } from "../features/inventory/stockDisplay";
 import {
@@ -183,11 +184,18 @@ export const TransfersPage = () => {
       setShowCreateModal(false);
       setNewTransfer({ toShopId: "", items: [], notes: "" });
     } catch (error) {
-      toast({
-        variant: "error",
-        title: t("transfers", "failCreate"),
-        description: reportError("TransfersPage.create", error, t("transfers", "failCreate")),
-      });
+      if (mayAlreadyBeRecorded(error)) {
+        // Unknown outcome: "pending confirmation", and the form closes so
+        // the same transfer is not entered again.
+        toast(outcomeToast(error, t, t("transfers", "failCreate"), t("transfers", "failCreate")));
+        setShowCreateModal(false);
+        setNewTransfer({ toShopId: "", items: [], notes: "" });
+        return;
+      }
+      const toastItem = outcomeToast(error, t, t("transfers", "failCreate"), t("transfers", "failCreate"));
+      toast(toastItem.variant === "error"
+        ? { ...toastItem, description: reportError("TransfersPage.create", error, t("transfers", "failCreate")) }
+        : toastItem);
     }
   };
 

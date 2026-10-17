@@ -2,12 +2,20 @@ import { supabase } from "../../lib/supabase";
 import { belongsToBackend, currentBackendOrigin, quarantineForeignOutboxEntries } from "../../lib/backendOrigin";
 import { localDb, SYNC_STATE_KEYS, type SyncOutboxEntry } from "../../lib/localDb";
 import { newId } from "../../lib/id";
-import { isDuplicateError, isNetworkError } from "../../lib/errors";
-import { replayTableWrite } from "./tableWrite";
-import { callRpc, IDEMPOTENCY_KEY_ARG, newIdempotencyKey, RPC_TIMEOUT_MS, runRequest, type RpcOutcome } from "./idempotentRpc";
+import { isNetworkError } from "../../lib/errors";
+import { classifyFailure, holdBackoffMs } from "../../lib/failureClass";
+import { isPrimaryKeyDuplicate, runTableWrite } from "./tableWrite";
+import { callRpc, IDEMPOTENCY_KEY_ARG, newIdempotencyKey, RPC_TIMEOUT_MS, RpcError, setActorSource, stampOperationArgs, type RpcOutcome } from "./idempotentRpc";
+import { replyProblem } from "./replyShapes";
+import { flushStockCommit, stagedStockInTransaction } from "./stockLedger";
+import { localRowTables, putLocalRowsInTransaction, recordCommittedPut, type LocalRowBatch } from "./localWrites";
+import type { Inventory, InventoryMovement } from "../../types";
 import { useAuthStore } from "../authStore";
 import { useSyncStore } from "../syncStore";
 import { touchAuthCache } from "../authCache";
+
+// The acting user for p_expected_actor_id (idempotentRpc.stampOperationArgs).
+setActorSource(() => useAuthStore.getState().currentUserId ?? null);
 
 type EnqueueInput = Pick<
   SyncOutboxEntry,
@@ -37,22 +45,6 @@ async function pendingInQueueOrder(): Promise<OutboxRow[]> {
   return rows.sort(byQueueOrder);
 }
 
-// RPCs that accept p_expected_actor_id (see migration 055) — the queuing
-// user's app id is stamped on at enqueue time and checked again at replay,
-// so a queued action can't silently execute under whoever happens to be
-// logged in when the device reconnects (a shared till, another cashier).
-// complete_sale is deliberately excluded — it already checks shift
-// ownership independently, and doesn't declare this param.
-const ACTOR_STAMPED_RPCS = new Set([
-  "adjust_stock",
-  "receive_purchase_order",
-  "record_supplier_payment",
-  "open_shift",
-  "close_shift",
-  "create_refund_void_request",
-  "dispatch_stock_transfer",
-  "receive_stock_transfer",
-]);
 
 /**
  * Queue a mutation for replay. RPC entries always carry an idempotency key
@@ -61,17 +53,27 @@ const ACTOR_STAMPED_RPCS = new Set([
  * `p_idempotency_key` so the replay payload is exactly what gets sent.
  */
 export async function enqueueOutbox(entry: EnqueueInput): Promise<void> {
+  const row = buildOutboxRow(entry);
+  // The read-max + put run in one transaction so two enqueues cannot be
+  // handed the same seq.
+  await localDb.transaction("rw", localDb.syncOutbox, async () => {
+    await putWithSeq(row);
+  });
+  void refreshSyncStatus();
+  notifyQueueChanged(row);
+}
+
+/** A new outbox row for `entry` (key and actor stamped by the shared rule). */
+export function buildOutboxRow(entry: EnqueueInput, overrides: Partial<SyncOutboxEntry> = {}): OutboxRow {
   let args = entry.args;
   let idempotencyKey = entry.idempotencyKey;
   if (entry.kind === "rpc") {
     const existing = args?.[IDEMPOTENCY_KEY_ARG];
     idempotencyKey = idempotencyKey ?? (typeof existing === "string" ? existing : newIdempotencyKey());
-    args = { ...(args ?? {}), [IDEMPOTENCY_KEY_ARG]: idempotencyKey };
-    if (ACTOR_STAMPED_RPCS.has(entry.name)) {
-      args = { ...args, p_expected_actor_id: useAuthStore.getState().currentUserId ?? null };
-    }
+    // The same rule the online call uses (idempotentRpc.stampOperationArgs).
+    args = stampOperationArgs(entry.name, { ...(args ?? {}), [IDEMPOTENCY_KEY_ARG]: idempotencyKey }, idempotencyKey);
   }
-  const row: OutboxRow = {
+  return {
     ...entry,
     args,
     idempotencyKey,
@@ -82,15 +84,144 @@ export async function enqueueOutbox(entry: EnqueueInput): Promise<void> {
     createdAt: new Date().toISOString(),
     status: "pending",
     attempts: 0,
+    ...overrides,
   };
-  // The read-max + put run in one transaction so two enqueues cannot be
-  // handed the same seq.
-  await localDb.transaction("rw", localDb.syncOutbox, async () => {
-    const existing = (await localDb.syncOutbox.toArray()) as OutboxRow[];
-    row.seq = existing.reduce((max, e) => Math.max(max, e.seq ?? 0), 0) + 1;
-    await localDb.syncOutbox.put(row);
+}
+
+async function putWithSeq(row: OutboxRow): Promise<void> {
+  const existing = (await localDb.syncOutbox.toArray()) as OutboxRow[];
+  row.seq = existing.reduce((max, e) => Math.max(max, e.seq ?? 0), 0) + 1;
+  await localDb.syncOutbox.put(row);
+}
+
+/**
+ * Commit one operation durably and atomically (Batch 2A): its local rows
+ * (provisional sale, items, movements, stock, …) and its outbox row — a new
+ * one (`put`) or the conversion of the operation's write-ahead row
+ * (`update`) — in ONE IndexedDB transaction. Either all of it is on disk or
+ * none of it is; there is no window where stock moved locally but nothing
+ * will ever sync it, or the reverse. Rejects (nothing written) on failure.
+ */
+export async function persistStaged(
+  rows: LocalRowBatch[],
+  outbox: { put: OutboxRow } | { update: { localId: string; changes: Partial<SyncOutboxEntry> } },
+): Promise<void> {
+  const localId = "put" in outbox ? outbox.put.localId : outbox.update.localId;
+  const stockRows = rows.flatMap((r) => (r.inventory ?? []) as Inventory[]);
+  const stockMoves = rows.flatMap((r) => (r.movements ?? []) as InventoryMovement[]);
+  const touchesStock = stockRows.length > 0 || stockMoves.length > 0;
+  const tables = new Set([
+    localDb.syncOutbox, ...rows.flatMap((r) => localRowTables(r)),
+    ...(touchesStock ? [localDb.inventory, localDb.syncState] : []),
+  ]);
+  await localDb.transaction("rw", [...tables], async () => {
+    for (const batch of rows) await putLocalRowsInTransaction(batch);
+    // Stock rows are re-based on the mirror and written WITH the ledger
+    // that describes them (crash-safe pair — stockLedger.ts).
+    if (touchesStock) await stagedStockInTransaction(localId, stockRows, stockMoves);
+    if ("put" in outbox) {
+      await putWithSeq(outbox.put);
+    } else {
+      const updated = await localDb.syncOutbox.update(outbox.update.localId, outbox.update.changes);
+      if (updated !== 1) throw new Error("The operation's queue record is missing; nothing was saved.");
+    }
   });
+  // Only now, committed: a running full load re-applies these rows.
+  for (const batch of rows) recordCommittedPut(batch);
   void refreshSyncStatus();
+  notifyQueueChanged();
+}
+
+// ----------------------------------------------------------------------
+// Write-ahead rows in flight (an online attempt of THIS instance is waiting
+// for its reply). Never recovered as "stranded", never sent by the drain,
+// and the drain holds while one exists so a queued entry cannot overtake an
+// operation still in flight (plan v2 §5.1 rule 6).
+// ----------------------------------------------------------------------
+const inFlightWriteAhead = new Set<string>();
+// Cross-window guard (web build — Electron runs one window): a Web Lock per
+// in-flight row, held for the duration of the attempt. Another window's
+// startup recovery and drain skip rows whose lock is held, so they cannot
+// resend a request this window is still waiting on (review finding P5).
+const WA_LOCK_PREFIX = "orvix-wa:";
+const heldLocks = new Map<string, () => void>();
+
+type FullLockManager = {
+  request: (name: string, callback: (lock: unknown) => Promise<unknown>) => Promise<unknown>;
+  query?: () => Promise<{ held?: { name?: string }[] }>;
+};
+const fullLockManager = (): FullLockManager | null => {
+  if (typeof navigator === "undefined") return null;
+  const locks = (navigator as Navigator & { locks?: FullLockManager }).locks;
+  return locks && typeof locks.request === "function" ? locks : null;
+};
+
+export function markWriteAheadInFlight(localId: string): Promise<void> {
+  inFlightWriteAhead.add(localId);
+  const locks = fullLockManager();
+  if (!locks) return Promise.resolve();
+  return new Promise<void>((acquired) => {
+    void locks.request(WA_LOCK_PREFIX + localId, () => new Promise<void>((release) => {
+      heldLocks.set(localId, release);
+      acquired();
+    })).catch(() => acquired());
+  });
+}
+
+export function clearWriteAheadInFlight(localId: string): void {
+  inFlightWriteAhead.delete(localId);
+  heldLocks.get(localId)?.();
+  heldLocks.delete(localId);
+}
+
+/** Rows some window of this profile is still sending (Web Locks), plus ours. */
+async function rowsInFlightAnywhere(): Promise<Set<string>> {
+  const ids = new Set(inFlightWriteAhead);
+  const locks = fullLockManager();
+  if (locks?.query) {
+    try {
+      const state = await locks.query();
+      for (const l of state.held ?? []) if (l.name?.startsWith(WA_LOCK_PREFIX)) ids.add(l.name.slice(WA_LOCK_PREFIX.length));
+    } catch {
+      // unknown: fall back to this window's own set
+    }
+  }
+  return ids;
+}
+
+export function writeAheadInFlightCount(): number {
+  return inFlightWriteAhead.size;
+}
+
+/** Tests only: behave like a freshly started app instance (no attempt of
+ *  "this" instance is in flight; the next drain is the startup pass). */
+export function simulateNewAppInstanceForTests(): void {
+  inFlightWriteAhead.clear();
+  startupRecoveryDone = false;
+}
+
+/**
+ * The ONE exception to "only a confirmed success deletes an outbox row"
+ * (B-24), approved as D-10(a): an online attempt the server DEFINITIVELY
+ * refused at the counter (the cashier sees the error, nothing was charged)
+ * leaves no record. Guarded so it can never remove anything else: the row
+ * must be a write-ahead row of an attempt of THIS instance that is still in
+ * flight and still `syncing` — never a queued, conflicted, quarantined, set
+ * aside or reconciled entry. Throws (and deletes nothing) otherwise.
+ */
+export async function discardWriteAhead(localId: string, reason: string): Promise<void> {
+  if (!inFlightWriteAhead.has(localId)) throw new Error(`Refusing to discard ${localId}: not an in-flight write-ahead attempt of this instance.`);
+  await localDb.transaction("rw", localDb.syncOutbox, async () => {
+    const row = await localDb.syncOutbox.get(localId);
+    if (!row) return;
+    if (row.writeAhead !== true || row.status !== "syncing") {
+      throw new Error(`Refusing to discard ${localId}: status ${row.status}, writeAhead ${String(row.writeAhead)}.`);
+    }
+    await localDb.syncOutbox.delete(localId);
+  });
+  console.info(`[sync] wal-discarded:${localId}:${reason}`);
+  void refreshSyncStatus();
+  notifyQueueChanged();
 }
 
 /** Record that a provisional (offline-minted) id turned out to be `realId`
@@ -98,7 +229,61 @@ export async function enqueueOutbox(entry: EnqueueInput): Promise<void> {
  *  later-queued entry might reference (e.g. reconcileOpenShift). */
 export async function recordIdMapping(provisionalId: string, realId: string): Promise<void> {
   if (provisionalId === realId) return;
-  await localDb.provisionalIdMap.put({ provisionalId, realId, createdAt: new Date().toISOString() });
+  const mapping = { provisionalId, realId, createdAt: new Date().toISOString() };
+  // Inside a drain acknowledgement the mapping is committed together with
+  // the removal of the entry that produced it (acknowledgeEntry): a crash
+  // can never leave the entry gone and its mapping unwritten, which would
+  // strand every entry that references the provisional id.
+  if (mappingCapture) {
+    mappingCapture.push(mapping);
+    return;
+  }
+  await localDb.provisionalIdMap.put(mapping);
+}
+
+type IdMapping = { provisionalId: string; realId: string; createdAt: string };
+let mappingCapture: IdMapping[] | null = null;
+
+function beginMappingCapture(): void {
+  mappingCapture = [];
+}
+
+function endMappingCapture(): IdMapping[] {
+  const captured = mappingCapture ?? [];
+  mappingCapture = null;
+  return captured;
+}
+
+/** Acknowledge an operation: write its id mappings and delete its entry in
+ *  ONE transaction. Exported for tests. */
+export async function acknowledgeEntry(localId: string, mappings: IdMapping[]): Promise<void> {
+  await localDb.transaction("rw", localDb.syncOutbox, localDb.provisionalIdMap, async () => {
+    if (mappings.length) await localDb.provisionalIdMap.bulkPut(mappings);
+    await localDb.syncOutbox.delete(localId);
+  });
+}
+
+// ----------------------------------------------------------------------
+// Queue-change notifications (Batch 2A): stock display and the "pending
+// confirmation" indicator depend on which entries are pending, sending, in
+// doubt or gone, so they are recomputed whenever an entry changes state.
+// ----------------------------------------------------------------------
+type QueueListener = (entry?: SyncOutboxEntry) => void;
+const queueListeners = new Set<QueueListener>();
+
+export function onQueueChanged(listener: QueueListener): () => void {
+  queueListeners.add(listener);
+  return () => queueListeners.delete(listener);
+}
+
+export function notifyQueueChanged(entry?: SyncOutboxEntry): void {
+  for (const listener of queueListeners) {
+    try {
+      listener(entry);
+    } catch (err) {
+      console.error("[sync] queue listener failed:", err);
+    }
+  }
 }
 
 export const PROVISIONAL_MAP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -165,12 +350,17 @@ export const SYNCING_STALE_MS = 2 * RPC_TIMEOUT_MS + 2 * 60_000;
  * committed — and its attempt counter goes up by one. Returns how many.
  */
 export async function recoverStrandedSyncing(olderThanMs: number = SYNCING_STALE_MS, now: number = Date.now()): Promise<number> {
-  return localDb.transaction("rw", localDb.syncOutbox, async () => {
+  const busy = await rowsInFlightAnywhere();
+  const n = await localDb.transaction("rw", localDb.syncOutbox, async () => {
     let n = 0;
     await localDb.syncOutbox.where("status").equals("syncing").modify((entry: SyncOutboxEntry) => {
+      // An online attempt of this (or another) window still waits for its reply.
+      if (busy.has(entry.localId)) return;
       const since = entry.syncingSince ? Date.parse(entry.syncingSince) : Number.NaN;
       if (olderThanMs > 0 && Number.isFinite(since) && now - since < olderThanMs) return;
       entry.status = "pending";
+      // The request was sent and no reply arrived: it may have committed.
+      entry.inDoubt = true;
       entry.attempts = (entry.attempts ?? 0) + 1;
       entry.failureKind = "transient";
       entry.lastError = "Interrupted while sending (no reply from the server). Resent with the same idempotency key, so it cannot be applied twice.";
@@ -180,6 +370,8 @@ export async function recoverStrandedSyncing(olderThanMs: number = SYNCING_STALE
     });
     return n;
   });
+  if (n > 0) notifyQueueChanged();
+  return n;
 }
 
 let startupRecoveryDone = false;
@@ -207,7 +399,9 @@ async function resolveArgs(entry: SyncOutboxEntry): Promise<Record<string, unkno
 // importing the store back from here would create a circular import that
 // breaks module init (index.ts calling createSaleSlice before its module
 // finishes evaluating).
-type Reconciler = (data: unknown, provisional: SyncOutboxEntry["provisional"]) => void;
+/** `ackId` is the outbox entry being acknowledged (its stock effect is
+ *  released exactly once — stockLedger.serverStockRows). */
+type Reconciler = (data: unknown, provisional: SyncOutboxEntry["provisional"], ackId: string) => void;
 const reconcilers: Record<string, Reconciler> = {};
 
 export function registerOutboxReconciler(rpcName: string, reconciler: Reconciler): void {
@@ -461,9 +655,15 @@ async function runDrainPass(): Promise<DrainResult> {
   // Never send an entry to a backend other than the one it was queued for
   // (main.tsx does this at startup too; repeated here so the drain does not
   // depend on it). Quarantined entries are not "pending" and are skipped.
-  if ((await quarantineForeignOutboxEntries(localDb, currentBackendOrigin())) > 0) await refreshSyncStatus();
+  if ((await quarantineForeignOutboxEntries(localDb, currentBackendOrigin())) > 0) {
+    await refreshSyncStatus();
+    notifyQueueChanged();
+  }
   const queued = await localDb.syncOutbox.where("status").anyOf("pending", "failed").count();
   if (queued === 0) return "drained";
+  // An online attempt is in flight (here or in another window): let it
+  // finish first (its reply decides whether dependent queued work can go).
+  if ((await rowsInFlightAnywhere()).size > 0) return "backoff";
 
   const session = await ensureSessionForDrain();
   if (session === "network") return "network";
@@ -534,42 +734,44 @@ async function runDrainPass(): Promise<DrainResult> {
       await localDb.syncOutbox.update(entry.localId, { idempotencyKey: key, args: entry.args });
     }
 
-    await localDb.syncOutbox.update(entry.localId, { status: "syncing", syncingSince: new Date().toISOString() });
+    const sentAt = new Date().toISOString();
+    await localDb.syncOutbox.update(entry.localId, { status: "syncing", syncingSince: sentAt, sentAt });
+    notifyQueueChanged();
 
-    const outcome: RpcOutcome = entry.kind === "table_write"
-      ? await runRequest(replayTableWrite(entry.table!, entry.op!, entry.row, entry.id!), entry.name)
+    let outcome: RpcOutcome = entry.kind === "table_write"
+      ? await runTableWrite(entry.table!, entry.op!, entry.row, entry.id!)
       : await callRpc(entry.name, resolvedArgs ?? {});
 
-    if (outcome.error) {
-      // A table_write insert's id is client-minted, so a duplicate-key
-      // reply on replay means our earlier attempt committed before the
-      // response was lost — the write is already on the server.
-      const alreadyApplied =
-        entry.kind === "table_write" && entry.op === "insert" && isDuplicateError(outcome.error);
+    // A 2xx is not success by itself (plan v2 §5.2): an RPC reply must have
+    // the shape its reconciler needs, or the outcome is unknown.
+    if (!outcome.error && entry.kind === "rpc") {
+      const problem = replyProblem(entry.name, outcome.data);
+      if (problem) outcome = { data: null, status: outcome.status, error: malformedReply(entry.name, problem, outcome.status) };
+    }
 
-      if (!alreadyApplied && outcome.error.transient) {
-        const attempts = entry.attempts + 1;
-        await localDb.syncOutbox.update(entry.localId, {
-          status: "pending",
-          syncingSince: undefined,
-          attempts,
-          failureKind: "transient",
-          lastError: outcome.error.message,
-          nextAttemptAt: new Date(Date.now() + computeBackoffMs(attempts)).toISOString(),
-        });
-        useSyncStore.getState().setStatus({ lastTransientError: outcome.error.message });
-        return "network";
-      }
+    if (outcome.error) {
+      // A table_write insert's id is client-minted, so a duplicate on the
+      // PRIMARY KEY means our earlier attempt committed before the reply was
+      // lost. A duplicate on any other unique index is a real conflict.
+      const alreadyApplied =
+        entry.kind === "table_write" && entry.op === "insert" && isPrimaryKeyDuplicate(entry.table!, outcome.error);
 
       if (!alreadyApplied) {
+        const { failure } = outcome.error;
+        if (failure.retryable) {
+          const held = await holdOrRetry(entry, outcome.error);
+          return held;
+        }
         await localDb.syncOutbox.update(entry.localId, {
           status: "conflict",
           syncingSince: undefined,
           attempts: entry.attempts + 1,
           failureKind: "permanent",
           nextAttemptAt: undefined,
+          heldReason: undefined,
           lastError: outcome.error.message,
         });
+        notifyQueueChanged(entry);
         continue;
       }
     }
@@ -582,10 +784,89 @@ async function runDrainPass(): Promise<DrainResult> {
     // success (contract: "treat the stored response as a first-time success").
     if (entry.kind === "table_write") void touchAuthCache();
     const reconcile = reconcilers[entry.name];
-    if (reconcile) reconcile(outcome.data, entry.provisional);
-    await localDb.syncOutbox.delete(entry.localId);
+    if (reconcile) {
+      // A reconciler that throws must not take the queue down with it, and
+      // must not lose the entry: keep it (the server HAS the operation — a
+      // resend returns the same stored reply) and stop this pass.
+      try {
+        beginMappingCapture();
+        reconcile(outcome.data, entry.provisional, entry.localId);
+        // The reply's stock rows must be on disk (with the ledger) BEFORE
+        // the entry disappears, or a crash in between could show stock as
+        // if the sale had never happened.
+        await flushStockCommit(entry.localId);
+      } catch (err) {
+        endMappingCapture();
+        console.error(`[sync] Reconciling ${entry.name} failed; the entry is kept and resent later:`, err);
+        await localDb.syncOutbox.update(entry.localId, {
+          status: "pending", syncingSince: undefined, attempts: entry.attempts + 1, failureKind: "transient",
+          inDoubt: true, heldReason: "reconcile-failed",
+          lastError: `Applied on the server, but this till could not record the reply (${err instanceof Error ? err.message : String(err)}). Kept; resent with the same key.`,
+          nextAttemptAt: new Date(Date.now() + Math.max(computeBackoffMs(entry.attempts + 1), 60_000)).toISOString(),
+        });
+        notifyQueueChanged(entry);
+        return "network";
+      }
+    }
+    // Acknowledge: the id mappings the reconciler produced and the removal
+    // of the entry commit together, or not at all (Batch 2A item 7).
+    await acknowledgeEntry(entry.localId, endMappingCapture());
+    notifyQueueChanged(entry);
     useSyncStore.getState().setStatus({ lastTransientError: null });
   }
+}
+
+const malformedReply = (rpc: string, problem: string, status?: number): RpcError =>
+  new RpcError(`Unrecognised reply from ${rpc} (${problem}) — outcome unknown; kept and resent with the same key.`, {
+    status, code: "MALFORMED_REPLY", failure: { ...classifyFailure({ status: 200 }), klass: "MALFORMED_SUCCESS" },
+  });
+
+/** Consecutive credential rejections on one entry before the till is told
+ *  to sign in again (the first one is retried after a forced refresh). */
+const REAUTH_AFTER_FAILURES = 2;
+
+/**
+ * Keep a retryable failure's entry for a later resend with the same key,
+ * and decide how this pass ends. An outcome that may have committed marks
+ * the entry in doubt (never cleared by a retry alone); a hold records why
+ * it waits and backs off at least the hold's floor; a server Retry-After is
+ * honoured. Credentials: refreshed once, then "sign in again".
+ */
+async function holdOrRetry(entry: SyncOutboxEntry, error: RpcError): Promise<DrainResult> {
+  const { failure } = error;
+  const attempts = entry.attempts + 1;
+  const authFailures = failure.klass === "AUTH_REAUTH" ? (entry.authFailures ?? 0) + 1 : 0;
+  const delay = Math.max(computeBackoffMs(attempts), holdBackoffMs(failure.hold), failure.retryAfterMs ?? 0);
+  await localDb.syncOutbox.update(entry.localId, {
+    status: "pending",
+    syncingSince: undefined,
+    attempts,
+    failureKind: "transient",
+    lastError: error.message,
+    inDoubt: entry.inDoubt === true || failure.mayHaveCommitted,
+    heldReason: failure.klass === "MALFORMED_SUCCESS" ? "unrecognised-reply" : failure.hold ?? undefined,
+    authFailures,
+    nextAttemptAt: new Date(Date.now() + delay).toISOString(),
+  });
+  notifyQueueChanged(entry);
+  useSyncStore.getState().setStatus({ lastTransientError: error.message });
+
+  if (failure.klass === "AUTH_REAUTH") {
+    let refreshed = false;
+    if (authFailures < REAUTH_AFTER_FAILURES) {
+      try {
+        const res = await supabase.auth.refreshSession();
+        refreshed = !res.error && Boolean(res.data?.session);
+      } catch {
+        refreshed = false;
+      }
+    }
+    if (!refreshed) {
+      await setNeedsReauth("The server rejected this device's sign-in. Sign in again to resume syncing.");
+      return "needs-reauth";
+    }
+  }
+  return failure.hold === null && failure.klass !== "MALFORMED_SUCCESS" ? "network" : "backoff";
 }
 
 // ----------------------------------------------------------------------
@@ -626,6 +907,7 @@ export async function retryOutboxEntry(localId: string): Promise<void> {
   await localDb.syncOutbox.update(localId, {
     status: "pending", lastError: undefined, nextAttemptAt: undefined, failureKind: undefined,
   });
+  notifyQueueChanged();
 }
 
 // ----------------------------------------------------------------------
@@ -686,6 +968,7 @@ export async function setAsideOutboxEntry(
     return next;
   });
   void refreshSyncStatus();
+  notifyQueueChanged(updated);
   return updated;
 }
 
@@ -712,6 +995,7 @@ export async function restoreSetAsideEntry(localId: string): Promise<SyncOutboxE
     return next;
   });
   void refreshSyncStatus();
+  notifyQueueChanged(restored);
   return restored;
 }
 

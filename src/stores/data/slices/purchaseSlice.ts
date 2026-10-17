@@ -4,14 +4,13 @@ import type {
   AuditLog, Inventory, InventoryMovement, PurchaseOrder, PurchaseOrderItem,
   Supplier, SupplierPayment,
 } from "../../../types";
-import { isNetworkError } from "../../../lib/errors";
 import { newId } from "../../../lib/id";
 import { useAuthStore, assertOfflineWriteEligible } from "../../authStore";
-import { enqueueOutbox } from "../outbox";
 import { deleteLocalRows, putLocalRows } from "../localWrites";
-import {
-  beginOperation, callRpc, newIdempotencyKey, ONLINE_ONLY_RETRIES, type OperationContext,
-} from "../idempotentRpc";
+import { beginOperation, newIdempotencyKey, ONLINE_ONLY_RETRIES, type OperationContext } from "../idempotentRpc";
+import { callOnlineOnly } from "../onlineOnly";
+import { Stage, submitOfflineCapable } from "../writeAhead";
+import { serverStockRows } from "../stockLedger";
 
 // Shape returned by the receive_purchase_order RPC (camelCase keys).
 interface ReceivePurchaseOrderResult {
@@ -60,34 +59,43 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   // permission, shop scope and the PO status, then writes the PO status,
   // received quantities (billed at received value), inventory, movements
   // and audit row in one transaction.
-  const receivePurchaseOrderOnline = async (
+  // The ONE argument builders (online and queued).
+  const receiveArgs = (
     purchaseOrderId: string,
     receivedItems: { productId: string; receivedQty?: number; productUnitId?: string; receivedUnitQty?: number }[],
     op: OperationContext,
-  ): Promise<void> => {
-    const { data, error } = await callRpc("receive_purchase_order", {
-      p_purchase_order_id: purchaseOrderId,
-      p_received_items: receivedItems.map((r) => ({
-        product_id: r.productId, received_qty: r.receivedQty ?? null,
-        product_unit_id: r.productUnitId ?? null, received_unit_qty: r.receivedUnitQty ?? null,
-      })),
-      p_created_at: op.createdAt,
-      p_idempotency_key: op.idempotencyKey,
-    });
-    if (error) throw error;
-    if (!data) throw new Error("Receiving returned no data.");
+  ) => ({
+    p_purchase_order_id: purchaseOrderId,
+    p_received_items: receivedItems.map((r) => ({
+      product_id: r.productId, received_qty: r.receivedQty ?? null,
+      product_unit_id: r.productUnitId ?? null, received_unit_qty: r.receivedUnitQty ?? null,
+    })),
+    p_created_at: op.createdAt,
+    p_idempotency_key: op.idempotencyKey,
+  });
+  const paymentArgs = (input: {
+    purchaseOrderId: string; amountMmk: number; paymentMethod: string; referenceNo?: string; notes?: string;
+  }, op: OperationContext) => ({
+    p_purchase_order_id: input.purchaseOrderId, p_amount_mmk: input.amountMmk,
+    p_payment_method: input.paymentMethod, p_reference_no: input.referenceNo ?? null,
+    p_notes: input.notes ?? null, p_created_at: op.createdAt, p_idempotency_key: op.idempotencyKey,
+  });
+
+  const applyReceivePurchaseOrder = async (data: unknown, ackId: string): Promise<void> => {
     const result = data as ReceivePurchaseOrderResult;
+    // Server rows + the effects of other unresolved entries (stockLedger.ts).
+    const shownStock = serverStockRows(result.inventory, ackId);
 
     set((s) => ({
       purchaseOrders: s.purchaseOrders.map((p) => (p.id === result.purchaseOrder.id ? result.purchaseOrder : p)),
       purchaseOrderItems: s.purchaseOrderItems.map((i) => result.purchaseOrderItems.find((u) => u.id === i.id) ?? i),
-      inventory: mergeInventory(s.inventory, result.inventory),
+      inventory: mergeInventory(s.inventory, shownStock),
       movements: [...result.movements, ...s.movements],
       auditLogs: [...result.auditLogs, ...s.auditLogs],
     }));
-    void putLocalRows({
+    await putLocalRows({
       purchaseOrders: [result.purchaseOrder], purchaseOrderItems: result.purchaseOrderItems,
-      inventory: result.inventory, movements: result.movements, auditLogs: result.auditLogs,
+      movements: result.movements, auditLogs: result.auditLogs,
     });
   };
 
@@ -97,10 +105,10 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   // was ordered) so supplier debt stays accurate even offline. The PO and
   // transfer this references are assumed to already have real ids — PO
   // creation/approval stays online-only, so there's nothing to wait on here.
-  const receivePurchaseOrderOffline = async (
+  const stageReceivePurchaseOrder = async (
     purchaseOrderId: string, receiverId: string,
     receivedItems: { productId: string; receivedQty?: number; productUnitId?: string; receivedUnitQty?: number }[],
-    op: OperationContext,
+    op: OperationContext, stage: Stage,
   ): Promise<void> => {
     await assertOfflineWriteEligible();
     const po = get().purchaseOrders.find((p) => p.id === purchaseOrderId);
@@ -169,49 +177,28 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
       subtotalMmk, totalMmk: subtotalMmk + (po.taxMmk ?? 0), pendingSync: true, idempotencyKey: op.idempotencyKey,
     };
 
-    set((s) => ({
+    stage.set((s: DataState) => ({
       purchaseOrders: s.purchaseOrders.map((p) => (p.id === po.id ? updatedPo : p)),
       purchaseOrderItems: s.purchaseOrderItems.map((i) => updatedItems.find((u) => u.id === i.id) ?? i),
       inventory: mergeInventory(s.inventory, inventoryUpdates),
       movements: [...movements, ...s.movements],
     }));
-    void putLocalRows({
+    stage.put({
       purchaseOrders: [updatedPo], purchaseOrderItems: updatedItems,
       inventory: inventoryUpdates, movements,
     });
 
-    await enqueueOutbox({
+    stage.enqueue({
       kind: "rpc",
       name: "receive_purchase_order",
-      args: {
-        p_purchase_order_id: purchaseOrderId,
-        p_received_items: receivedItems.map((r) => ({
-          product_id: r.productId, received_qty: r.receivedQty ?? null,
-          product_unit_id: r.productUnitId ?? null, received_unit_qty: r.receivedUnitQty ?? null,
-        })),
-        p_created_at: now,
-        p_idempotency_key: op.idempotencyKey,
-      },
+      args: receiveArgs(purchaseOrderId, receivedItems, op),
       idempotencyKey: op.idempotencyKey,
       shopId: po.shopId,
       provisional: [{ table: "movements", ids: movements.map((m) => m.id) }],
     });
   };
 
-  const recordSupplierPaymentOnline = async (input: {
-    purchaseOrderId: string; amountMmk: number; paymentMethod: string; referenceNo?: string; notes?: string;
-  }, op: OperationContext): Promise<void> => {
-    const { data, error } = await callRpc("record_supplier_payment", {
-      p_purchase_order_id: input.purchaseOrderId,
-      p_amount_mmk: input.amountMmk,
-      p_payment_method: input.paymentMethod,
-      p_reference_no: input.referenceNo ?? null,
-      p_notes: input.notes ?? null,
-      p_created_at: op.createdAt,
-      p_idempotency_key: op.idempotencyKey,
-    });
-    if (error) throw error;
-    if (!data) throw new Error("Record supplier payment returned no data.");
+  const applySupplierPayment = async (data: unknown): Promise<void> => {
     const result = data as RecordSupplierPaymentResult;
 
     set((s) => ({
@@ -219,7 +206,7 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
       supplierPayments: [result.supplierPayment, ...s.supplierPayments],
       auditLogs: [...result.auditLogs, ...s.auditLogs],
     }));
-    void putLocalRows({ purchaseOrders: [result.purchaseOrder], supplierPayments: [result.supplierPayment], auditLogs: result.auditLogs });
+    await putLocalRows({ purchaseOrders: [result.purchaseOrder], supplierPayments: [result.supplierPayment], auditLogs: result.auditLogs });
   };
 
   // No network: mirror record_supplier_payment's own balance/status math
@@ -227,19 +214,21 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   // locally-known PO. The PO this references is assumed to already be
   // RECEIVED with a real id — PO creation/approval/receiving-approval flows
   // aside from receiving itself stay online-only.
-  const recordSupplierPaymentOffline = async (input: {
+  const stageSupplierPayment = async (input: {
     purchaseOrderId: string; amountMmk: number; paymentMethod: "CASH" | "BANK" | "MOBILE" | "OTHER";
     referenceNo?: string; notes?: string;
-  }, op: OperationContext): Promise<void> => {
+  }, op: OperationContext, stage: Stage): Promise<void> => {
     await assertOfflineWriteEligible();
     const po = get().purchaseOrders.find((p) => p.id === input.purchaseOrderId);
     if (!po) throw new Error("Purchase order not found.");
-    if (po.status !== "RECEIVED") {
-      throw new Error("Supplier payments can only be recorded against received purchase orders.");
+    {
+      if (po.status !== "RECEIVED") {
+        throw new Error("Supplier payments can only be recorded against received purchase orders.");
+      }
+      const outstanding = po.totalMmk - (po.paidMmk ?? 0);
+      if (outstanding <= 0) throw new Error("Purchase order is already paid.");
+      if (input.amountMmk > outstanding) throw new Error("Payment amount exceeds outstanding balance.");
     }
-    const outstanding = po.totalMmk - (po.paidMmk ?? 0);
-    if (outstanding <= 0) throw new Error("Purchase order is already paid.");
-    if (input.amountMmk > outstanding) throw new Error("Payment amount exceeds outstanding balance.");
 
     const now = op.createdAt;
     const newPaid = (po.paidMmk ?? 0) + input.amountMmk;
@@ -255,20 +244,16 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
       createdAt: now, pendingSync: true, idempotencyKey: op.idempotencyKey,
     };
 
-    set((s) => ({
+    stage.set((s: DataState) => ({
       purchaseOrders: s.purchaseOrders.map((p) => (p.id === po.id ? updatedPo : p)),
       supplierPayments: [payment, ...s.supplierPayments],
     }));
-    void putLocalRows({ purchaseOrders: [updatedPo], supplierPayments: [payment] });
+    stage.put({ purchaseOrders: [updatedPo], supplierPayments: [payment] });
 
-    await enqueueOutbox({
+    stage.enqueue({
       kind: "rpc",
       name: "record_supplier_payment",
-      args: {
-        p_purchase_order_id: input.purchaseOrderId, p_amount_mmk: input.amountMmk,
-        p_payment_method: input.paymentMethod, p_reference_no: input.referenceNo ?? null,
-        p_notes: input.notes ?? null, p_created_at: now, p_idempotency_key: op.idempotencyKey,
-      },
+      args: paymentArgs(input, op),
       idempotencyKey: op.idempotencyKey,
       shopId: po.shopId,
       provisional: [{ table: "supplierPayments", ids: [payment.id] }],
@@ -282,7 +267,7 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   supplierPayments: [],
 
   addSupplier: async (input: CreateSupplierInput) => {
-    const { data, error } = await callRpc("create_supplier", {
+    const { data, error } = await callOnlineOnly("create_supplier", {
       p_code: input.code,
       p_name: input.name,
       p_contact_person: input.contactPerson ?? null,
@@ -304,7 +289,7 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   },
 
   updateSupplier: async (supplier: Supplier) => {
-    const { data, error } = await callRpc("update_supplier", {
+    const { data, error } = await callOnlineOnly("update_supplier", {
       p_id: supplier.id,
       p_code: supplier.code,
       p_name: supplier.name,
@@ -327,7 +312,7 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   },
 
   createPurchaseOrder: async ({ shopId, supplierId, items, notes }: CreatePurchaseOrderInput) => {
-    const { data, error } = await callRpc("create_purchase_order", {
+    const { data, error } = await callOnlineOnly("create_purchase_order", {
       p_shop_id: shopId,
       p_supplier_id: supplierId,
       p_notes: notes ?? null,
@@ -351,7 +336,7 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   },
 
   approvePurchaseOrder: async ({ purchaseOrderId }) => {
-    const { data, error } = await callRpc("approve_purchase_order", {
+    const { data, error } = await callOnlineOnly("approve_purchase_order", {
       p_purchase_order_id: purchaseOrderId,
       p_idempotency_key: newIdempotencyKey(),
     }, { retries: ONLINE_ONLY_RETRIES });
@@ -369,39 +354,39 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
 
   receivePurchaseOrder: async ({ purchaseOrderId, receiverId, receivedItems }) => {
     const op = beginOperation();
-    if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      return receivePurchaseOrderOffline(purchaseOrderId, receiverId, receivedItems, op);
-    }
-    try {
-      return await receivePurchaseOrderOnline(purchaseOrderId, receivedItems, op);
-    } catch (err) {
-      if (isNetworkError(err)) return receivePurchaseOrderOffline(purchaseOrderId, receiverId, receivedItems, op);
-      throw err;
-    }
+    const po = get().purchaseOrders.find((p) => p.id === purchaseOrderId);
+    return submitOfflineCapable({
+      set, name: "receive_purchase_order", shopId: po?.shopId ?? null, op,
+      args: receiveArgs(purchaseOrderId, receivedItems, op),
+      applyOnline: applyReceivePurchaseOrder,
+      stage: (stage) => stageReceivePurchaseOrder(purchaseOrderId, receiverId, receivedItems, op, stage),
+    });
   },
 
   // Called by the outbox once a queued receive_purchase_order actually runs
   // — swaps the provisional movements for the server's authoritative ones.
-  reconcileReceivePurchaseOrder: (data, provisional) => {
+  reconcileReceivePurchaseOrder: (data, provisional, ackId) => {
     const result = data as ReceivePurchaseOrderResult;
+    // Server rows + the effects of other unresolved entries (stockLedger.ts).
+    const shownStock = serverStockRows(result.inventory, ackId ?? null);
     const provisionalMovementIds = new Set(provisional.find((p) => p.table === "movements")?.ids ?? []);
 
     set((s) => ({
       purchaseOrders: s.purchaseOrders.map((p) => (p.id === result.purchaseOrder.id ? result.purchaseOrder : p)),
       purchaseOrderItems: s.purchaseOrderItems.map((i) => result.purchaseOrderItems.find((u) => u.id === i.id) ?? i),
-      inventory: mergeInventory(s.inventory, result.inventory),
+      inventory: mergeInventory(s.inventory, shownStock),
       movements: [...result.movements, ...s.movements.filter((m) => !provisionalMovementIds.has(m.id) && !result.movements.some((r) => r.id === m.id))],
       auditLogs: [...result.auditLogs, ...s.auditLogs.filter((a) => !result.auditLogs.some((r) => r.id === a.id))],
     }));
     void deleteLocalRows(provisional);
     void putLocalRows({
       purchaseOrders: [result.purchaseOrder], purchaseOrderItems: result.purchaseOrderItems,
-      inventory: result.inventory, movements: result.movements, auditLogs: result.auditLogs,
+      movements: result.movements, auditLogs: result.auditLogs,
     });
   },
 
   cancelPurchaseOrder: async ({ purchaseOrderId }) => {
-    const { data, error } = await callRpc("cancel_purchase_order", {
+    const { data, error } = await callOnlineOnly("cancel_purchase_order", {
       p_purchase_order_id: purchaseOrderId,
       p_reason: null,
       p_idempotency_key: newIdempotencyKey(),
@@ -420,15 +405,13 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
 
   recordSupplierPayment: async (input) => {
     const op = beginOperation();
-    if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      return recordSupplierPaymentOffline(input, op);
-    }
-    try {
-      return await recordSupplierPaymentOnline(input, op);
-    } catch (err) {
-      if (isNetworkError(err)) return recordSupplierPaymentOffline(input, op);
-      throw err;
-    }
+    const po = get().purchaseOrders.find((p) => p.id === input.purchaseOrderId);
+    return submitOfflineCapable({
+      set, name: "record_supplier_payment", shopId: po?.shopId ?? null, op,
+      args: paymentArgs(input, op),
+      applyOnline: applySupplierPayment,
+      stage: (stage) => stageSupplierPayment(input, op, stage),
+    });
   },
 
   // Called by the outbox once a queued record_supplier_payment actually
@@ -451,7 +434,7 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   },
 
   paySupplierLumpSum: async ({ supplierId, shopId, amountMmk, paymentMethod, referenceNo, notes }) => {
-    const { data, error } = await callRpc("pay_supplier_lump_sum", {
+    const { data, error } = await callOnlineOnly("pay_supplier_lump_sum", {
       p_supplier_id: supplierId,
       p_shop_id: shopId,
       p_amount_mmk: amountMmk,
@@ -477,7 +460,7 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   },
 
   voidSupplierPayment: async ({ paymentId, reason }) => {
-    const { data, error } = await callRpc("void_supplier_payment", {
+    const { data, error } = await callOnlineOnly("void_supplier_payment", {
       p_payment_id: paymentId,
       p_reason: reason,
       p_idempotency_key: newIdempotencyKey(),

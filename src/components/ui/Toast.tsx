@@ -13,7 +13,8 @@ export const ToastViewport = () => {
 
   useEffect(() => {
     if (toasts.length === 0) return;
-    const timers = toasts.map((toast) => setTimeout(() => removeToast(toast.id), 3200));
+    // A warning (e.g. "pending confirmation") stays long enough to be read.
+    const timers = toasts.map((toast) => setTimeout(() => removeToast(toast.id), toast.variant === "warning" ? 9000 : 3200));
     return () => timers.forEach((timer) => clearTimeout(timer));
   }, [toasts, removeToast]);
 
@@ -22,14 +23,17 @@ export const ToastViewport = () => {
       {toasts.map((toast) => (
         <div
           key={toast.id}
+          role={toast.variant === "warning" ? "alert" : undefined}
           className={cn(
-            "w-80 rounded-2xl border border-slate-200 bg-white p-4 text-sm shadow-2xl",
+            "w-80 rounded-2xl border p-4 text-sm shadow-2xl",
+            // A warning ("pending confirmation") must not look like success.
+            toast.variant === "warning" ? "border-amber-300 bg-amber-50" : "border-slate-200 bg-white",
             toast.variant === "success" && "border-emerald-200",
             toast.variant === "error" && "border-rose-200"
           )}
         >
-          <div className="font-semibold text-slate-900">{toast.title}</div>
-          {toast.description && <div className="mt-1 text-slate-500">{toast.description}</div>}
+          <div className={cn("font-semibold", toast.variant === "warning" ? "text-amber-900" : "text-slate-900")}>{toast.title}</div>
+          {toast.description && <div className={cn("mt-1", toast.variant === "warning" ? "text-amber-800" : "text-slate-500")}>{toast.description}</div>}
         </div>
       ))}
     </div>

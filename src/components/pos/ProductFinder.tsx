@@ -22,6 +22,9 @@ interface ProductFinderProps {
   onCategory: (value: string) => void;
   onBrand?: (value: string) => void;
   inventoryById: Record<string, number>;
+  /** Base units per product whose deduction awaits the server (D-NEW-1);
+   *  already subtracted from `inventoryById`. */
+  pendingConfirmationById?: Record<string, number>;
   cartUnitsByProductId?: Record<string, number>;
   productUnits?: ProductUnit[];
   onAdd: (product: Product, unit: ProductUnit) => void;
@@ -38,6 +41,7 @@ export const ProductFinder = ({
   onCategory,
   onBrand,
   inventoryById,
+  pendingConfirmationById = {},
   cartUnitsByProductId = {},
   productUnits = [],
   onAdd,
@@ -232,6 +236,7 @@ export const ProductFinder = ({
             const isNonStock = Boolean(product.isNonStock);
             const qty = inventoryById[product.id] ?? 0;
             const requestedUnits = cartUnitsByProductId[product.id] ?? 0;
+            const unconfirmed = isNonStock ? 0 : pendingConfirmationById[product.id] ?? 0;
             const remainingUnits = isNonStock ? Number.POSITIVE_INFINITY : Math.max(0, qty - requestedUnits);
             const units = getActiveProductUnits(product.id, productUnits);
             const defaultUnit = getDefaultProductUnit(product, productUnits);
@@ -318,6 +323,17 @@ export const ProductFinder = ({
                 {/* Product Info */}
                 <div className="flex min-h-0 flex-1 flex-col p-3">
                   <h3 className="line-clamp-2 text-sm font-semibold text-slate-800">{product.name}</h3>
+                  {unconfirmed > 0 && (
+                    // Not an overlay: it must never cover the Low / Out of
+                    // stock warnings, and the amount is readable without hover.
+                    <div
+                      className="mt-1 flex items-start gap-1 rounded-md bg-sky-50 px-1.5 py-0.5 text-xs font-medium leading-snug text-sky-800 ring-1 ring-sky-200"
+                      title={t("pos", "pendingConfirmationHint", { n: unconfirmed })}
+                    >
+                      <span className="material-symbols-rounded text-sm leading-none" aria-hidden>hourglass_top</span>
+                      <span className="min-w-0 break-words">{t("pos", "unconfirmedShort", { n: unconfirmed })}</span>
+                    </div>
+                  )}
                   <div className="mt-auto flex items-center justify-between gap-2 pt-2">
                     <span className="min-w-0 truncate text-base font-bold text-emerald-600">{formatMmk(defaultUnit.salePriceMmk)}</span>
                     <button

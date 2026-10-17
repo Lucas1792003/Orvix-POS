@@ -1,3 +1,6 @@
+// Checkout writes its outbox row BEFORE sending (Batch 2A write-ahead), so
+// the flow needs an IndexedDB.
+import "fake-indexeddb/auto";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { CartItem } from "../../../types";
 
@@ -13,7 +16,11 @@ import type { CartItem } from "../../../types";
 
 const rpc = vi.fn();
 vi.mock("../../../lib/supabase", () => ({
-  supabase: { rpc: (...args: unknown[]) => rpc(...args) },
+  supabase: {
+    rpc: (...args: unknown[]) => rpc(...args),
+    // The offline rules (sign-in window) apply to an unknown outcome too.
+    auth: { getSession: () => Promise.resolve({ data: { session: { user: { id: "auth-test-user" } } } }) },
+  },
 }));
 
 // Imported after vi.mock so the slice picks up the mocked client.
@@ -80,6 +87,10 @@ const baseInput = {
   paidMmk: 5000,
 };
 
+beforeEach(async () => {
+  const { localDb } = await import("../../../lib/localDb");
+  await localDb.syncOutbox.clear();
+});
 beforeEach(() => {
   rpc.mockReset();
 });
@@ -182,12 +193,26 @@ describe("createSale checkout flow", () => {
     expect(get().sales).toHaveLength(0);
   });
 
-  it("throws when the RPC returns no data", async () => {
+  // Batch 2A (Q-C1): an empty 2xx is an UNKNOWN outcome, not a failure —
+  // the server may have committed. The sale is kept (durable, same key,
+  // pending confirmation) instead of an error that invites re-ringing it
+  // under a new key.
+  it("an empty reply is an unknown outcome: the sale is kept pending confirmation with its key, never reported as failed", async () => {
     rpc.mockResolvedValue({ data: null, error: null });
-    const { get } = makeStore();
+    const { get } = makeStore({ products: [{ id: "p1", isNonStock: false }], shifts: [], getInventoryQty: () => 10 });
 
-    await expect(
-      get().createSale({ ...baseInput, cartItems: [cartItem()] }),
-    ).rejects.toThrow("Checkout returned no data.");
+    const { localDb: db } = await import("../../../lib/localDb");
+    await db.authCache.put({
+      authId: "auth-test-user", userId: "user-1", role: "CASHIER", shopId: "shop-1",
+      isActive: true, hasTotp: false, cachedAt: new Date().toISOString(),
+    });
+    await expect(get().createSale({ ...baseInput, cartItems: [cartItem()] })).rejects.toMatchObject({ name: "PendingConfirmationError" });
+
+    const sentKey = rpc.mock.calls[0][1].p_idempotency_key;
+    const { localDb } = await import("../../../lib/localDb");
+    const [row] = await localDb.syncOutbox.toArray();
+    expect(row).toMatchObject({ name: "complete_sale", status: "pending", inDoubt: true, idempotencyKey: sentKey, writeAhead: true });
+    // Shown as unconfirmed — not as a recorded sale.
+    expect(get().sales[0]).toMatchObject({ pendingSync: true, pendingConfirmation: true });
   });
 });

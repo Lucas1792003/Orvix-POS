@@ -32,6 +32,7 @@ export const InventoryPage = () => {
   const products = useDataStore((state) => state.products);
   const categories = useDataStore((state) => state.categories);
   const inventory = useDataStore((state) => state.inventory);
+  const stockPendingConfirmation = useDataStore((state) => state.stockPendingConfirmation);
   const movements = useDataStore((state) => state.movements);
   const productUnits = useDataStore((state) => state.productUnits);
   const adjustStock = useDataStore((state) => state.adjustStock);
@@ -66,11 +67,13 @@ export const InventoryPage = () => {
       .map((product) => {
         const record = inventory.find((item) => item.shopId === shopId && item.productId === product.id);
         const qty = record?.qtyBaseUnits ?? 0;
+        // D-NEW-1: deductions awaiting the server are already in `qty`.
+        const unconfirmed = shopId ? stockPendingConfirmation?.[`${shopId}|${product.id}`] ?? 0 : 0;
         const productMovements = movements.filter((movement) => movement.shopId === shopId && movement.productId === product.id);
         const lastMovement = productMovements[0]?.createdAt ?? "";
-        return { product, qty, lastMovement };
+        return { product, qty, lastMovement, unconfirmed };
       });
-  }, [products, inventory, movements, search, category, shopId]);
+  }, [products, inventory, movements, search, category, shopId, stockPendingConfirmation]);
 
   const filteredMovements = useMemo(() => {
     return movements.filter((movement) => {

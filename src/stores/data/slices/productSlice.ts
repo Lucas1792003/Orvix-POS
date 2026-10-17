@@ -6,7 +6,8 @@ import { findProductForScan } from "../../../features/pos/barcodeLookup";
 import { mapBarcodeWriteError, normalizeBarcodeValue } from "../../../lib/barcodeValidation";
 import { sanitizeProductUnits } from "../../../features/catalog/productUnits";
 import type { BarcodeSavePlan } from "../../../features/catalog/productBarcodeForm";
-import { callRpc, newIdempotencyKey, ONLINE_ONLY_RETRIES } from "../idempotentRpc";
+import { newIdempotencyKey, ONLINE_ONLY_RETRIES } from "../idempotentRpc";
+import { callOnlineOnly } from "../onlineOnly";
 
 export const createProductSlice: StateCreator<DataState, [], [], ProductState> = (set, get) => ({
   products: [],
@@ -98,7 +99,7 @@ export const createProductSlice: StateCreator<DataState, [], [], ProductState> =
     // authenticated). The SECURITY DEFINER RPC checks `product:delete`,
     // clears inventory rows, then deletes the product — barcodes and
     // price tiers cascade automatically.
-    const { error } = await callRpc(
+    const { error } = await callOnlineOnly(
       "delete_product",
       { p_product_id: productId, p_idempotency_key: newIdempotencyKey() },
       { retries: ONLINE_ONLY_RETRIES },

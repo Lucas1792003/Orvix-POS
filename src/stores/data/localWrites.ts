@@ -55,7 +55,21 @@ export function endWriteRecording(recorder: RecordedWrites): RecordedWrites {
 }
 
 function recordPut(rows: LocalRowBatch): void {
-  for (const r of activeRecorders) r.puts.push(rows);
+  // Inventory rows are NOT re-applied over a full load's pages: an absolute
+  // stock figure written during the load may be older than the pages (it
+  // was computed from the cached row). The load composes stock from the
+  // server rows and the unresolved-effects ledger instead (stockLedger.ts).
+  const { inventory: _inventory, ...rest } = rows;
+  void _inventory;
+  if (!Object.values(rest).some((list) => (list as unknown[] | undefined)?.length)) return;
+  for (const r of activeRecorders) r.puts.push(rest);
+}
+
+/** Record a batch written inside a transaction that has now COMMITTED
+ *  (persistStaged). Recording before the commit would leave phantom rows
+ *  for a running full load to re-apply when the transaction aborts. */
+export function recordCommittedPut(rows: LocalRowBatch): void {
+  recordPut(rows);
 }
 
 function recordDelete(entries: { table: string; ids: string[] }[]): void {
@@ -96,6 +110,36 @@ export function applyRecordedWrites<T extends Partial<Record<RowTable, unknown[]
     out[table] = (out[table] as { id?: string }[]).filter((row) => !gone.has(String(row.id)));
   }
   return out as T;
+}
+
+/** Dexie tables a LocalRowBatch writes to (for one multi-table transaction). */
+export function localRowTables(rows: LocalRowBatch) {
+  const tables = [];
+  for (const table of ROW_TABLES) {
+    if (!(rows[table] as unknown[] | undefined)?.length) continue;
+    tables.push(table === "inventory" ? localDb.inventory : TABLES[table as keyof typeof TABLES]);
+  }
+  return tables;
+}
+
+/**
+ * Write a batch INSIDE the caller's Dexie transaction (Batch 2A: the local
+ * rows of one offline operation and its outbox entry commit together, or
+ * not at all). Unlike putLocalRows this rejects on failure — the caller's
+ * transaction must abort. Inventory rows are left to the caller (they are
+ * re-based on the mirror with the ledger — stockLedger.ts). NOT recorded
+ * for a running full load: the caller records after the commit
+ * (recordCommittedPut).
+ */
+export async function putLocalRowsInTransaction(rows: LocalRowBatch): Promise<void> {
+  await Promise.all(
+    ROW_TABLES.filter((table) => table !== "inventory").map((table) => {
+      const list = rows[table] as unknown[] | undefined;
+      if (!list?.length) return undefined;
+      const t = TABLES[table as keyof typeof TABLES];
+      return (t as { bulkPut: (r: unknown[]) => Promise<unknown> }).bulkPut(list);
+    }),
+  );
 }
 
 // Callers fire these without awaiting (the Zustand `set()` already applied

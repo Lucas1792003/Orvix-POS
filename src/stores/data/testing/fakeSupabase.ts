@@ -32,6 +32,7 @@
 // ----------------------------------------------------------------------
 
 import { createFakePostgrest } from "./fakePostgrest";
+import { validReply } from "./validReplies";
 
 export type RpcMode =
   | "succeed"
@@ -41,7 +42,9 @@ export type RpcMode =
   | "jwt-expired"
   | "gateway-502"
   | "server-500"
-  | "hang";
+  | "hang"
+  /** The server applies the request, then the reply never arrives (crash after commit). */
+  | "commit-then-hang";
 
 export interface RecordedCall {
   name: string;
@@ -129,6 +132,8 @@ function createFakeSupabase() {
   let server = freshServer();
   const calls: RecordedCall[] = [];
   const queuedModes: RpcMode[] = [];
+  // Exact raw replies for the next calls (no side effect), e.g. a PT503.
+  const queuedReplies: Record<string, unknown>[] = [];
   let defaultMode: RpcMode = "succeed";
   let sessionMode: AuthSessionMode = "valid";
   let refreshMode: AuthRefreshMode = "ok";
@@ -224,7 +229,9 @@ function createFakeSupabase() {
       }
       return { data: existing.response, error: null, status: 200, replayed: true };
     }
-    const handler = handlers[name] ?? (() => ({ ok: true }));
+    // RPCs without a modelled side effect answer with a minimal VALID reply
+    // (testing/validReplies.ts) — replies are validated since Batch 2A.
+    const handler = handlers[name] ?? (() => validReply(name));
     const response = handler(args);
     server.executions[name] = (server.executions[name] ?? 0) + 1;
     server.idempotency.set(key, { rpc: name, hash, response });
@@ -249,6 +256,7 @@ function createFakeSupabase() {
         return { data: null, status: 500, replayed: false, error: { message: "internal server error", code: "", details: "", hint: "" } };
       case "succeed":
       case "hang":
+      case "commit-then-hang": // never reached: its reply never arrives
         return execute(name, args);
     }
   };
@@ -284,7 +292,21 @@ function createFakeSupabase() {
     const mode = queuedModes.shift() ?? defaultMode;
     const call: RecordedCall = { name, args, mode, replayed: false };
     calls.push(call);
-    const promise: Promise<unknown> = mode === "hang"
+    const raw = queuedReplies.shift();
+    if (raw) {
+      const builder = {
+        abortSignal: () => builder,
+        then<T1 = unknown, T2 = never>(
+          onfulfilled?: ((value: unknown) => T1 | PromiseLike<T1>) | null,
+          onrejected?: ((reason: unknown) => T2 | PromiseLike<T2>) | null,
+        ): Promise<T1 | T2> {
+          return Promise.resolve(raw).then(onfulfilled, onrejected);
+        },
+      };
+      return builder;
+    }
+    if (mode === "commit-then-hang") execute(name, args);
+    const promise: Promise<unknown> = mode === "hang" || mode === "commit-then-hang"
       ? new Promise(() => undefined)
       : Promise.resolve().then(() => {
           const { replayed, ...response } = respond(name, args, mode);
@@ -422,6 +444,8 @@ function createFakeSupabase() {
     callsFor: (name: string) => calls.filter((c) => c.name === name),
     /** Outcome for the next N calls, in order; afterwards `defaultMode` applies. */
     queueModes: (...modes: RpcMode[]) => { queuedModes.push(...modes); },
+    /** The next calls answer exactly with these raw responses (no side effect). */
+    queueReply: (...replies: Record<string, unknown>[]) => { queuedReplies.push(...replies); },
     setDefaultMode: (mode: RpcMode) => { defaultMode = mode; },
     setSelectMode: (mode: SelectMode) => { selectMode = mode; },
     setSelectHook: (hook: ((request: number) => void) | null) => { selectHook = hook; },
@@ -444,6 +468,7 @@ function createFakeSupabase() {
       server = freshServer();
       calls.length = 0;
       queuedModes.length = 0;
+      queuedReplies.length = 0;
       defaultMode = "succeed";
       sessionMode = "valid";
       refreshMode = "ok";

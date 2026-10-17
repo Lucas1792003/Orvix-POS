@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
-export type ToastVariant = "success" | "error" | "info";
+/** "warning": not failed, not done — e.g. "pending confirmation". */
+export type ToastVariant = "success" | "error" | "info" | "warning";
 
 export interface ToastItem {
   id: string;

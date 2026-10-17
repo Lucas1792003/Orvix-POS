@@ -4,7 +4,8 @@ import { Button } from "../ui/Button";
 import { Select } from "../ui/Select";
 import { Badge } from "../ui/Badge";
 import { useToast } from "../ui/Toast";
-import { getErrorMessage } from "../../lib/errors";
+import { mayAlreadyBeRecorded, outcomeToast } from "../../lib/outcomeToast";
+import { useTranslation } from "../../hooks/useTranslation";
 import { useDataStore } from "../../stores/dataStore";
 import type { Product, Supplier, SupplierProduct } from "../../types";
 
@@ -51,6 +52,7 @@ export const PurchaseOrderCreateModal = ({
 }: PurchaseOrderCreateModalProps) => {
   const createPurchaseOrder = useDataStore((state) => state.createPurchaseOrder);
   const toast = useToast();
+  const { t } = useTranslation();
 
   const [supplierId, setSupplierId] = useState(defaultSupplierId ?? "");
   const [items, setItems] = useState<DraftItem[]>([]);
@@ -113,11 +115,10 @@ export const PurchaseOrderCreateModal = ({
       onCreated?.(id);
       onClose();
     } catch (error) {
-      toast({
-        title: "Could not create purchase order",
-        description: getErrorMessage(error, "Please try again."),
-        variant: "error",
-      });
+      // Unknown outcome → "pending confirmation" (never "could not create"),
+      // and the form closes so the same order is not entered again.
+      toast(outcomeToast(error, t, "Could not create purchase order", "Please try again."));
+      if (mayAlreadyBeRecorded(error)) onClose();
     } finally {
       setSubmitting(false);
     }

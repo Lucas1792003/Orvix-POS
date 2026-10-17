@@ -11,7 +11,8 @@ import {
 } from "../../../lib/shopDelete";
 import { useAppStore } from "../../appStore";
 import { writeTableRow } from "../tableWrite";
-import { callRpc, newIdempotencyKey, ONLINE_ONLY_RETRIES } from "../idempotentRpc";
+import { newIdempotencyKey, ONLINE_ONLY_RETRIES } from "../idempotentRpc";
+import { callOnlineOnly } from "../onlineOnly";
 import { createStaffAccount } from "../../../lib/staffAdmin";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -132,7 +133,7 @@ export const createShopSlice: StateCreator<DataState, [], [], ShopState> = (set,
   },
 
   updateUser: async (user: User) => {
-    const { data, error } = await callRpc("update_app_user", {
+    const { data, error } = await callOnlineOnly("update_app_user", {
       p_id: user.id,
       p_name: user.name,
       p_role: user.role,
@@ -150,7 +151,7 @@ export const createShopSlice: StateCreator<DataState, [], [], ShopState> = (set,
   },
 
   deactivateUser: async (userId: string, isActive: boolean) => {
-    const { data, error } = await callRpc("deactivate_app_user", {
+    const { data, error } = await callOnlineOnly("deactivate_app_user", {
       p_id: userId,
       p_is_active: isActive,
       p_idempotency_key: newIdempotencyKey(),
@@ -164,7 +165,7 @@ export const createShopSlice: StateCreator<DataState, [], [], ShopState> = (set,
   },
 
   replaceManager: async (shopId: string, newManagerId: string) => {
-    const { error } = await callRpc("replace_manager", {
+    const { error } = await callOnlineOnly("replace_manager", {
       p_shop_id: shopId,
       p_new_manager_id: newManagerId,
       p_idempotency_key: newIdempotencyKey(),

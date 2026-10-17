@@ -1,5 +1,7 @@
 import { supabase } from "../../lib/supabase";
-import { isNetworkError, isTransientError } from "../../lib/errors";
+import { isNetworkError } from "../../lib/errors";
+import { classifyFailure, signalOf, type FailureInfo } from "../../lib/failureClass";
+import { retryAfterRemainingMs } from "../../lib/retryAfter";
 import { touchAuthCache } from "../authCache";
 
 // ----------------------------------------------------------------------
@@ -26,6 +28,41 @@ export const IDEMPOTENCY_KEY_ARG = "p_idempotency_key";
 export const ONLINE_ONLY_RETRIES = 2;
 const RETRY_DELAYS_MS = [500, 1500];
 
+// RPCs that accept p_expected_actor_id (migration 055): the acting user's
+// app id is part of the request, so a queued action cannot silently execute
+// under whoever is signed in when the device reconnects. complete_sale is
+// excluded — it checks shift ownership itself and has no such parameter.
+export const ACTOR_STAMPED_RPCS = new Set([
+  "adjust_stock",
+  "receive_purchase_order",
+  "record_supplier_payment",
+  "open_shift",
+  "close_shift",
+  "create_refund_void_request",
+  "dispatch_stock_transfer",
+  "receive_stock_transfer",
+]);
+
+let actorSource: () => string | null = () => null;
+
+/** Wired once by the auth store: who is acting right now. */
+export function setActorSource(source: () => string | null): void {
+  actorSource = source;
+}
+
+/**
+ * The ONE argument rule shared by the online call and the queued replay
+ * (Q-M1, plan v2 §5.1 rule 1): the idempotency key and, for actor-stamped
+ * RPCs, p_expected_actor_id. A value already present is kept, so a queued
+ * payload is never re-stamped with a later user. Returns a new object.
+ */
+export function stampOperationArgs(name: string, args: Record<string, unknown>, idempotencyKey?: string): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...args };
+  if (typeof out[IDEMPOTENCY_KEY_ARG] !== "string") out[IDEMPOTENCY_KEY_ARG] = idempotencyKey ?? newIdempotencyKey();
+  if (ACTOR_STAMPED_RPCS.has(name) && !("p_expected_actor_id" in out)) out.p_expected_actor_id = actorSource();
+  return out;
+}
+
 export function newIdempotencyKey(): string {
   return crypto.randomUUID();
 }
@@ -46,21 +83,26 @@ export class RpcError extends Error {
   readonly status: number | undefined;
   readonly code: string | undefined;
   readonly details: string | undefined;
-  /** True when a later retry with the same idempotency key may succeed
-   *  (network/gateway failure, timeout, 5xx, 429, expired JWT). False for
-   *  a permanent rejection of this exact request. */
+  readonly hint: string | undefined;
+  /** What the failure means for the operation (lib/failureClass.ts). */
+  readonly failure: FailureInfo;
+  /** True when the operation is kept and resent later with the same
+   *  idempotency key (everything except a definitive refusal). Derived from
+   *  `failure.retryable`; kept for existing callers. */
   readonly transient: boolean;
 
   constructor(
     message: string,
-    options: { status?: number; code?: string; details?: string; transient: boolean },
+    options: { status?: number; code?: string; details?: string; hint?: string; failure: FailureInfo },
   ) {
     super(message);
     this.name = "RpcError";
     this.status = options.status;
     this.code = options.code;
     this.details = options.details;
-    this.transient = options.transient;
+    this.hint = options.hint;
+    this.failure = options.failure;
+    this.transient = options.failure.retryable;
   }
 }
 
@@ -81,22 +123,28 @@ interface RawResponse {
 const IDEMPOTENCY_MISMATCH = "IDEMPOTENCY_MISMATCH";
 const IDEMPOTENCY_KEY_REQUIRED = "IDEMPOTENCY_KEY_REQUIRED";
 
-/** Classify a raw error (resolved or thrown) into an RpcError. */
+/** Classify a raw error (resolved or thrown) into an RpcError. The class
+ *  (lib/failureClass.ts) decides everything; IDEMPOTENCY_MISMATCH /
+ *  IDEMPOTENCY_KEY_REQUIRED are contract violations, never retried. */
 export function toRpcError(raw: unknown, status?: number): RpcError {
-  const err = (raw ?? {}) as { message?: unknown; code?: unknown; details?: unknown; status?: unknown };
+  const err = (raw ?? {}) as { message?: unknown; code?: unknown; details?: unknown; hint?: unknown; status?: unknown };
   const message =
     typeof raw === "string" ? raw
     : typeof err.message === "string" && err.message.trim() ? err.message
     : String(raw);
-  const code = typeof err.code === "string" ? err.code : undefined;
+  const code = typeof err.code === "string" && err.code ? err.code : undefined;
   const details = typeof err.details === "string" ? err.details : undefined;
+  const hint = typeof err.hint === "string" ? err.hint : undefined;
   const effectiveStatus = status ?? (typeof err.status === "number" ? err.status : isNetworkError(raw) ? 0 : undefined);
-  // Contract: a key reused for a different request, or a missing key, is
-  // never retried — regardless of the SQLSTATE/status it is reported with.
-  const contractViolation = message.includes(IDEMPOTENCY_MISMATCH) || message.includes(IDEMPOTENCY_KEY_REQUIRED);
-  const transient = !contractViolation && isTransientError(raw, effectiveStatus);
-  return new RpcError(message, { status: effectiveStatus, code, details, transient });
+  // Classify on the body as received: an EMPTY message is evidence (a
+  // gateway answered, not PostgREST), so it must not become "[object Object]".
+  const bodyMessage = typeof raw === "string" ? raw : typeof err.message === "string" ? err.message : message;
+  const failure = classifyFailure({ ...signalOf(raw, effectiveStatus), message: bodyMessage, retryAfterMs: retryAfterRemainingMs() });
+  return new RpcError(message, { status: effectiveStatus, code, details, hint, failure });
 }
+
+/** Contract markers (kept exported for diagnostics/tests). */
+export const IDEMPOTENCY_CONTRACT_MARKERS = [IDEMPOTENCY_MISMATCH, IDEMPOTENCY_KEY_REQUIRED] as const;
 
 function normalise(res: RawResponse | null | undefined): RpcOutcome {
   if (!res) return { data: null, error: null };
@@ -129,7 +177,7 @@ export async function runRequest(
         data: null,
         status: 0,
         error: new RpcError(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`, {
-          status: 0, code: "TIMEOUT", transient: true,
+          status: 0, code: "TIMEOUT", failure: classifyFailure({ status: 0, code: "TIMEOUT", timedOut: true }),
         }),
       });
     }, timeoutMs);
@@ -168,13 +216,9 @@ export async function callRpc(
   options: CallOptions = {},
 ): Promise<RpcOutcome> {
   const { timeoutMs = RPC_TIMEOUT_MS, retries = 0 } = options;
-  if (typeof args[IDEMPOTENCY_KEY_ARG] !== "string") {
-    // Every in-scope caller mints the key up front; reaching here is a
-    // programming error, but sending without a key would be rejected by
-    // the server (IDEMPOTENCY_KEY_REQUIRED) — mint one so the call stays
-    // idempotent for its own retries.
-    args = { ...args, [IDEMPOTENCY_KEY_ARG]: newIdempotencyKey() };
-  }
+  // Same rule as the queue (stampOperationArgs): every in-scope caller mints
+  // the key up front; the actor is stamped exactly as a queued replay is.
+  args = stampOperationArgs(name, args);
   let outcome = await runRequest(supabase.rpc(name, args), name, timeoutMs);
   for (let n = 0; n < retries && outcome.error?.transient; n++) {
     if (typeof navigator !== "undefined" && navigator.onLine === false) break;

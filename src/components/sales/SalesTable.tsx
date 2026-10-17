@@ -39,7 +39,10 @@ export const SalesTable = ({ sales, users, onView }: SalesTableProps) => (
                   {/* Set by the offline checkout path (stores/data/slices/saleSlice.ts)
                       until the outbox actually reconciles this sale with the server —
                       see the Sync Conflicts page if it's stuck here. */}
-                  {sale.pendingSync && <Badge tone="amber">Pending sync</Badge>}
+                  {/* Outcome unknown (lost reply) vs an ordinary offline sale. */}
+                  {sale.pendingConfirmation
+                    ? <Badge tone="sky">Unconfirmed</Badge>
+                    : sale.pendingSync && <Badge tone="amber">Pending sync</Badge>}
                 </div>
               </TD>
               <TD>{formatDateTime(sale.createdAt)}</TD>

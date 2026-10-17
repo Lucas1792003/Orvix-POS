@@ -563,6 +563,10 @@ export interface Sale {
    *  receiptNo is a placeholder until the real complete_sale RPC runs).
    *  Cleared once the outbox entry syncs. See stores/data/outbox.ts. */
   pendingSync?: boolean;
+  /** The server may or may not have this sale (its reply was lost): it is
+   *  shown as UNCONFIRMED — never as a recorded sale, no final receipt —
+   *  until the queued resend (same key) settles it. Local only. */
+  pendingConfirmation?: boolean;
   /** Idempotency key of the operation that created/changed this row while
    *  offline — the same UUID the queued RPC sends as `p_idempotency_key`.
    *  Lets a provisional record be matched to its outbox entry. */

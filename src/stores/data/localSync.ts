@@ -1,3 +1,4 @@
+import { LEDGER_STATE_KEY } from "./stockLedger";
 import { localDb, SNAPSHOT_TABLE_NAMES, type StoredBusinessProfile } from "../../lib/localDb";
 import type { DataState } from "./types";
 import type { BusinessProfile } from "../../types";
@@ -23,9 +24,11 @@ export type LocalSnapshot = Pick<DataState,
  * survive every load (a queued sale lost here is a lost sale). Cursor-based
  * delta merge lives in deltaSync.ts.
  */
-export async function persistSnapshotToLocal(snapshot: LocalSnapshot): Promise<void> {
+/** `stockLedger`: the serialized unresolved-effects ledger that describes
+ *  `snapshot.inventory` — written in the SAME transaction (stockLedger.ts). */
+export async function persistSnapshotToLocal(snapshot: LocalSnapshot, stockLedger?: string): Promise<void> {
   const snapshotTables = SNAPSHOT_TABLE_NAMES.map((name) => localDb.table(name));
-  await localDb.transaction("rw", [...snapshotTables, localDb.syncMeta], async () => {
+  await localDb.transaction("rw", [...snapshotTables, localDb.syncMeta, localDb.syncState], async () => {
     await Promise.all(snapshotTables.map((table) => table.clear()));
     await Promise.all([
       localDb.shops.bulkPut(snapshot.shops),
@@ -59,6 +62,9 @@ export async function persistSnapshotToLocal(snapshot: LocalSnapshot): Promise<v
         : Promise.resolve(),
     ]);
     await localDb.syncMeta.put({ table: SNAPSHOT_MARKER, lastPulledAt: new Date().toISOString() });
+    if (stockLedger !== undefined) {
+      await localDb.syncState.put({ key: LEDGER_STATE_KEY, value: stockLedger, updatedAt: new Date().toISOString() });
+    }
   });
 }
 

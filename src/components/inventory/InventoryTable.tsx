@@ -5,11 +5,15 @@ import { Table, TBody, TD, TH, THead, TR } from "../ui/Table";
 import { StockBadge } from "./StockBadge";
 import { formatDateTime } from "../../lib/utils";
 import { formatStockQuantity } from "../../features/inventory/stockDisplay";
+import { useTranslation } from "../../hooks/useTranslation";
 
 interface InventoryRow {
   product: Product;
   qty: number;
   lastMovement?: string;
+  /** Base units of this till's deductions not yet confirmed by the server
+   *  (already subtracted from `qty`; D-NEW-1). */
+  unconfirmed?: number;
 }
 
 interface InventoryTableProps {
@@ -39,6 +43,7 @@ export const InventoryTable = ({
   // Resolve the same Category badge tone the Products admin uses so the
   // cells render identically across the two pages. Unknown categories fall
   // back to slate instead of inventing a fresh palette here.
+  const { t } = useTranslation();
   const getCategoryColor = (categoryName: string) =>
     categories.find((c) => c.name === categoryName)?.color ?? "slate";
 
@@ -55,7 +60,7 @@ export const InventoryTable = ({
           </TR>
         </THead>
         <TBody>
-          {rows.map(({ product, qty, lastMovement }) => {
+          {rows.map(({ product, qty, lastMovement, unconfirmed = 0 }) => {
             // Inventory is stored in base units; the decomposed label is a
             // display-only convenience computed at render time.
             const decomposedLabel = formatStockQuantity(
@@ -107,6 +112,18 @@ export const InventoryTable = ({
                   </div>
                   {showSecondary && (
                     <div className="mt-0.5 text-xs text-slate-500">{decomposedLabel}</div>
+                  )}
+                  {unconfirmed > 0 && (
+                    // This till's deductions the server has not confirmed yet
+                    // (already subtracted from On-hand). Number first, so it
+                    // stays readable when the label wraps at narrow widths.
+                    <div
+                      className="mt-1 inline-flex max-w-[14rem] items-start gap-1 rounded-md bg-sky-50 px-1.5 py-0.5 text-xs font-medium leading-snug text-sky-800 ring-1 ring-sky-200"
+                      title={t("inventory", "pendingConfirmationHint", { n: unconfirmed })}
+                    >
+                      <span className="material-symbols-rounded text-sm leading-none" aria-hidden>hourglass_top</span>
+                      <span><span className="font-semibold">−{unconfirmed}</span> · {t("inventory", "pendingConfirmation")}</span>
+                    </div>
                   )}
                 </TD>
                 <TD>{lastMovement ? formatDateTime(lastMovement) : "-"}</TD>

@@ -1,17 +1,24 @@
 import type { StateCreator } from "zustand";
 import type { BufferedInventoryEvent, DataState, InventoryState, AdjustStockInput } from "../types";
 import type { AuditLog, Inventory, InventoryMovement } from "../../../types";
-import { isNetworkError } from "../../../lib/errors";
 import { newId } from "../../../lib/id";
-import { enqueueOutbox } from "../outbox";
-import { beginOperation, callRpc, type OperationContext } from "../idempotentRpc";
+import { beginOperation, type OperationContext } from "../idempotentRpc";
+import { Stage, submitOfflineCapable } from "../writeAhead";
 import { deleteLocalRows, putLocalRows } from "../localWrites";
 import { assertOfflineWriteEligible } from "../../authStore";
 import { supabase } from "../../../lib/supabase";
 import { localDb } from "../../../lib/localDb";
 import { mapInventory } from "../mappers";
-import { inventoryKey, pendingStockDeltas, withPendingStock } from "../pendingStock";
+import { inventoryKey, pendingStockLedger, sumLedger, type StockLedger } from "../pendingStock";
+import { onQueueChanged } from "../outbox";
+import {
+  appliedFor, appliedLedger, effectOfMovements, eventsSince, isReleased, markStockRead, noteStaged, putLedgerInTransaction,
+  readPersistedLedger, registerStagedStockHook, registerStockAccess, rowKey, serverStockRows, setAppliedLedger, setStockUnverified,
+  assertStockKnown,
+  withoutReleased, type LedgerMap,
+} from "../stockLedger";
 import { fetchAllRows } from "../fetchAll";
+import { clearStoreTimers, later } from "../storeTimers";
 import { useAppStore } from "../../appStore";
 
 // Shape returned by the adjust_stock RPC (camelCase keys).
@@ -45,21 +52,45 @@ const buildAdjustStockArgs = (
 });
 
 // Replace the local mirror's inventory rows for one scope (one shop, or
-// every row when `shopId` is null) with `rows`: rows the server no longer
-// has are removed, the rest upserted. Never throws.
-async function replaceLocalInventory(shopId: string | null, rows: Inventory[]): Promise<void> {
+// every row when `shopId` is null) with `rows` — rows the server no longer
+// has are removed, the rest upserted — together with the ledger describing
+// them, in ONE transaction (crash-safe pair, stockLedger.ts). Never throws.
+async function replaceLocalInventory(shopId: string | null, rows: Inventory[], ledger: LedgerMap): Promise<void> {
   try {
-    const keep = new Set(rows.map((r) => inventoryKey(r.shopId, r.productId)));
-    const existing = shopId
-      ? await localDb.inventory.where("shopId").equals(shopId).primaryKeys()
-      : await localDb.inventory.toCollection().primaryKeys();
-    const gone = existing.filter(([s, p]) => !keep.has(inventoryKey(s, p)));
-    if (gone.length) await localDb.inventory.bulkDelete(gone);
+    await localDb.transaction("rw", localDb.inventory, localDb.syncState, async () => {
+      const keep = new Set(rows.map((r) => inventoryKey(r.shopId, r.productId)));
+      const existing = shopId
+        ? await localDb.inventory.where("shopId").equals(shopId).primaryKeys()
+        : await localDb.inventory.toCollection().primaryKeys();
+      const gone = existing.filter(([s, p]) => !keep.has(inventoryKey(s, p)));
+      if (gone.length) await localDb.inventory.bulkDelete(gone);
+      if (rows.length) await localDb.inventory.bulkPut(rows);
+      await putLedgerInTransaction(ledger);
+    });
   } catch (err) {
-    console.error("[DB] Failed to prune the local inventory mirror:", err);
+    console.error("[DB] Failed to replace the local inventory mirror:", err);
   }
-  await putLocalRows({ inventory: rows });
 }
+
+// Rows + the ledger, one transaction. Rejects on failure.
+async function commitStockRows(rows: Inventory[]): Promise<void> {
+  await localDb.transaction("rw", localDb.inventory, localDb.syncState, async () => {
+    if (rows.length) await localDb.inventory.bulkPut(rows);
+    await putLedgerInTransaction();
+  });
+}
+
+/** Unresolved entries the server read below does not know about yet, plus
+ *  how the result must be adjusted for things that happened DURING the read
+ *  (see composeServerStock). */
+interface ComposedStock {
+  rows: Inventory[];
+  applied: LedgerMap;
+  pendingConfirmation: Record<string, number>;
+  followUp: boolean;
+}
+
+let unsubscribeQueue: (() => void) | null = null;
 
 export const createInventorySlice: StateCreator<DataState, [], [], InventoryState> = (set, get) => {
   // Server-time watermark per inventory row (ms since epoch, SERVER clock
@@ -107,74 +138,229 @@ export const createInventorySlice: StateCreator<DataState, [], [], InventoryStat
     return Number.isNaN(ts) ? Number.POSITIVE_INFINITY : ts;
   };
 
-  // Pending offline stock on live rows (H2, ORV-021). A Realtime row is the
-  // SERVER's value; operations still queued on this till (pendingStock.ts)
-  // are not in it, so showing it raw "un-sells" an offline sale until the
-  // queue drains (oversell risk).
-  //  - No queued stock change for the row (no provisional movement with
-  //    pendingSync in memory — every offline stock write creates one, and
-  //    the drain's reconcile removes it): the server row is exact and is
-  //    applied synchronously, as before.
-  //  - Otherwise the row is NOT shown raw: the current row stays until the
-  //    queued deltas are read from the outbox, then server row + those
-  //    deltas is applied. pendingStockDeltas counts only pending/failed
-  //    entries — never one being sent or already acknowledged — so a sale is
-  //    never subtracted twice.
-  // Either way the result is (re)computed from the outbox before the local
-  // mirror is written, and dropped when a newer event for the row arrived
-  // (eventSeq), when a refresh or full load replaced the rows meanwhile
-  // (they re-apply buffered events themselves), or when another writer
-  // replaced the row (a drain's authoritative row, a local write).
-  const eventSeq = new Map<string, number>();
-  let refreshGeneration = 0;
-  const nextSeq = (key: string): number => {
-    const seq = (eventSeq.get(key) ?? 0) + 1;
-    eventSeq.set(key, seq);
-    return seq;
-  };
+  // ---------------------------------------------------------------------
+  // Unresolved stock effects (Batch 2A, D-NEW-1; supersedes the H2 event
+  // correction). Every displayed row is
+  //
+  //     confirmed server row  +  Σ applied[entry][row]
+  //
+  // where `applied` (../stockLedger) is the per-entry ledger of the unresolved effects this
+  // till has baked into the row (pendingStock.ts decides what counts: whole
+  // effects of entries not yet sent; only DECREASES of entries being sent or
+  // in doubt). Whenever the queue changes the ledger is recomputed and every
+  // row moves by exactly (new − applied) — an entry's effect is therefore
+  // applied once, released once (acknowledged → its exact contribution is
+  // removed when the server row arrives; refused → removed on the next
+  // recompute), and never silently omitted. Writers keep the invariant:
+  //  - a server row from a refresh/full load: + the fresh ledger;
+  //  - a Realtime row: + the currently applied effects for that row;
+  //  - a reply for an acknowledged entry: + the effects of OTHER entries;
+  //  - a local staging: its own effect is recorded as applied.
+  // ---------------------------------------------------------------------
+  const catalog = () => ({
+    products: get().products ?? [], productUnits: get().productUnits ?? [],
+    stockTransfers: get().stockTransfers ?? [], stockTransferItems: get().stockTransferItems ?? [],
+  });
   const replaceRow = (current: Inventory[], row: Inventory): Inventory[] => {
     const idx = current.findIndex((i) => i.shopId === row.shopId && i.productId === row.productId);
     return idx >= 0 ? current.map((i, n) => (n === idx ? row : i)) : [...current, row];
   };
+  const mirrorRows = (rows: Inventory[]): void => {
+    // Straight to the mirror (with the ledger), NOT putLocalRows.
+    commitStockRows(rows).catch((err) => console.error("[DB] Failed to mirror stock rows:", err));
+  };
+  const pendingConfirmationOf = (target: LedgerMap, ledger: StockLedger): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const [entry, effect] of target) {
+      if (!ledger.doubtful.has(entry)) continue;
+      for (const [key, delta] of effect) if (delta < 0) out[key] = (out[key] ?? 0) - delta;
+    }
+    return out;
+  };
+  // What should be applied now: the queue as read (released entries never
+  // re-admitted) + entries staged after `marker` that the read missed.
+  const targetLedger = (ledger: StockLedger, marker: number): LedgerMap => {
+    const target = new Map(withoutReleased(ledger.byEntry));
+    for (const e of eventsSince(marker)) {
+      if (e.type !== "staged" || isReleased(e.localId) || target.has(e.localId)) continue;
+      target.set(e.localId, appliedLedger().get(e.localId) ?? e.effect);
+    }
+    return target;
+  };
+  const markUnverified = (err: unknown): void => {
+    console.error("[DB] Stock effects of the queue could not be established; stock is unverified:", err);
+    setStockUnverified(true);
+    set({ stockUnverified: true });
+  };
+  // The queue was read again: stock is established (for the state field).
+  const markVerified = (): false => {
+    setStockUnverified(false);
+    return false;
+  };
+
+  // Recompute serially; queue notifications that arrive during a run are
+  // coalesced into one more run.
+  let syncChain: Promise<void> = Promise.resolve();
+  let syncQueued = false;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  const runStockSync = async (): Promise<void> => {
+    syncQueued = false;
+    const marker = markStockRead();
+    let ledger: StockLedger;
+    try {
+      ledger = await pendingStockLedger(get().movements ?? [], catalog());
+    } catch (err) {
+      // Fail closed: keep what is shown, refuse offline stock checks, retry.
+      markUnverified(err);
+      if (!retryTimer) retryTimer = later(() => { retryTimer = null; void scheduleStockSync(); }, 5_000);
+      return;
+    }
+    const target = targetLedger(ledger, marker);
+    const changed: Inventory[] = [];
+    set((s) => {
+      const want = sumLedger(target);
+      const have = sumLedger(appliedLedger());
+      let inventory = s.inventory;
+      for (const key of new Set([...want.keys(), ...have.keys()])) {
+        const diff = (want.get(key) ?? 0) - (have.get(key) ?? 0);
+        if (!diff) continue;
+        const idx = inventory.findIndex((r) => rowKey(r) === key);
+        if (idx < 0) continue;
+        const row = { ...inventory[idx], qtyBaseUnits: inventory[idx].qtyBaseUnits + diff };
+        inventory = inventory.map((r, n) => (n === idx ? row : r));
+        changed.push(row);
+      }
+      setAppliedLedger(target);
+      return { inventory, stockPendingConfirmation: pendingConfirmationOf(target, ledger), stockUnverified: markVerified() };
+    });
+    await commitStockRows(changed).catch((err) => console.error("[DB] Failed to mirror stock rows:", err));
+  };
+  const scheduleStockSync = (): Promise<void> => {
+    if (syncQueued) return syncChain;
+    syncQueued = true;
+    syncChain = syncChain.then(runStockSync).catch((err) => console.error("[DB] Stock recompute failed:", err));
+    return syncChain;
+  };
+
+  /**
+   * Server rows (from a refresh or a full load) as they must be displayed.
+   * `marker` was taken BEFORE the server read. Rows whose server figure
+   * moved by an acknowledgement DURING the read may or may not include it,
+   * so they are never shown above what is displayed now, and a follow-up
+   * refresh is asked for. Live events newer than the read win over pages
+   * (they are server rows too). Null when the queue cannot be read.
+   */
+  const composeServerStock = async (
+    serverRows: Inventory[], marker: number, inScope: (key: string) => boolean,
+    events: BufferedInventoryEvent[] = [], sinceTs = Number.NEGATIVE_INFINITY,
+  ): Promise<ComposedStock | null> => {
+    let ledger: StockLedger;
+    try {
+      ledger = await pendingStockLedger(get().movements ?? [], catalog());
+    } catch (err) {
+      markUnverified(err);
+      return null;
+    }
+    const target = targetLedger(ledger, marker);
+    const sum = sumLedger(target);
+    const byKey = new Map(serverRows.map((r) => [rowKey(r), r]));
+    for (const e of events) {
+      const key = inventoryKey(e.shopId, e.productId);
+      if (!inScope(key) || e.ts < sinceTs) continue;
+      if (e.row) byKey.set(key, e.row);
+      else byKey.delete(key);
+    }
+    const moved = new Set(eventsSince(marker).filter((e) => e.type === "released").flatMap((e) => e.keys ?? []));
+    const current = new Map(get().inventory.map((r) => [rowKey(r), r.qtyBaseUnits]));
+    let followUp = false;
+    const rows = [...byKey.values()].map((r) => {
+      const key = rowKey(r);
+      let qty = r.qtyBaseUnits + (sum.get(key) ?? 0);
+      if (moved.has(key)) {
+        followUp = true;
+        const shown = current.get(key);
+        if (shown !== undefined && shown < qty) qty = shown;
+      }
+      return { ...r, qtyBaseUnits: qty };
+    });
+    return { rows, applied: target, pendingConfirmation: pendingConfirmationOf(target, ledger), followUp };
+  };
+
+  // The ledger describes THIS store's rows: a new store starts empty and
+  // takes over the queue subscription (only one store exists in the app;
+  // tests create several).
+  setAppliedLedger(new Map());
+  clearStoreTimers();
+  unsubscribeQueue?.();
+  unsubscribeQueue = onQueueChanged(() => { void scheduleStockSync(); });
+  // Reads for the ledger; refreshes it requests are coalesced per shop.
+  const refreshRequested = new Set<string>();
+  const requestRefresh = (shopId: string, delayMs = 0): void => {
+    if (refreshRequested.has(shopId)) return;
+    refreshRequested.add(shopId);
+    later(() => {
+      refreshRequested.delete(shopId);
+      void get().refreshInventoryFromServer({ shopId }).catch(() => undefined);
+    }, delayMs);
+  };
+  registerStockAccess({
+    currentQty: (key) => get().inventory.find((r) => rowKey(r) === key)?.qtyBaseUnits,
+    snapshot: () => new Map(get().inventory.map((r) => [rowKey(r), r.qtyBaseUnits])),
+    requestRefresh: (shopId) => requestRefresh(shopId, 250),
+    commit: commitStockRows,
+  });
+
+  registerStagedStockHook((localId, movements, before) => {
+    // Each touched row = what was displayed just before the staging was
+    // applied + its effect − whatever this entry already had applied (an
+    // online attempt counted while it was being sent is replaced, not
+    // added to). The staging's own absolute figures were computed from an
+    // earlier read and are not trusted for the row. The mirror got the same
+    // re-based rows and the ledger in the staging's own transaction.
+    const previous = appliedLedger().get(localId) ?? new Map<string, number>();
+    const effect = effectOfMovements(movements);
+    set((s) => {
+      let inventory = s.inventory;
+      for (const key of new Set([...effect.keys(), ...previous.keys()])) {
+        const base = before.get(key);
+        if (base === undefined) continue; // a new row: the staging's figure stands
+        const idx = inventory.findIndex((r) => rowKey(r) === key);
+        if (idx < 0) continue;
+        const row = { ...inventory[idx], qtyBaseUnits: base + (effect.get(key) ?? 0) - (previous.get(key) ?? 0) };
+        inventory = inventory.map((r, n) => (n === idx ? row : r));
+      }
+      return { inventory };
+    });
+    noteStaged(localId, effect);
+  });
 
   // Manual inventory adjustment / damage write-off — a single atomic Supabase
   // RPC. The database validates permission, shop scope, the reason, the type
   // and the resulting stock level, then writes inventory, the movement and the
   // audit row in one transaction.
-  const adjustStockOnline = async (input: AdjustStockInput, op: OperationContext): Promise<void> => {
-    const { data, error } = await callRpc("adjust_stock", buildAdjustStockArgs(input, op));
-    if (error) throw error;
-    if (!data) throw new Error("Stock adjustment returned no data.");
-
+  const applyAdjustStock = async (data: unknown, ackId: string): Promise<void> => {
     const result = data as AdjustStockResult;
+    const [shown] = serverStockRows([result.inventory], ackId);
 
     // Reconcile local state from the authoritative RPC result.
-    set((s) => {
-      const idx = s.inventory.findIndex(
-        (i) => i.shopId === result.inventory.shopId && i.productId === result.inventory.productId
-      );
-      const inventory =
-        idx >= 0
-          ? s.inventory.map((i, n) => (n === idx ? result.inventory : i))
-          : [...s.inventory, result.inventory];
-      return {
-        inventory,
-        movements: [result.movement, ...s.movements],
-        auditLogs: [result.auditLog, ...s.auditLogs],
-      };
-    });
-    void putLocalRows({ inventory: [result.inventory], movements: [result.movement], auditLogs: [result.auditLog] });
+    set((s) => ({
+      inventory: replaceRow(s.inventory, shown),
+      movements: [result.movement, ...s.movements],
+      auditLogs: [result.auditLog, ...s.auditLogs],
+    }));
+    await putLocalRows({ movements: [result.movement], auditLogs: [result.auditLog] });
   };
 
   // No network: stage the adjustment locally against the current cached
   // stock level and queue the exact RPC call for replay once back online.
   // The server is still the final say: reconcileAdjustStock() below replaces
   // this provisional movement with whatever the server actually accepts.
-  const adjustStockOffline = async (input: AdjustStockInput, op: OperationContext): Promise<void> => {
+  const stageAdjustStock = async (input: AdjustStockInput, op: OperationContext, stage: Stage): Promise<void> => {
     await assertOfflineWriteEligible();
+    assertStockKnown();
     const { shopId, productId, type, qtyChange, reason, actorId, referenceType, referenceId, productUnitId, unitQty } = input;
     const now = op.createdAt;
-    const qtyBefore = get().getInventoryQty(shopId, productId);
+    const qtyBefore = stage.qty(get, shopId, productId);
 
     // Mirror the server: a sellable unit overrides the magnitude but keeps
     // qtyChange's sign as the direction.
@@ -197,16 +383,16 @@ export const createInventorySlice: StateCreator<DataState, [], [], InventoryStat
       productUnitId, pendingSync: true, idempotencyKey: op.idempotencyKey,
     };
 
-    set((s) => {
+    stage.set((s: DataState) => {
       const idx = s.inventory.findIndex((i) => i.shopId === shopId && i.productId === productId);
       const inventory = idx >= 0
         ? s.inventory.map((i, n) => (n === idx ? inventoryUpdate : i))
         : [...s.inventory, inventoryUpdate];
       return { inventory, movements: [movement, ...s.movements] };
     });
-    void putLocalRows({ inventory: [inventoryUpdate], movements: [movement] });
+    stage.put({ inventory: [inventoryUpdate], movements: [movement] });
 
-    await enqueueOutbox({
+    stage.enqueue({
       kind: "rpc",
       name: "adjust_stock",
       args: buildAdjustStockArgs(input, op),
@@ -222,32 +408,24 @@ export const createInventorySlice: StateCreator<DataState, [], [], InventoryStat
 
     adjustStock: async (input: AdjustStockInput) => {
       const op = beginOperation();
-      if (typeof navigator !== "undefined" && navigator.onLine === false) {
-        return adjustStockOffline(input, op);
-      }
-      try {
-        return await adjustStockOnline(input, op);
-      } catch (err) {
-        if (isNetworkError(err)) return adjustStockOffline(input, op);
-        throw err;
-      }
+      return submitOfflineCapable({
+        set, name: "adjust_stock", shopId: input.shopId, op,
+        args: buildAdjustStockArgs(input, op),
+        applyOnline: applyAdjustStock,
+        stage: (stage) => stageAdjustStock(input, op, stage),
+      });
     },
 
     // Called by the outbox once a queued adjust_stock actually runs — swaps
     // the provisional movement for the server's authoritative one.
-    reconcileAdjustStock: (data, provisional) => {
+    reconcileAdjustStock: (data, provisional, ackId) => {
       const result = data as AdjustStockResult;
       const provisionalMovementIds = new Set(provisional.find((p) => p.table === "movements")?.ids ?? []);
+      const [shown] = serverStockRows([result.inventory], ackId ?? null);
 
       set((s) => {
-        const idx = s.inventory.findIndex(
-          (i) => i.shopId === result.inventory.shopId && i.productId === result.inventory.productId
-        );
-        const inventory = idx >= 0
-          ? s.inventory.map((i, n) => (n === idx ? result.inventory : i))
-          : [...s.inventory, result.inventory];
         return {
-          inventory,
+          inventory: replaceRow(s.inventory, shown),
           // also drop an existing copy of the authoritative rows (a full
           // reload between a lost-response commit and this replay already
           // brought them in) so nothing is listed twice
@@ -256,7 +434,7 @@ export const createInventorySlice: StateCreator<DataState, [], [], InventoryStat
         };
       });
       void deleteLocalRows(provisional);
-      void putLocalRows({ inventory: [result.inventory], movements: [result.movement], auditLogs: [result.auditLog] });
+      void putLocalRows({ movements: [result.movement], auditLogs: [result.auditLog] });
     },
 
     // Called by the Realtime subscription (migration 058, stores/data/
@@ -270,37 +448,11 @@ export const createInventorySlice: StateCreator<DataState, [], [], InventoryStat
       if (isStaleEvent(key, commitTimestamp)) return;
       noteEvent(key, commitTimestamp);
       bufferEvent(key, { row, shopId: row.shopId, productId: row.productId, ts: eventTs(commitTimestamp) });
-      const seq = nextSeq(key);
-      const generation = refreshGeneration;
-      const mayHavePending = get().movements.some(
-        (m) => m.pendingSync && m.shopId === row.shopId && m.productId === row.productId,
-      );
-      // The row this handler expects to find when its async step runs.
-      const expected = mayHavePending
-        ? get().inventory.find((i) => i.shopId === row.shopId && i.productId === row.productId)
-        : row;
-      if (!mayHavePending) set((s) => ({ inventory: replaceRow(s.inventory, row) }));
-      void (async () => {
-        let pending: Map<string, number>;
-        try {
-          pending = await pendingStockDeltas(get().movements);
-        } catch (err) {
-          console.error("[DB] Realtime stock: could not read queued deltas:", err);
-          return;
-        }
-        if (eventSeq.get(key) !== seq || refreshGeneration !== generation) return;
-        const current = get().inventory.find((i) => i.shopId === row.shopId && i.productId === row.productId);
-        if (current !== expected) return; // replaced by another writer: theirs stands
-        const corrected = withPendingStock([row], pending)[0];
-        if (corrected !== current) set((s) => ({ inventory: replaceRow(s.inventory, corrected) }));
-        // Straight to the mirror, NOT putLocalRows: that would also record the
-        // row as a local write a running full load re-applies over its pages
-        // (localWrites.ts) — even for an event that predates the load. The
-        // load re-applies captured events itself, by commit time.
-        await localDb.inventory.put(corrected).catch((err) => {
-          console.error("[DB] Realtime stock: failed to mirror the row:", err);
-        });
-      })();
+      // The server's row + the unresolved effects already applied to it:
+      // a queued offline sale stays visible, nothing is counted twice.
+      const shown = { ...row, qtyBaseUnits: row.qtyBaseUnits + appliedFor(key) };
+      set((s) => ({ inventory: replaceRow(s.inventory, shown) }));
+      mirrorRows([shown]);
     },
 
     applyInventoryRealtimeDelete: (shopId: string, productId: string, commitTimestamp?: string) => {
@@ -308,7 +460,6 @@ export const createInventorySlice: StateCreator<DataState, [], [], InventoryStat
       if (isStaleEvent(key, commitTimestamp)) return;
       noteEvent(key, commitTimestamp);
       bufferEvent(key, { row: null, shopId, productId, ts: eventTs(commitTimestamp) });
-      nextSeq(key); // cancels a pending correction of an earlier update
       set((s) => ({ inventory: s.inventory.filter((i) => !(i.shopId === shopId && i.productId === productId)) }));
       localDb.inventory.delete([shopId, productId]).catch((err) => {
         console.error("[DB] Failed to remove a deleted inventory row from the local cache:", err);
@@ -320,9 +471,11 @@ export const createInventorySlice: StateCreator<DataState, [], [], InventoryStat
       const shopId = options?.shopId !== undefined ? options.shopId : useAppStore.getState().currentShopId;
       const inScope = (row: { shopId: string }): boolean => (shopId ? row.shopId === shopId : true);
 
-      // Events accepted from here on are re-applied over the pages (G-5).
+      // Events accepted from here on are re-applied over the pages (G-5);
+      // acknowledgements and stagings from here on are accounted for too.
       const buffer = new Map<string, BufferedInventoryEvent>();
       eventBuffers.add(buffer);
+      const marker = markStockRead();
       try {
         // 1. Server time BEFORE the read (resolve_event_time(NULL) is now(),
         //    migration 045; granted to authenticated by 064). Anything
@@ -356,21 +509,11 @@ export const createInventorySlice: StateCreator<DataState, [], [], InventoryStat
         }
         const serverRows: Inventory[] = res.data.map(mapInventory);
 
-        // 3. Provisional deltas of operations still queued — read AFTER the
-        //    pages so an entry the drain finished meanwhile (its effect now
-        //    inside the server rows) is not applied twice.
-        const pending = await pendingStockDeltas(get().movements);
-        const byKey = new Map(withPendingStock(serverRows, pending).map((r) => [inventoryKey(r.shopId, r.productId), r]));
-
-        // 4. Live events newer than the watermark that arrived during the
-        //    read win over the pages (they may postdate them). Their rows are
-        //    server rows too, so the queued deltas apply to them as well.
-        for (const [key, event] of buffer) {
-          if (!inScope(event) || event.ts < watermark) continue;
-          if (event.row) byKey.set(key, withPendingStock([event.row], pending)[0]);
-          else byKey.delete(key);
-        }
-        const rows = [...byKey.values()];
+        // 3. Unresolved effects of the queue (read AFTER the pages) and the
+        //    live events newer than the watermark that arrived meanwhile.
+        const composed = await composeServerStock(serverRows, marker, (key) => (shopId ? key.startsWith(`${shopId}|`) : true), [...buffer.values()], watermark);
+        if (!composed) return false; // fail closed: nothing replaced
+        const rows = composed.rows;
 
         // 5. Replace — not merge — the scope.
         if (!Number.isNaN(watermark)) {
@@ -383,9 +526,28 @@ export const createInventorySlice: StateCreator<DataState, [], [], InventoryStat
             for (const row of serverRows) raiseWatermark(inventoryKey(row.shopId, row.productId), watermark);
           }
         }
-        refreshGeneration += 1; // corrections of earlier events are superseded by these rows
-        set((s) => ({ inventory: [...s.inventory.filter((row) => !inScope(row)), ...rows] }));
-        await replaceLocalInventory(shopId ?? null, rows);
+        // The scope now carries exactly the composed ledger; rows outside it
+        // keep their applied effects (the recompute below aligns them).
+        const scoped = (key: string) => (shopId ? key.startsWith(`${shopId}|`) : true);
+        const merged: LedgerMap = new Map();
+        for (const [entry, effect] of appliedLedger()) {
+          const keep = new Map([...effect].filter(([k]) => !scoped(k)));
+          if (keep.size) merged.set(entry, keep);
+        }
+        for (const [entry, effect] of composed.applied) {
+          const into = merged.get(entry) ?? new Map<string, number>();
+          for (const [k, d] of effect) if (scoped(k)) into.set(k, d);
+          if (into.size) merged.set(entry, into);
+        }
+        setAppliedLedger(merged);
+        set((s) => ({
+          inventory: [...s.inventory.filter((row) => !inScope(row)), ...rows],
+          stockPendingConfirmation: composed.pendingConfirmation, stockUnverified: markVerified(),
+        }));
+        await replaceLocalInventory(shopId ?? null, rows, appliedLedger());
+        void scheduleStockSync();
+        // Something was acknowledged while the pages were read: confirm.
+        if (composed.followUp && shopId) requestRefresh(shopId, 500);
         return true;
       } finally {
         eventBuffers.delete(buffer);
@@ -403,9 +565,47 @@ export const createInventorySlice: StateCreator<DataState, [], [], InventoryStat
       };
     },
 
-    notePendingStockDeltas: () => {
-      refreshGeneration += 1; // a full load replaced every row
+    // A full load replaced every row with its composed rows (composeServerStock).
+    noteStockLedger: (applied, pendingConfirmation) => {
+      setAppliedLedger(new Map(applied));
+      set({ stockPendingConfirmation: Object.fromEntries(pendingConfirmation), stockUnverified: markVerified() });
+      void scheduleStockSync();
     },
+
+    beginStockRead: () => markStockRead(),
+
+    composeServerStock: (serverRows, marker, events, sinceTs) =>
+      composeServerStock(serverRows, marker, () => true, events, sinceTs ?? Number.NEGATIVE_INFINITY),
+
+    // Rows rendered from the local mirror at startup. The persisted ledger
+    // was written with them (same transaction) and says what they contain —
+    // but only for entries the queue still counts: an entry that is gone
+    // (an older app version drained it, or the owner settled it) or no
+    // longer counted is dropped WITHOUT moving any row (at worst stock stays
+    // understated until the next refresh — never overstated). A queued entry
+    // the ledger does not know (queued by an older version, whose mirror
+    // rows include it) is taken as applied with its current effect.
+    adoptStockLedger: async () => {
+      try {
+        const [persisted, ledger] = await Promise.all([
+          readPersistedLedger(),
+          pendingStockLedger(get().movements ?? [], catalog()),
+        ]);
+        const adopted: LedgerMap = new Map();
+        for (const [entry, effect] of ledger.byEntry) adopted.set(entry, persisted?.get(entry) ?? effect);
+        setAppliedLedger(adopted);
+      } catch (err) {
+        markUnverified(err);
+        return;
+      }
+      await scheduleStockSync();
+    },
+
+    stockUnverified: false,
+
+    stockPendingConfirmation: {},
+
+    syncStockWithQueue: () => scheduleStockSync(),
 
     recordDamage: async ({ shopId, productId, qty, reason, actorId }) => {
       // Damage write-off is a negative adjustment of type DAMAGE.

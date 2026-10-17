@@ -224,16 +224,35 @@ export interface InventoryState {
   movements: InventoryMovement[];
   /** Internal (loadData): collect Realtime inventory events until finish(). */
   captureInventoryEvents: () => { finish: () => BufferedInventoryEvent[] };
-  /** Internal (loadData): the pending deltas a full load applied; supersedes
-   *  in-flight Realtime corrections. */
-  notePendingStockDeltas: (pending: Map<string, number>) => void;
+  /** Internal (loadData): the unresolved stock effects a full load applied
+   *  (per outbox entry — see stockLedger.ts). */
+  noteStockLedger: (applied: Map<string, Map<string, number>>, pendingConfirmation: Map<string, number>) => void;
+  /** Internal (startup): adopt the ledger for rows rendered from the mirror. */
+  adoptStockLedger: () => Promise<void>;
+  /** Internal (loadData): a marker taken BEFORE the server reads. */
+  beginStockRead: () => number;
+  /** Internal (loadData): server inventory rows as they must be displayed
+   *  (unresolved effects, acknowledgements during the read, live events).
+   *  Null when the queue cannot be read (fail closed). */
+  composeServerStock: (
+    serverRows: Inventory[], marker: number, events: BufferedInventoryEvent[], sinceTs?: number,
+  ) => Promise<{ rows: Inventory[]; applied: Map<string, Map<string, number>>; pendingConfirmation: Record<string, number>; followUp: boolean } | null>;
+  /** Base units per "shopId|productId" whose deduction awaits the server's
+   *  confirmation (in flight or outcome unknown). Shown as "pending
+   *  confirmation"; already subtracted from the displayed stock. */
+  stockPendingConfirmation: Record<string, number>;
+  /** Recompute the displayed stock against the queue (tests, diagnostics). */
+  syncStockWithQueue: () => Promise<void>;
+  /** Set when the queue's stock effects could not be read (fail closed):
+   *  stock shown is the last known figure and offline stock checks refuse. */
+  stockUnverified: boolean;
   adjustStock: (input: AdjustStockInput) => Promise<void>;
   recordDamage: (input: { shopId: string; productId: string; qty: number; reason: string; actorId: string }) => Promise<void>;
   getInventoryQty: (shopId: string, productId: string) => number;
   /** Internal — called by the outbox drain once adjust_stock actually runs
    *  server-side, to replace the provisional local movement with the
    *  authoritative one. Not for direct UI use. */
-  reconcileAdjustStock: (data: unknown, provisional: ProvisionalRef) => void;
+  reconcileAdjustStock: (data: unknown, provisional: ProvisionalRef, ackId?: string) => void;
   /** Internal — called by the Realtime subscription (stores/data/
    *  inventoryRealtime.ts) when another device changes a stock level.
    *  `commitTimestamp` is the event's server commit time: an event older
@@ -282,7 +301,7 @@ export interface SaleState {
   /** Internal — called by the outbox drain once complete_sale actually runs
    *  server-side, to replace the provisional local sale with the
    *  authoritative one. Not for direct UI use. */
-  reconcileCompleteSale: (data: unknown, provisional: ProvisionalRef) => void;
+  reconcileCompleteSale: (data: unknown, provisional: ProvisionalRef, ackId?: string) => void;
   /** Internal — called by the outbox drain once a queued
    *  create_refund_void_request actually runs server-side (covers both
    *  requestVoid and requestRefund, which share the RPC). Not for direct
@@ -315,7 +334,7 @@ export interface TransferState {
   /** Internal — called by the outbox drain once a queued dispatch/receive
    *  actually runs server-side. Not for direct UI use. */
   reconcileDispatchTransfer: (data: unknown, provisional: ProvisionalRef) => void;
-  reconcileReceiveTransfer: (data: unknown, provisional: ProvisionalRef) => void;
+  reconcileReceiveTransfer: (data: unknown, provisional: ProvisionalRef, ackId?: string) => void;
 }
 
 export interface PurchaseState {
@@ -366,7 +385,7 @@ export interface PurchaseState {
   }) => Promise<void>;
   /** Internal — called by the outbox drain once a queued receive/payment
    *  actually runs server-side. Not for direct UI use. */
-  reconcileReceivePurchaseOrder: (data: unknown, provisional: ProvisionalRef) => void;
+  reconcileReceivePurchaseOrder: (data: unknown, provisional: ProvisionalRef, ackId?: string) => void;
   reconcileRecordSupplierPayment: (data: unknown, provisional: ProvisionalRef) => void;
 }
 

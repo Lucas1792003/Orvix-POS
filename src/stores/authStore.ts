@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { supabase } from "../lib/supabase";
-import { isNetworkError, OFFLINE_AUTHORIZATION_ERROR } from "../lib/errors";
+import { OFFLINE_AUTHORIZATION_ERROR } from "../lib/errors";
+import { classifyFailure, signalOf } from "../lib/failureClass";
 import { localDb, SYNC_STATE_KEYS, type CachedAuthUser } from "../lib/localDb";
 import { setActiveAuthId } from "./authCache";
 import { createBootstrapAccount } from "../lib/staffAdmin";
@@ -170,6 +171,9 @@ interface AppUserRow {
 interface ResolveResult {
   user?: AppUserRow;
   error?: string;
+  /** The failure itself, with its HTTP status (B-25): classified by
+   *  lib/failureClass.ts, not by its message text. */
+  cause?: unknown;
 }
 
 const USER_FIELDS = "id, role, shop_id, org_id, is_active, auth_id, granted_permissions, revoked_permissions";
@@ -189,6 +193,19 @@ const escapeLike = (value: string) => value.replace(/[\\%_]/g, (c) => `\\${c}`);
  *  - duplicate email             -> { error }
  *  - email row linked elsewhere  -> { error }
  */
+/**
+ * Can a failed users lookup fall back to the last-known cached resolution?
+ * Only when the server was unreachable or temporarily failing (network,
+ * gateway, 5xx, 52x, 429 — B-25: these used to sign the cashier out because
+ * only the message text was checked). Never for rejected credentials, a
+ * suspended organisation or a definitive refusal.
+ */
+export function mayUseCachedUser(cause: unknown): boolean {
+  const failure = classifyFailure(signalOf(cause));
+  if (failure.hold === "reauth" || failure.hold === "suspended") return false;
+  return failure.retryable && failure.klass !== "WAITING_BACKEND";
+}
+
 async function resolveAppUser(authUser: { id: string; email?: string }): Promise<ResolveResult> {
   // 1. Trusted identity link.
   const byAuthId = await supabase
@@ -196,7 +213,7 @@ async function resolveAppUser(authUser: { id: string; email?: string }): Promise
     .select(USER_FIELDS)
     .eq("auth_id", authUser.id)
     .maybeSingle();
-  if (byAuthId.error) return { error: byAuthId.error.message };
+  if (byAuthId.error) return { error: byAuthId.error.message, cause: { ...byAuthId.error, status: byAuthId.status } };
   if (byAuthId.data) return { user: byAuthId.data as AppUserRow };
 
   // 2. Fallback: email match for un-migrated rows.
@@ -205,7 +222,7 @@ async function resolveAppUser(authUser: { id: string; email?: string }): Promise
     .from("users")
     .select(USER_FIELDS)
     .ilike("email", escapeLike(authUser.email));
-  if (byEmail.error) return { error: byEmail.error.message };
+  if (byEmail.error) return { error: byEmail.error.message, cause: { ...byEmail.error, status: byEmail.status } };
 
   const rows = (byEmail.data ?? []) as AppUserRow[];
   if (rows.length === 0) return {};
@@ -389,7 +406,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
     try {
       result = await resolveAppUser({ id: authUser.id, email: authUser.email ?? undefined });
     } catch (err) {
-      result = { error: err instanceof Error ? err.message : String(err) };
+      result = { error: err instanceof Error ? err.message : String(err), cause: err };
     }
 
     let user = result.user;
@@ -403,7 +420,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
     // genuine, non-network error (e.g. RLS/data problem) still logs the
     // failure and does NOT fall back, since that's not a connectivity issue.
     if (!user && result.error) {
-      if (isNetworkError(result.error)) {
+      if (mayUseCachedUser(result.cause ?? result.error)) {
         const cached = await getCachedAppUser(authUser.id);
         if (cached) {
           user = {

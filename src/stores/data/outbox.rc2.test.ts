@@ -26,6 +26,7 @@ import {
   restoreSetAsideEntry, retryOutboxEntry, setAsideOutboxEntry,
 } from "./outbox";
 import { useAuthStore } from "../authStore";
+import { validReply } from "./testing/validReplies";
 import { collectQueueExport } from "../../lib/queueExport/collect";
 import { decryptQueueExport, encryptQueueExport } from "../../lib/queueExport/format";
 import { recordQueueExport, resetQueueExportRecord, wasExported } from "../../lib/queueExport/exportRecord";
@@ -71,7 +72,8 @@ class FakeServer {
     }
     const id = `sale-${++this.n}`;
     this.sales.push(id);
-    const response = { sale: { id }, replayed: false };
+    // A complete complete_sale reply (replies are validated since Batch 2A).
+    const response = { ...validReply("complete_sale", { sale: { id } }), replayed: false };
     this.ledger.set(slot, { hash, response });
     return { data: response, error: null };
   }
@@ -185,7 +187,7 @@ describe("D2: stranded `syncing` entries", () => {
       })));
     };
     expect(await guardNow()).toMatchObject({ allowed: false, code: "unsynced", unsynced: 1 });
-    rpc.mockResolvedValue({ data: { sale: { id: "x" } }, error: null });
+    rpc.mockResolvedValue({ data: validReply("complete_sale", { sale: { id: "x" } }), error: null });
     await drainOutbox();
     expect(rpc).toHaveBeenCalledTimes(1);
     expect(await guardNow()).toMatchObject({ allowed: true, code: "ok" });
@@ -256,7 +258,7 @@ describe("D3: provisional id map prune", () => {
     await localDb.provisionalIdMap.put({ provisionalId: "shift-p", realId: "shift-r", createdAt: new Date(Date.now() - 8 * DAY).toISOString() });
     await enqueueOutbox({ kind: "rpc", name: "complete_sale", args: { p_shift_id: "shift-p" }, shopId: "s", refs: [{ field: "p_shift_id", provisionalId: "shift-p" }] });
     expect(await pruneProvisionalIdMap()).toBe(0);
-    rpc.mockResolvedValue({ data: { sale: { id: "x" } }, error: null });
+    rpc.mockResolvedValue({ data: validReply("complete_sale", { sale: { id: "x" } }), error: null });
     await drainOutbox(); // sends it (ref resolved to shift-r); the pass's prune ran first
     expect(rpc.mock.calls[0][1]).toMatchObject({ p_shift_id: "shift-r" });
     expect(await pruneProvisionalIdMap()).toBe(1);
@@ -298,7 +300,7 @@ describe("D1: set aside instead of delete", () => {
     expect(stored).toMatchObject({ args: row.args, idempotencyKey: row.idempotencyKey, seq: (row as { seq?: number }).seq });
     expect(await listSetAsideEntries()).toHaveLength(1);
 
-    rpc.mockResolvedValue({ data: { sale: { id: "x" } }, error: null });
+    rpc.mockResolvedValue({ data: validReply("complete_sale", { sale: { id: "x" } }), error: null });
     await drainOutbox();
     expect(rpc).not.toHaveBeenCalled(); // never sent while set aside
     expect(await countPendingOutbox()).toBe(0);
@@ -346,7 +348,31 @@ describe("D1: set aside instead of delete", () => {
   it("no unsynced status can be deleted through the outbox API", async () => {
     const mod = await import("./outbox");
     const names = Object.keys(mod).filter((k) => /dismiss|delete|remove|purge|discard/i.test(k));
-    expect(names).toEqual([]);
+    // Batch 2A: the single, guarded D-10(a) exception (a write-ahead attempt
+    // the server definitively refused at the counter). It is proven below to
+    // refuse every row that is not exactly that.
+    expect(names).toEqual(["discardWriteAhead"]);
+  });
+
+  it("discardWriteAhead refuses every row that is not an in-flight write-ahead attempt (pending, syncing replay, conflict, quarantined, set aside, reconciled)", async () => {
+    const { discardWriteAhead, markWriteAheadInFlight, clearWriteAheadInFlight } = await import("./outbox");
+    const base = { kind: "rpc" as const, name: "complete_sale", args: {}, shopId: "s", createdAt: new Date().toISOString(), attempts: 0 };
+    const rows = [
+      { ...base, localId: "r-pending", status: "pending" as const },
+      { ...base, localId: "r-syncing-replay", status: "syncing" as const }, // a drain replay, not write-ahead
+      { ...base, localId: "r-conflict", status: "conflict" as const, writeAhead: true },
+      { ...base, localId: "r-quarantined", status: "quarantined" as const, writeAhead: true },
+      { ...base, localId: "r-archived", status: "archived" as const, writeAhead: true },
+      { ...base, localId: "r-reconciled", status: "reconciled" as const, writeAhead: true },
+      { ...base, localId: "r-wal-not-in-flight", status: "syncing" as const, writeAhead: true },
+    ];
+    await localDb.syncOutbox.bulkPut(rows);
+    for (const r of rows) {
+      if (r.localId !== "r-wal-not-in-flight") markWriteAheadInFlight(r.localId);
+      await expect(discardWriteAhead(r.localId, "test")).rejects.toThrow(/Refusing to discard/);
+      clearWriteAheadInFlight(r.localId);
+    }
+    expect(await localDb.syncOutbox.count()).toBe(rows.length);
   });
 
   it("page rules: Set aside is owner-only and export-first; one action at a time (a double click acts once)", async () => {

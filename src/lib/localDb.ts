@@ -105,6 +105,23 @@ export interface SyncOutboxEntry {
   // immediately before sending — an entry with an unresolved ref is left
   // pending until the entry that created that id syncs. See outbox.ts.
   refs?: { field: string; provisionalId: string }[];
+  // ---- Batch 2A (queue safety). Additive only: older builds ignore them
+  // and keep working on the same row (statuses are unchanged). ----
+  /** Written BEFORE the first online attempt (write-ahead, plan v2 §5.1):
+   *  the row exists while the online request is in flight. */
+  writeAhead?: boolean;
+  /** When the latest attempt was sent (client clock, ISO). */
+  sentAt?: string;
+  /** The server may already have applied this operation (an attempt ended
+   *  in a timeout/reset/unrecognised reply). Its stock effect is still
+   *  counted (conservative, D-NEW-1) and shown as "pending confirmation"
+   *  until a reply establishes the outcome. Never cleared by a retry alone. */
+  inDoubt?: boolean;
+  /** Why the entry is waiting for something outside the queue (sign-in,
+   *  suspension, an edge block, a server upgrade, an unrecognised reply). */
+  heldReason?: string;
+  /** Consecutive "credentials rejected" answers (reauth after the second). */
+  authFailures?: number;
 }
 
 /** provisionalId -> the real id the server assigned once that entry synced.

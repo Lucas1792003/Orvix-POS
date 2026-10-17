@@ -30,6 +30,7 @@ import { useSyncStore } from "../stores/syncStore";
 import { collectQueueExport } from "./queueExport/collect";
 import { decryptQueueExport, encryptQueueExport } from "./queueExport/format";
 import { TEST_BACKEND_URL, TEST_BACKEND_ANON_KEY } from "../test/setup";
+import { validReply } from "../stores/data/testing/validReplies";
 
 // v1.0.15's `shwe-phala-local` schema (git show v1.0.15:src/lib/localDb.ts).
 const V1015_STORES = {
@@ -145,7 +146,7 @@ describe("v1.0.15 profile opened by 1.0.16", () => {
     expect(again).toMatchObject({ originChanged: false, quarantined: 0 });
     expect(await localDb.products.count()).toBe(1);
 
-    rpc.mockResolvedValue({ data: { ok: true }, error: null });
+    rpc.mockImplementation(async (name: string) => ({ data: validReply(name), error: null }));
     await drainOutbox();
     expect(rpc).toHaveBeenCalledTimes(1);
     expect(rpc.mock.calls[0][0]).toBe("adjust_stock");

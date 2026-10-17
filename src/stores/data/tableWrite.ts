@@ -1,7 +1,8 @@
 import { supabase } from "../../lib/supabase";
-import { isGatewayStatus, isNetworkError } from "../../lib/errors";
 import { localDb } from "../../lib/localDb";
+import { classifyFailure } from "../../lib/failureClass";
 import { enqueueOutbox } from "./outbox";
+import { RpcError, runRequest, toRpcError, type RpcOutcome } from "./idempotentRpc";
 
 // Tables this helper knows how to mirror locally. Deliberately narrow — the
 // multi-row/batch catalog writes (product barcodes, product units, supplier
@@ -67,25 +68,18 @@ export async function writeTableRow(
   // (it catches fetch-level failures internally) — but don't bet on that:
   // wrap the call so a genuine rejection is classified the same way as a
   // resolved network error, instead of escaping as an unhandled throw.
-  try {
-    const query =
-      op === "insert" ? supabase.from(table).insert(row)
-      : op === "update" ? supabase.from(table).update(row).eq("id", id)
-      : supabase.from(table).delete().eq("id", id);
-
-    const { error, status } = await query;
-    // postgrest-js reports the HTTP status beside `error`, not inside it —
-    // a gateway failure (502/503/504, or 0 for a fetch failure) means the
-    // write may not have reached Postgres, so queue it like a network error.
-    if (error && (isNetworkError(error) || isGatewayStatus(status))) {
-      return queueForLater();
-    }
-    if (!error) await mirrorLocally(table, op, appRow, id);
-    return { error };
-  } catch (err) {
-    if (isNetworkError(err)) return queueForLater();
-    return { error: { message: err instanceof Error ? err.message : String(err) } };
+  // One request, bounded, classified like every RPC (lib/failureClass.ts).
+  // Anything that may not have reached the database, or whose outcome is
+  // unknown, is queued and resent; a definitive refusal — including an
+  // update/delete that matched no row — is returned to the caller.
+  const outcome = await runTableWrite(table, op, row, id);
+  if (outcome.error) {
+    const { failure } = outcome.error;
+    if (failure.retryable && failure.hold === null) return queueForLater();
+    return { error: { message: outcome.error.message } };
   }
+  await mirrorLocally(table, op, appRow, id);
+  return { error: null };
 }
 
 async function mirrorLocally(
@@ -103,15 +97,68 @@ async function mirrorLocally(
   }
 }
 
-/** Replays a queued table_write against Supabase. Called from outbox.ts's
- *  drain loop — returns the same shape supabase would so the drain loop's
- *  network-vs-rejection handling applies identically to RPC and table
- *  writes. `row` here is always the snake_case Supabase payload that was
- *  queued, never the app-shape mirror copy. */
-export async function replayTableWrite(
+/** The request for a table write. Every op returns the affected ids
+ *  (`.select("id")`), so "matched no row" is visible instead of a silent
+ *  204 (P0-E, until migration 087's apply_catalog_write). `row` is always
+ *  the snake_case payload, never the app-shape mirror copy. */
+export function replayTableWrite(
   table: string, op: "insert" | "update" | "delete", row: Record<string, unknown> | undefined, id: string,
 ) {
-  return op === "insert" ? supabase.from(table).insert(row ?? {})
-    : op === "update" ? supabase.from(table).update(row ?? {}).eq("id", id)
-    : supabase.from(table).delete().eq("id", id);
+  return op === "insert" ? supabase.from(table).insert(row ?? {}).select("id")
+    : op === "update" ? supabase.from(table).update(row ?? {}).eq("id", id).select("id")
+    : supabase.from(table).delete().eq("id", id).select("id");
+}
+
+const rejected = (message: string, code: string): RpcError =>
+  new RpcError(message, { status: 409, code, failure: classifyFailure({ status: 409, code: "P0001", message }) });
+
+/**
+ * Judge a table write's reply. Success requires exactly one affected row
+ * whose id is the target. Zero rows on update/delete is a definitive
+ * conflict (the row is gone, or this user may not change it — the client
+ * cannot tell which before 087). A reply with no row list at all (e.g. a
+ * 404 with an empty body, which postgrest-js reports as a 204 success) is
+ * an unrecognised reply: the outcome is unknown and the entry is kept.
+ */
+export function evaluateTableWrite(op: "insert" | "update" | "delete", id: string, outcome: RpcOutcome): RpcOutcome {
+  if (outcome.error) return outcome;
+  const rows = outcome.data;
+  if (!Array.isArray(rows)) {
+    return {
+      data: null, status: outcome.status,
+      error: new RpcError(`Unrecognised reply to a ${op} (status ${outcome.status ?? "?"}, no row list) — outcome unknown, kept for resend.`, {
+        status: outcome.status, code: "MALFORMED_REPLY", failure: { ...classifyFailure({ status: 200 }), klass: "MALFORMED_SUCCESS" },
+      }),
+    };
+  }
+  if (rows.length === 0 && op !== "insert") {
+    return { data: null, status: outcome.status, error: rejected(`The ${op} matched no row (it no longer exists, or you may not change it).`, "ZERO_ROWS") };
+  }
+  if (rows.length !== 1 || (rows[0] as { id?: unknown })?.id !== id) {
+    return { data: null, status: outcome.status, error: rejected(`The ${op} affected ${rows.length} rows, expected exactly the target row.`, "UNEXPECTED_ROWS") };
+  }
+  return outcome;
+}
+
+/** Send one table write, bounded and classified; never rejects. */
+export async function runTableWrite(
+  table: string, op: "insert" | "update" | "delete", row: Record<string, unknown> | undefined, id: string,
+): Promise<RpcOutcome> {
+  let outcome: RpcOutcome;
+  try {
+    outcome = await runRequest(replayTableWrite(table, op, row, id), `${table}.${op}`);
+  } catch (err) {
+    outcome = { data: null, error: toRpcError(err) };
+  }
+  return evaluateTableWrite(op, id, outcome);
+}
+
+/** A duplicate-key error on THIS table's primary key: for an insert with a
+ *  client-minted id, proof that an earlier attempt already committed. A
+ *  duplicate on any other unique index (shop name/code, unit-type name, …)
+ *  is a real conflict and is never treated as applied. */
+export function isPrimaryKeyDuplicate(table: string, error: { code?: string; message?: string; details?: string } | null | undefined): boolean {
+  if (!error || error.code !== "23505") return false;
+  const text = `${error.message ?? ""} ${error.details ?? ""}`;
+  return text.includes(`"${table}_pkey"`) || text.includes(` ${table}_pkey`);
 }

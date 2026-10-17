@@ -1,3 +1,5 @@
+// Receiving writes its outbox row BEFORE sending (Batch 2A write-ahead).
+import "fake-indexeddb/auto";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Flow test: PO receiving through the data store with Supabase mocked. Pins the
@@ -46,6 +48,10 @@ const result = {
   auditLogs: [{ id: "au-1" }],
 };
 
+beforeEach(async () => {
+  const { localDb } = await import("../../../lib/localDb");
+  await localDb.syncOutbox.clear();
+});
 beforeEach(() => rpc.mockReset());
 
 describe("receivePurchaseOrder flow", () => {
@@ -112,11 +118,18 @@ describe("receivePurchaseOrder flow", () => {
     ).rejects.toThrow("PO already received");
   });
 
-  it("throws when the RPC returns no data", async () => {
+  // Batch 2A: an empty reply is an UNKNOWN outcome. With no local PO to
+  // stage against (this harness), the durable row is still kept — pending,
+  // in doubt, same key — and the user is told it is pending confirmation,
+  // never that it failed.
+  it("an empty reply is an unknown outcome: kept in doubt with its key, reported as pending confirmation", async () => {
     rpc.mockResolvedValue({ data: null, error: null });
     const { get } = makeStore();
     await expect(
       get().receivePurchaseOrder({ purchaseOrderId: "po-1", receivedItems: [{ productId: "p1", receivedQty: 7 }] }),
-    ).rejects.toThrow("Receiving returned no data.");
+    ).rejects.toMatchObject({ name: "PendingConfirmationError" });
+    const { localDb } = await import("../../../lib/localDb");
+    const [row] = await localDb.syncOutbox.toArray();
+    expect(row).toMatchObject({ name: "receive_purchase_order", status: "pending", inDoubt: true, idempotencyKey: rpc.mock.calls[0][1].p_idempotency_key });
   });
 });

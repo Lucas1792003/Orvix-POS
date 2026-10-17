@@ -256,11 +256,12 @@ describe("idempotent checkout", () => {
 
   it("online path that fails on the network reuses the same key when it falls back to the queue", async () => {
     const { get } = makeSaleStore();
-    fake.queueModes("gateway-502"); // a 502 from the gateway — classified as network
+    fake.queueModes("gateway-502"); // a 502: the origin may have committed — outcome unknown
 
-    const provisionalId = await get().createSale(saleInput());
+    // Never "recorded", never "failed": pending confirmation (correction pass).
+    await expect(get().createSale(saleInput())).rejects.toMatchObject({ name: "PendingConfirmationError" });
 
-    expect(get().sales[0]).toMatchObject({ id: provisionalId, pendingSync: true });
+    expect(get().sales[0]).toMatchObject({ pendingSync: true, pendingConfirmation: true });
     const [queued] = await localDb.syncOutbox.toArray();
     const [firstAttempt] = fake.callsFor("complete_sale");
     expect(queued.idempotencyKey).toBe(firstAttempt.args.p_idempotency_key);
@@ -501,7 +502,9 @@ describe("ordering, backoff and classification", () => {
     // see "untagged legacy rows are quarantined" below and backendOrigin.test.ts).
     const backendOrigin = currentBackendOrigin();
     await localDb.syncOutbox.put({
-      localId: "outbox-legacy-b", kind: "rpc", name: "adjust_stock", args: {}, shopId: "shop-1",
+      // Real arguments: the fake server's reply echoes them, and a stock row
+      // without shop/product is (correctly) an unrecognised reply since Batch 2A.
+      localId: "outbox-legacy-b", kind: "rpc", name: "adjust_stock", args: { p_shop_id: "shop-1", p_product_id: "p1", p_quantity_delta: 1 }, shopId: "shop-1",
       createdAt: "2026-01-02T00:00:00.000Z", status: "pending", attempts: 0, backendOrigin,
     });
     await localDb.syncOutbox.put({

@@ -8,7 +8,8 @@ import { countPendingOutbox, drainOutbox, registerOutboxReconciler, setNeedsReau
 import { bootstrapDeltaCursors, pullDeltaChanges } from "./deltaSync";
 import { refreshInventoryIfNotLive } from "./inventoryRealtime";
 import { fetchAllRows, fetchAllRowsIn, fetchServerTime, type ReadResult, type Row } from "./fetchAll";
-import { inventoryKey, pendingStockDeltas, withPendingStock } from "./pendingStock";
+import { inventoryKey, withPendingStock } from "./pendingStock";
+import { serializeLedger } from "./stockLedger";
 import type { BufferedInventoryEvent } from "./types";
 import type { Inventory } from "../../types";
 import { applyRecordedWrites, beginWriteRecording, endWriteRecording } from "./localWrites";
@@ -113,7 +114,11 @@ export const useDataStore = create<DataState>()((...args) => {
     if (!get().isLoaded) {
       try {
         const cached = await readLocalSnapshot();
-        if (cached) set({ ...cached, refundVoidRequests: cached.refunds, isLoaded: true });
+        if (cached) {
+          set({ ...cached, refundVoidRequests: cached.refunds, isLoaded: true });
+          // The mirrored rows already carry what is queued (D-NEW-1 ledger).
+          await get().adoptStockLedger();
+        }
       } catch (err) {
         console.error("[DB] Failed to hydrate from local cache:", err);
       }
@@ -135,6 +140,9 @@ export const useDataStore = create<DataState>()((...args) => {
     // Realtime inventory events that arrive while the pages are read: the
     // pages may predate them, so they are re-applied on top (H2 / G-5).
     const liveEvents = get().captureInventoryEvents();
+    // Acknowledgements and stagings from here on are accounted for when the
+    // stock rows are composed (stockLedger.ts).
+    const stockMarker = get().beginStockRead();
     try {
       // A session the server has revoked (refresh token invalid) is dropped
       // by supabase-js the moment it tries to refresh; the reads below
@@ -242,7 +250,7 @@ export const useDataStore = create<DataState>()((...args) => {
       // `getEffectiveShopId` for the contract.
       const shopsList: ReturnType<typeof mapShop>[] = (shops.data ?? []).map(mapShop);
       // Queued offline stock deltas, read AFTER the server rows (see below).
-      const pendingStock = await pendingStockDeltas(get().movements);
+
       const { currentShopId, setShopId } = useAppStore.getState();
       if (currentShopId && !shopsList.find((s) => s.id === currentShopId)) {
         setShopId(null);
@@ -260,11 +268,9 @@ export const useDataStore = create<DataState>()((...args) => {
         priceTiers: (priceTiers.data ?? []).map(mapPriceTier),
         priceLevels: (priceLevels.data ?? []).map(mapPriceLevel),
         productUnitPrices: (productUnitPrices.data ?? []).map(mapProductUnitPrice),
-        // Stock effects of operations still queued offline are not in the
-        // server's rows yet: re-apply them (read AFTER the server rows, like
-        // refreshInventoryFromServer), or the full load would show stock as
-        // if those sales/adjustments had never happened until the next refresh.
-        inventory: withPendingStock((inventory.data ?? []).map(mapInventory), pendingStock),
+        // Composed below (queue effects, acknowledgements during the read,
+        // live events).
+        inventory: (inventory.data ?? []).map(mapInventory),
         movements: (movements.data ?? []).map(mapMovement),
         suppliers: (suppliers.data ?? []).map(mapSupplier),
         purchaseOrders: (purchaseOrders.data ?? []).map(mapPurchaseOrder),
@@ -287,9 +293,19 @@ export const useDataStore = create<DataState>()((...args) => {
       const recorded = applyRecordedWrites(await mergeProvisionalRows(serverSnapshot), endWriteRecording(recorder));
       // Live stock changes committed after the load began win over the
       // pages, with the queued offline deltas applied to them as well.
-      const snapshot = { ...recorded, inventory: applyLiveInventoryEvents(recorded.inventory, liveEvents.finish(), serverTimeBeforeLoad, pendingStock) };
-      get().notePendingStockDeltas(pendingStock);
+      // Stock: the server rows + the effects of what is still queued (read
+      // AFTER the server rows), adjusted for acknowledgements made during
+      // the read; live events newer than the load win. Fail closed: if the
+      // queue cannot be read the stock shown is kept as it is.
+      const composed = await get().composeServerStock(
+        recorded.inventory, stockMarker, liveEvents.finish(),
+        serverTimeBeforeLoad ? Date.parse(serverTimeBeforeLoad) : Number.NEGATIVE_INFINITY,
+      );
+      const snapshot = { ...recorded, inventory: composed ? composed.rows : get().inventory };
+      if (composed) get().noteStockLedger(composed.applied, new Map(Object.entries(composed.pendingConfirmation)));
+      const ledgerForSnapshot = serializeLedger();
       set({ ...snapshot, refundVoidRequests: snapshot.refunds, isLoading: false, isLoaded: true });
+      if (composed?.followUp) void get().refreshInventoryFromServer({ shopId: null }).catch(() => undefined);
 
       // A full load is an authenticated round trip and carries the
       // current `users` row: refresh the offline auth snapshot from it.
@@ -308,7 +324,7 @@ export const useDataStore = create<DataState>()((...args) => {
       // local mirror, and a persist still in flight would otherwise race
       // it (and used to clear every table, outbox included).
       try {
-        await persistSnapshotToLocal(snapshot);
+        await persistSnapshotToLocal(snapshot, ledgerForSnapshot);
       } catch (err) {
         console.error("[DB] Failed to persist local cache:", err);
       }
@@ -400,23 +416,23 @@ async function sessionGone(): Promise<boolean> {
   }
 }
 
-registerOutboxReconciler("complete_sale", (data, provisional) =>
-  useDataStore.getState().reconcileCompleteSale(data, provisional ?? []));
-registerOutboxReconciler("adjust_stock", (data, provisional) =>
-  useDataStore.getState().reconcileAdjustStock(data, provisional ?? []));
+registerOutboxReconciler("complete_sale", (data, provisional, ackId) =>
+  useDataStore.getState().reconcileCompleteSale(data, provisional ?? [], ackId));
+registerOutboxReconciler("adjust_stock", (data, provisional, ackId) =>
+  useDataStore.getState().reconcileAdjustStock(data, provisional ?? [], ackId));
 registerOutboxReconciler("open_shift", (data, provisional) =>
   useDataStore.getState().reconcileOpenShift(data, provisional ?? []));
 registerOutboxReconciler("close_shift", (data, provisional) =>
   useDataStore.getState().reconcileCloseShift(data, provisional ?? []));
 registerOutboxReconciler("create_refund_void_request", (data, provisional) =>
   useDataStore.getState().reconcileCreateRefundVoidRequest(data, provisional ?? []));
-registerOutboxReconciler("receive_purchase_order", (data, provisional) =>
-  useDataStore.getState().reconcileReceivePurchaseOrder(data, provisional ?? []));
+registerOutboxReconciler("receive_purchase_order", (data, provisional, ackId) =>
+  useDataStore.getState().reconcileReceivePurchaseOrder(data, provisional ?? [], ackId));
 registerOutboxReconciler("record_supplier_payment", (data, provisional) =>
   useDataStore.getState().reconcileRecordSupplierPayment(data, provisional ?? []));
 registerOutboxReconciler("dispatch_stock_transfer", (data, provisional) =>
   useDataStore.getState().reconcileDispatchTransfer(data, provisional ?? []));
-registerOutboxReconciler("receive_stock_transfer", (data, provisional) =>
-  useDataStore.getState().reconcileReceiveTransfer(data, provisional ?? []));
+registerOutboxReconciler("receive_stock_transfer", (data, provisional, ackId) =>
+  useDataStore.getState().reconcileReceiveTransfer(data, provisional ?? [], ackId));
 
 export type { DataState } from "./types";

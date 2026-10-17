@@ -3,6 +3,7 @@ import { useToastStore } from "../stores/toastStore";
 import { getErrorMessage } from "./errors";
 import { resolveBackendConfig } from "./backendConfig";
 import { CLIENT_INFO } from "./clientInfo";
+import { retryAfterAwareFetch } from "./retryAfter";
 
 // Fail closed: a missing/empty URL or key, or a host other than the one
 // this build was pinned to (VITE_SUPABASE_EXPECTED_HOST), throws here —
@@ -29,7 +30,11 @@ export const backendOrigin = new URL(backend.url).origin;
 // value) identifies the build on every REST / auth / storage / functions
 // request: "shwephala-pos/1.0.16 (validated-uploads; ...)", lib/clientInfo.ts.
 export const supabase = createClient(backend.url, backend.anonKey, {
-  global: { headers: { "X-Client-Info": CLIENT_INFO } },
+  global: {
+    headers: { "X-Client-Info": CLIENT_INFO },
+    // Records Retry-After (429/503) for the queue's back-off (lib/retryAfter.ts).
+    fetch: retryAfterAwareFetch((...args) => fetch(...args)),
+  },
 });
 
 /** Backend REST origin + public anon key, for the few calls that need the raw

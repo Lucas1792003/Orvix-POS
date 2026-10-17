@@ -1,3 +1,5 @@
+// Transfers write their outbox row BEFORE sending (Batch 2A write-ahead).
+import "fake-indexeddb/auto";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Flow test: the two-step stock transfer (dispatch → receive) through the data
@@ -40,6 +42,10 @@ function makeStore(seed: Record<string, any> = {}) {
   return { get };
 }
 
+beforeEach(async () => {
+  const { localDb } = await import("../../../lib/localDb");
+  await localDb.syncOutbox.clear();
+});
 beforeEach(() => rpc.mockReset());
 
 describe("dispatchTransfer flow", () => {
@@ -58,19 +64,25 @@ describe("dispatchTransfer flow", () => {
     await get().dispatchTransfer({ transferId: "tr-1" });
 
     expect(rpc.mock.calls[0][0]).toBe("dispatch_stock_transfer");
+    // The online call carries the same actor stamp as a queued replay
+    // (Batch 2A, Q-M1: identical arguments on both paths).
     expect(rpc.mock.calls[0][1]).toEqual({
       p_transfer_id: "tr-1", p_created_at: expect.any(String), p_idempotency_key: expect.any(String),
+      p_expected_actor_id: null,
     });
     expect(get().stockTransfers[0].status).toBe("IN_TRANSIT");
     expect(get().inventory).toEqual(before); // hold at source — no movement yet
   });
 
-  it("throws when dispatch returns no data", async () => {
+  // Batch 2A: an empty reply is an UNKNOWN outcome — kept in doubt with its
+  // key; reported as pending confirmation, never as failed.
+  it("an empty dispatch reply is an unknown outcome: kept in doubt with its key", async () => {
     rpc.mockResolvedValue({ data: null, error: null });
     const { get } = makeStore();
-    await expect(get().dispatchTransfer({ transferId: "tr-1" })).rejects.toThrow(
-      "Dispatch transfer returned no data.",
-    );
+    await get().dispatchTransfer({ transferId: "tr-1" }).catch((e: Error) => expect(e.name).toBe("PendingConfirmationError"));
+    const { localDb } = await import("../../../lib/localDb");
+    const [row] = await localDb.syncOutbox.toArray();
+    expect(row).toMatchObject({ name: "dispatch_stock_transfer", status: "pending", inDoubt: true, idempotencyKey: rpc.mock.calls[0][1].p_idempotency_key });
   });
 });
 

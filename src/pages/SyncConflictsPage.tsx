@@ -4,6 +4,7 @@ import { useSyncStore } from "../stores/syncStore";
 import { useAuthStore } from "../stores/authStore";
 import { PageHeader } from "../components/layout/PageHeader";
 import { Card } from "../components/ui/Card";
+import { UnresolvedOperationsSection } from "../components/sync/UnresolvedOperationsSection";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Modal } from "../components/ui/Modal";
@@ -64,11 +65,13 @@ const describeEntry = (entry: SyncOutboxEntry): string => {
 
 // Transient (auto-retrying) vs permanent (needs a person) — the two look
 // the same in the queue but mean very different things for the operator.
-type EntryKind = "quarantined" | "conflict" | "retrying" | "waiting" | "queued";
+type EntryKind = "quarantined" | "conflict" | "unconfirmed" | "retrying" | "waiting" | "queued";
 
 const classify = (entry: SyncOutboxEntry): EntryKind => {
   if (entry.status === "quarantined") return "quarantined";
   if (entry.status === "conflict") return "conflict";
+  // Sent, outcome unknown: resent with the same key, never applied twice.
+  if (entry.inDoubt === true || (entry.writeAhead === true && entry.status === "syncing")) return "unconfirmed";
   if (entry.failureKind === "transient" && entry.lastError) return "retrying";
   if (entry.refs?.length) return "waiting";
   return "queued";
@@ -79,6 +82,7 @@ const StatusBadge = ({ entry, now }: { entry: SyncOutboxEntry; now: number }) =>
   const kind = classify(entry);
   if (kind === "quarantined") return <Badge tone="red">Other server: not sent, export for the owner</Badge>;
   if (kind === "conflict") return <Badge tone="red">Needs action</Badge>;
+  if (kind === "unconfirmed") return <Badge tone="sky">Awaiting confirmation — resent with its original key</Badge>;
   if (kind === "retrying") {
     const next = entry.nextAttemptAt ? new Date(entry.nextAttemptAt) : null;
     const due = next && next.getTime() > now ? `next try ${next.toLocaleTimeString()}` : "retrying now";
@@ -234,6 +238,7 @@ export const SyncConflictsPage = () => {
         </div>
       </div>
       <ExportQueueDialog open={exportOpen} onClose={() => setExportOpen(false)} />
+      <UnresolvedOperationsSection isOwner={isOwner} />
       <div className="mt-4">
         {!isLoading && queueEntries.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-300/70 bg-slate-50/60 p-6 text-center text-sm text-slate-500">

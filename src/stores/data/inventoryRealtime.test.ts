@@ -300,7 +300,7 @@ describe("Realtime gap reconciliation", () => {
     expect(fake.calls.filter((c) => c.name !== "resolve_event_time")).toHaveLength(1);
   });
 
-  it("re-applies a pending adjustment on top of the server rows and never counts an entry that is being sent", async () => {
+  it("re-applies a pending adjustment on top of the server rows; an entry being sent keeps its decrease, flagged pending confirmation (D-NEW-1)", async () => {
     const { get } = makeStore();
     vi.stubGlobal("navigator", { onLine: false });
     await get().adjustStock({ shopId: "shop-1", productId: "p1", type: "ADJUSTMENT", qtyChange: -3, reason: "Recount", actorId: "user-1" });
@@ -311,13 +311,18 @@ describe("Realtime gap reconciliation", () => {
     expect(await get().refreshInventoryFromServer({ shopId: "shop-1" })).toBe(true);
     expect(qty(get, "p1")).toBe(9); // 12 - 3 pending
 
-    // An entry mid-flight (status "syncing") is not re-applied: its effect
-    // may already be on the server and the reply reconciles it in ms.
+    // An entry mid-flight (status "syncing") may or may not be on the
+    // server yet. D-NEW-1: its DECREASE still counts (understate, never
+    // oversell) and the product is flagged "pending confirmation".
     const [entry] = await localDb.syncOutbox.toArray();
     await localDb.syncOutbox.update(entry.localId, { status: "syncing" });
     expect(await get().refreshInventoryFromServer({ shopId: "shop-1" })).toBe(true);
-    expect(qty(get, "p1")).toBe(12);
+    expect(qty(get, "p1")).toBe(9);
+    expect(get().stockPendingConfirmation).toEqual({ "shop-1|p1": 3 });
     await localDb.syncOutbox.update(entry.localId, { status: "pending" });
+    await get().syncStockWithQueue();
+    expect(get().stockPendingConfirmation).toEqual({});
+    expect(qty(get, "p1")).toBe(9);
 
     expect(await drainOutbox()).toBe("drained");
     expect(fake.server.executions.adjust_stock).toBe(1);
@@ -521,8 +526,7 @@ describe("H2: live stock events while offline stock changes are queued", () => {
 
     fake.server.inventory.set("shop-1:p1", 9);           // another till sold 1
     ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1", qty: 9 });
-    expect(qty(get, "p1")).toBe(8);                      // not the raw 9, even for an instant
-    await vi.waitFor(() => expect(qty(get, "p1")).toBe(7));
+    expect(qty(get, "p1")).toBe(7);                      // server − queued at once, never the raw 9
     await vi.waitFor(async () => expect(await mirrored("p1")).toBe(7));
     expect(await localDb.syncOutbox.toArray()).toEqual(outbox); // queue untouched
     expect(fake.server.inventory.get("shop-1:p1")).toBe(9);     // server value untouched

@@ -14,6 +14,7 @@ import { buildRefundState, planRefundRequest } from "../../features/sales/servic
 import { hasPermission } from "../../lib/permissions";
 import { formatDateTime } from "../../lib/utils";
 import { printReceipt } from "../../lib/print";
+import { useTranslation } from "../../hooks/useTranslation";
 
 interface ReceiptDetailProps {
   saleId: string;
@@ -29,6 +30,7 @@ interface ReceiptDetailProps {
 export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetailProps) => {
   const toast = useToast();
   const currentUserId = useAuthStore((state) => state.currentUserId);
+  const { t } = useTranslation();
   const currentUser = useDataStore((state) => state.users.find((user) => user.id === currentUserId));
   const sale = useDataStore((state) => state.sales.find((item) => item.id === saleId));
   const allSaleItems = useDataStore((state) => state.saleItems);
@@ -126,7 +128,10 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
   // is transactional so this should always be true in practice; if items
   // were never loaded the buttons are disabled rather than emitting an
   // empty receipt.
-  const hasPrintableContent = saleItems.length > 0;
+  // An UNCONFIRMED sale (its outcome is unknown) never prints as a final
+  // receipt — it may not exist on the server (Batch 2A correction pass).
+  const unconfirmed = sale.pendingConfirmation === true;
+  const hasPrintableContent = saleItems.length > 0 && !unconfirmed;
 
   const handlePrint = () => {
     if (!hasPrintableContent) return;
@@ -245,7 +250,11 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
         </div>
       )}
 
-      {!hasPrintableContent && (
+      {unconfirmed ? (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 print-hidden">
+          {t("unresolved", "pendingTitle")}: {t("unresolved", "pendingSaleBody")}
+        </div>
+      ) : !hasPrintableContent && (
         <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 print-hidden">
           Sale items are still loading or unavailable; printing is disabled until items are visible.
         </div>

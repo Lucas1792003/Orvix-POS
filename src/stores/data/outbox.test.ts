@@ -19,6 +19,7 @@ import {
   restoreSetAsideEntry, recordIdMapping, countUnsyncedOutbox,
 } from "./outbox";
 import { useAuthStore } from "../authStore";
+import { validReply } from "./testing/validReplies";
 
 beforeEach(async () => {
   rpc.mockReset();
@@ -70,7 +71,7 @@ describe("drainOutbox", () => {
 
   it("stamps every rpc entry with an idempotency key and sends it as p_idempotency_key", async () => {
     await enqueueOutbox({ kind: "rpc", name: "adjust_stock", args: { n: 1 }, shopId: "shop-1" });
-    rpc.mockResolvedValue({ data: { ok: true }, error: null });
+    rpc.mockImplementation(async (name: string) => ({ data: validReply(name), error: null }));
 
     const [queued] = await localDb.syncOutbox.toArray();
     expect(queued.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
@@ -89,7 +90,7 @@ describe("drainOutbox", () => {
       localId: "outbox-legacy", kind: "rpc", name: "adjust_stock", args: { n: 1 }, shopId: "shop-1",
       createdAt: new Date().toISOString(), status: "pending", attempts: 0, backendOrigin: currentBackendOrigin(),
     });
-    rpc.mockResolvedValue({ data: { ok: true }, error: null });
+    rpc.mockImplementation(async (name: string) => ({ data: validReply(name), error: null }));
 
     await drainOutbox();
 
@@ -107,7 +108,7 @@ describe("drainOutbox", () => {
       localId: "outbox-v1015", kind: "rpc", name: "complete_sale", args: { n: 2 }, shopId: "shop-1",
       createdAt: new Date().toISOString(), status: "conflict", attempts: 1,
     });
-    rpc.mockResolvedValue({ data: { ok: true }, error: null });
+    rpc.mockImplementation(async (name: string) => ({ data: validReply(name), error: null }));
 
     await expect(drainOutbox()).resolves.toBe("drained");
 
@@ -144,7 +145,7 @@ describe("drainOutbox", () => {
 
   it("removes the entry once the server accepts it", async () => {
     await enqueueOutbox({ kind: "rpc", name: "some_untracked_rpc", args: {}, shopId: "shop-1" });
-    rpc.mockResolvedValue({ data: { ok: true }, error: null });
+    rpc.mockImplementation(async (name: string) => ({ data: validReply(name), error: null }));
 
     await drainOutbox();
 
@@ -158,7 +159,7 @@ describe("drainOutbox", () => {
 
     const first = drainOutbox();
     const second = drainOutbox(); // should return immediately, not double-process
-    resolveRpc({ data: { ok: true }, error: null });
+    resolveRpc({ data: validReply("complete_sale"), error: null });
     await Promise.all([first, second]);
 
     expect(rpc).toHaveBeenCalledTimes(1);
@@ -174,7 +175,7 @@ describe("dependent entries (refs)", () => {
       refs: [{ field: "p_shift_id", provisionalId: "shift-local-1" }],
     });
     await enqueueOutbox({ kind: "rpc", name: "adjust_stock", args: { n: 1 }, shopId: "shop-1" });
-    rpc.mockResolvedValue({ data: { ok: true }, error: null });
+    rpc.mockImplementation(async (name: string) => ({ data: validReply(name), error: null }));
 
     await drainOutbox();
 
@@ -194,7 +195,7 @@ describe("dependent entries (refs)", () => {
       kind: "rpc", name: "complete_sale", args: { p_shift_id: "shift-local-1", p_paid_mmk: 5000 }, shopId: "shop-1",
       refs: [{ field: "p_shift_id", provisionalId: "shift-local-1" }],
     });
-    rpc.mockResolvedValue({ data: { ok: true }, error: null });
+    rpc.mockImplementation(async (name: string) => ({ data: validReply(name), error: null }));
 
     await drainOutbox();
     expect(rpc).not.toHaveBeenCalled(); // still blocked
@@ -248,7 +249,7 @@ describe("stuck (permanently-blocked) entries", () => {
     await localDb.syncOutbox.update(entry.localId, {
       createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
     });
-    rpc.mockResolvedValue({ data: { ok: true }, error: null });
+    rpc.mockImplementation(async (name: string) => ({ data: validReply(name), error: null }));
 
     await drainOutbox();
 
