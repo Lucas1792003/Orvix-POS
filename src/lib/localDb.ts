@@ -122,6 +122,30 @@ export interface SyncOutboxEntry {
   heldReason?: string;
   /** Consecutive "credentials rejected" answers (reauth after the second). */
   authFailures?: number;
+  // ---- G1 Stage 1 / migration 086 (recovery protocol). Additive only. ----
+  /** The app user who created the operation (stamped when the row is built). */
+  actorId?: string | null;
+  /** Its local effects were staged under the offline rules (the operation
+   *  was authorised to exist on this till without the server). */
+  staged?: boolean;
+  /** Outcome unknown AND never authorised offline (or never evaluated: a
+   *  crash during the first online attempt). It is NEVER resent: the drain
+   *  asks the server (op_status) and fences it if the server never saw it.
+   *  Without migration 086 on the server it is held, not sent. */
+  fenceRequired?: boolean;
+  /** The server's final decision on this key (086): never resent. */
+  serverOutcome?: "rejected" | "abandoned";
+  /** The path of the latest attempt. */
+  protocol?: "executor" | "direct" | "lookup";
+  /** A conflict the server has NOT decided (it could still run if retried):
+   *  it keeps its place at the head of the queue — later entries wait until
+   *  a person retries or sets it aside. Never sent automatically. */
+  blocksQueue?: boolean;
+  /** When the server first refused it for a missing prerequisite (the 24 h
+   *  "needs a person" timer starts here, not at creation). */
+  dependencySince?: string;
+  /** When it first waited for a record another entry creates (its ref). */
+  refWaitSince?: string;
 }
 
 /** provisionalId -> the real id the server assigned once that entry synced.

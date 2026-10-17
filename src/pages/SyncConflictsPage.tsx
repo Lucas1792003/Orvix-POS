@@ -11,7 +11,7 @@ import { Modal } from "../components/ui/Modal";
 import { Table, THead, TBody, TR, TH, TD } from "../components/ui/Table";
 import { useToast } from "../components/ui/Toast";
 import {
-  drainOutbox, listOutboxEntries, restoreSetAsideEntry, retryOutboxEntry, setAsideOutboxEntry,
+  confirmWithServer, drainOutbox, isUndecided, listOutboxEntries, restoreSetAsideEntry, retryOutboxEntry, setAsideOutboxEntry,
 } from "../stores/data/outbox";
 import { onQueueExported, wasExported } from "../lib/queueExport/exportRecord";
 import {
@@ -65,10 +65,23 @@ const describeEntry = (entry: SyncOutboxEntry): string => {
 
 // Transient (auto-retrying) vs permanent (needs a person) — the two look
 // the same in the queue but mean very different things for the operator.
-type EntryKind = "quarantined" | "conflict" | "unconfirmed" | "retrying" | "waiting" | "queued";
+type EntryKind =
+  | "quarantined" | "refused-final" | "abandoned" | "conflict" | "not-recorded" | "verifying" | "other-user" | "reply-elsewhere"
+  | "unconfirmed" | "retrying" | "waiting" | "queued" | "blocking" | "refused-unrecorded";
 
 const classify = (entry: SyncOutboxEntry): EntryKind => {
   if (entry.status === "quarantined") return "quarantined";
+  // 086: the server's final decision on this key — never sent again.
+  if (entry.serverOutcome === "rejected") return "refused-final";
+  if (entry.serverOutcome === "abandoned") return "abandoned";
+  if (entry.heldReason === "committed-verifying") return "verifying";
+  // Never authorised offline, outcome unknown: asked about, never resent.
+  if (entry.fenceRequired === true) return "not-recorded";
+  if (entry.heldReason === "committed-reply-unavailable") return "reply-elsewhere";
+  if (entry.heldReason === "needs-original-user") return "other-user";
+  // A refusal the server did not record: not final, a person decides.
+  if (entry.heldReason === "not-recorded") return "refused-unrecorded";
+  if (entry.status === "conflict" && entry.blocksQueue === true) return "blocking";
   if (entry.status === "conflict") return "conflict";
   // Sent, outcome unknown: resent with the same key, never applied twice.
   if (entry.inDoubt === true || (entry.writeAhead === true && entry.status === "syncing")) return "unconfirmed";
@@ -81,7 +94,15 @@ const classify = (entry: SyncOutboxEntry): EntryKind => {
 const StatusBadge = ({ entry, now }: { entry: SyncOutboxEntry; now: number }) => {
   const kind = classify(entry);
   if (kind === "quarantined") return <Badge tone="red">Other server: not sent, export for the owner</Badge>;
+  if (kind === "refused-final") return <Badge tone="red">Refused by the server — final, never resent</Badge>;
+  if (kind === "abandoned") return <Badge tone="red">Not applied — stopped on the server before it ran</Badge>;
   if (kind === "conflict") return <Badge tone="red">Needs action</Badge>;
+  if (kind === "blocking") return <Badge tone="red">Needs action — not decided on the server; later entries that may depend on it wait behind it</Badge>;
+  if (kind === "refused-unrecorded") return <Badge tone="red">Refused, but not recorded on the server — not final; needs a person (asked again later)</Badge>;
+  if (kind === "not-recorded") return <Badge tone="amber">Not recorded on this till — being confirmed with the server, never resent</Badge>;
+  if (kind === "verifying") return <Badge tone="sky">Applied on the server — confirming</Badge>;
+  if (kind === "reply-elsewhere") return <Badge tone="sky">Applied on the server — its user or an administrator must confirm it here</Badge>;
+  if (kind === "other-user") return <Badge tone="slate">Entered by another user — sent when they sign in on this till</Badge>;
   if (kind === "unconfirmed") return <Badge tone="sky">Awaiting confirmation — resent with its original key</Badge>;
   if (kind === "retrying") {
     const next = entry.nextAttemptAt ? new Date(entry.nextAttemptAt) : null;
@@ -165,7 +186,9 @@ export const SyncConflictsPage = () => {
       } else if (result === "network") {
         addToast({ variant: "error", title: "Still unreachable", description: "The server could not be reached. The entry stays queued and will be retried automatically." });
       } else {
-        addToast({ variant: "success", title: "Retried", description: "The queued entry was resubmitted." });
+        addToast(entry.fenceRequired
+          ? { variant: "success", title: "Checked again", description: "The server was asked about this entry again. It is never resent; its status above shows the answer." }
+          : { variant: "success", title: "Retried", description: "The queued entry was resubmitted." });
       }
     } catch (err) {
       addToast({ variant: "error", title: "Retry failed", description: err instanceof Error ? err.message : "Please try again." });
@@ -193,6 +216,25 @@ export const SyncConflictsPage = () => {
       addToast({ variant: "error", title: "Not set aside", description: err instanceof Error ? err.message : "Please try again." });
     } finally {
       setConfirmEntry(null);
+      await refresh();
+    }
+  });
+
+  // M3: establish the server's decision (stop it there if it never arrived)
+  // before an owner documents it as "recreated" / "cancelled".
+  const handleConfirm = (entry: SyncOutboxEntry) => runAction(async () => {
+    try {
+      const r = await confirmWithServer(entry.localId);
+      const text = {
+        committed: "It reached the server and has now been recorded on this till.",
+        rejected: "The server refused it (final). It never ran.",
+        abandoned: "It never ran and has been stopped on the server; it can never be applied. Export again, then reconcile it.",
+        undecided: "The server could not decide it right now (unreachable, still running, or another user's). Nothing changed; try again later.",
+      }[r];
+      addToast({ variant: r === "undecided" ? "error" : "success", title: "Confirm with server", description: text });
+    } catch (err) {
+      addToast({ variant: "error", title: "Confirm with server", description: err instanceof Error ? err.message : "Please try again." });
+    } finally {
       await refresh();
     }
   });
@@ -276,9 +318,15 @@ export const SyncConflictsPage = () => {
                     <TD>{entry.attempts}</TD>
                     <TD>
                       <div className="flex justify-end gap-2">
-                        {entry.status !== "quarantined" && (
+                        {entry.status !== "quarantined" && !entry.serverOutcome && (
                           <Button variant="secondary" size="sm" disabled={locked} onClick={() => void handleRetry(entry)}>
                             Retry
+                          </Button>
+                        )}
+{isOwner && isUndecided(entry) && (
+                          <Button variant="secondary" size="sm" disabled={locked} onClick={() => void handleConfirm(entry)} data-testid="outbox-confirm"
+                            title="Ask the server what happened to it; stop it there if it never arrived (never resent)">
+                            Confirm with server
                           </Button>
                         )}
                         {isOwner && (
@@ -346,6 +394,12 @@ export const SyncConflictsPage = () => {
                     </TD>
                     <TD>
                       <div className="flex justify-end gap-2">
+{isOwner && isUndecided(entry) && (
+                          <Button variant="secondary" size="sm" disabled={locked} onClick={() => void handleConfirm(entry)} data-testid="set-aside-confirm"
+                            title="Ask the server what happened to it; stop it there if it never arrived (never resent)">
+                            Confirm with server
+                          </Button>
+                        )}
                         {isOwner && (
                           <Button variant="secondary" size="sm" disabled={locked} onClick={() => setReconcileEntry(entry)} data-testid="set-aside-reconcile">
                             Reconcile

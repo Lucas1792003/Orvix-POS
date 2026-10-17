@@ -78,7 +78,7 @@ export async function exportPendingQueue(passphrase: string): Promise<ExportQueu
   const envelope = await encryptQueueExport(payload, passphrase);
   const contents = JSON.stringify(envelope, null, 1);
   const fileName = defaultExportFileName(tillId, now);
-  const summary = summarize(payload.entries);
+  const summary = summarize(payload.entries, payload.onlineOperations.length);
 
   const api = window.electronAPI;
   if (api?.saveQueueExport) {

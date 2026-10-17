@@ -64,7 +64,7 @@ BEGIN
     UNION ALL SELECT 'product_image_upload_sessions', count(*) FROM product_image_upload_sessions WHERE created_by LIKE 'qa-%' OR shop_id LIKE 'qa-%' OR product_id LIKE 'qa-%'
     UNION ALL SELECT 'audit_logs', count(*) FROM audit_logs WHERE actor_id LIKE 'qa-%' OR shop_id LIKE 'qa-%' OR entity_id LIKE 'qa-%'
     UNION ALL SELECT 'idempotency_keys', count(*) FROM idempotency_keys WHERE actor_id LIKE 'qa-%'
-                   OR actor_id NOT IN (SELECT id FROM users)
+                   OR actor_id NOT IN (SELECT id FROM users) OR org_id LIKE 'qa-org-%'
     UNION ALL SELECT 'auth.users', count(*) FROM auth.users WHERE email LIKE '%@qa.invalid'
     UNION ALL SELECT 'auth.identities', count(*) FROM auth.identities WHERE email LIKE '%@qa.invalid' OR user_id NOT IN (SELECT id FROM auth.users)
     UNION ALL SELECT 'auth.sessions (orphan)', count(*) FROM auth.sessions WHERE user_id NOT IN (SELECT id FROM auth.users)

@@ -19,6 +19,7 @@ import {
 } from "./onlineOnly";
 import { registerOperationPrompt, type PromptDecision, type UnresolvedPromptRequest } from "./operationPrompt";
 import { useAuthStore } from "../authStore";
+import { setExecutorCapabilityForTests } from "./idempotentRpc";
 import { localDb } from "../../lib/localDb";
 
 const payArgs = (over: Record<string, unknown> = {}) => ({
@@ -44,6 +45,7 @@ beforeEach(async () => {
   asked = [];
   registerOperationPrompt(null);
   useAuthStore.setState({ currentUserId: "user-1", currentOrgId: "org-1" });
+  setExecutorCapabilityForTests("absent");
   vi.stubGlobal("navigator", { onLine: true });
 });
 afterEach(() => {
@@ -76,15 +78,28 @@ describe("an unknown outcome", () => {
 });
 
 describe("two genuine identical payments", () => {
-  it("the second one, confirmed as NEW by the person, gets a new key and executes", async () => {
+  // G1 Stage 1 (finding 7): "new" is only possible once the earlier attempt
+  // is known not to have happened.
+  it("the second one, confirmed as NEW — server WITHOUT 086: refused (the earlier one cannot be confirmed or stopped); nothing new sent", async () => {
     lostReplies();
     await pay();
     answer("new");
-    const second = await pay();
-    expect(second.error).toBeNull();
-    expect(asked).toHaveLength(1);
+    await expect(pay()).rejects.toMatchObject({ name: "UnresolvedOperationError" });
     expect(asked[0]).toMatchObject({ allowNew: true, allowRetry: true });
-    expect(new Set(keys()).size).toBe(2);
+    expect(new Set(keys()).size).toBe(1);
+    expect(fake.server.executions.pay_supplier_lump_sum).toBe(1);
+  });
+
+  it("the second one, confirmed as NEW — server WITH 086: the earlier one is found applied and recorded; the next identical payment is then simply new", async () => {
+    fake.enableExecutor();
+    setExecutorCapabilityForTests("available");
+    lostReplies();
+    await pay();
+    answer("new");
+    await expect(pay()).rejects.toMatchObject({ name: "UnresolvedOperationError", message: expect.stringMatching(/reached the server and has now been recorded/) });
+    expect(fake.server.executions.pay_supplier_lump_sum).toBe(1);
+    const third = await pay();                 // nothing unresolved any more: a genuine new payment
+    expect(third.error).toBeNull();
     expect(fake.server.executions.pay_supplier_lump_sum).toBe(2);
   });
 
@@ -119,12 +134,17 @@ describe("an edited retry after a lost reply", () => {
     expect(await countUnsettledOnlineOperations()).toBe(0);
   });
 
-  it("or, chosen as new, is a separate payment with its own key", async () => {
-    lostReplies();
+  it("or, chosen as new, is a separate payment with its own key — once the earlier one is known not to have happened (086: fenced)", async () => {
+    fake.enableExecutor();
+    setExecutorCapabilityForTests("available");
+    fake.queueModes("network-error", "network-error", "network-error");   // never arrived
     await pay();
     answer("new");
-    await pay({ p_amount_mmk: 20_000 });
-    expect(new Set(keys()).size).toBe(2);
+    const second = await pay({ p_amount_mmk: 20_000 });
+    expect(second.error).toBeNull();
+    const ops = fake.callsFor("op_execute").map((c) => c.args.p_key);
+    expect(new Set(ops).size).toBe(2);
+    expect([...fake.server.idempotency.values()].filter((r) => r.state === "abandoned")).toHaveLength(1);
   });
 });
 
@@ -188,7 +208,10 @@ describe("restart", () => {
     lostReplies();
     await pay();
     const [row] = await listUnresolvedOnlineOperations();
+    await expect(markOnlineOperationVerified(row.id)).rejects.toThrow(/Only the owner/);   // a cashier cannot
+    useAuthStore.setState({ currentRole: "ADMIN" });
     await markOnlineOperationVerified(row.id);
+    useAuthStore.setState({ currentRole: null });
     expect(await listUnresolvedOnlineOperations()).toHaveLength(0);
   });
 });

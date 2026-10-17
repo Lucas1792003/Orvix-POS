@@ -7,7 +7,7 @@ import { formatDateTime } from "../../lib/utils";
 import { outcomeToast } from "../../lib/outcomeToast";
 import { useDataStore } from "../../stores/dataStore";
 import {
-  listUnresolvedOnlineOperations, markOnlineOperationVerified, retryOnlineOperation, type OnlineOperation,
+  checkOnlineOperation, listUnresolvedOnlineOperations, markOnlineOperationVerified, retryOnlineOperation, type OnlineOperation,
 } from "../../stores/data/onlineOnly";
 
 type Row = OnlineOperation & { retryable: boolean; mine: boolean };
@@ -58,6 +58,29 @@ export const UnresolvedOperationsSection = ({ isOwner }: { isOwner: boolean }) =
     void useDataStore.getState().loadData({ force: true });
   });
 
+  // Ask the server what became of it (086); nothing is sent.
+  const check = (row: Row) => act(async () => {
+    const result = await checkOnlineOperation(row.id).catch((err) => ({ absent: false, status: null, error: err }));
+    const label = LABELS[row.name] ?? row.name;
+    if (result.error) {
+      toast(outcomeToast(result.error, t, label, ""));
+      return;
+    }
+    if (result.absent || !result.status) {
+      toast({ variant: "info", title: t("unresolved", "checkUnavailable"), description: label });
+      return;
+    }
+    const key = {
+      committed: "checkCommitted", rejected: "checkRejected", abandoned: "checkAbandoned", not_found: "checkNotFound",
+      in_flight: "checkInFlight", unavailable: "checkUnavailable",
+    }[result.status.status] as "checkCommitted";
+    // "Applied" only when the till could settle it from the server's answer.
+    const settled = !(await listUnresolvedOnlineOperations()).some((o) => o.id === row.id);
+    const title = result.status.status === "committed" && !settled ? t("unresolved", "checkUnavailable") : t("unresolved", key);
+    toast({ variant: result.status.status === "committed" && settled ? "success" : "info", title, description: label });
+    if (result.status.status === "committed" && settled) void useDataStore.getState().loadData({ force: true });
+  });
+
   const verify = (row: Row) => act(async () => {
     await markOnlineOperationVerified(row.id);
     toast({ variant: "info", title: t("unresolved", "verified"), description: LABELS[row.name] ?? row.name });
@@ -85,6 +108,7 @@ export const UnresolvedOperationsSection = ({ isOwner }: { isOwner: boolean }) =
                 {!row.mine && <Badge tone="slate">{t("unresolved", "notMine")}</Badge>}
               </div>
               <div className="flex gap-2">
+                <Button size="sm" variant="secondary" onClick={() => void check(row)} disabled={busy}>{t("unresolved", "check")}</Button>
                 {row.mine && row.retryable && (
                   <Button size="sm" onClick={() => void retry(row)} disabled={busy}>{t("unresolved", "retry")}</Button>
                 )}

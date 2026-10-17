@@ -82,7 +82,8 @@ describe("dispatchTransfer flow", () => {
     await get().dispatchTransfer({ transferId: "tr-1" }).catch((e: Error) => expect(e.name).toBe("PendingConfirmationError"));
     const { localDb } = await import("../../../lib/localDb");
     const [row] = await localDb.syncOutbox.toArray();
-    expect(row).toMatchObject({ name: "dispatch_stock_transfer", status: "pending", inDoubt: true, idempotencyKey: rpc.mock.calls[0][1].p_idempotency_key });
+    // not staged here (no offline authorisation in this mock) -> held for confirmation, never resent
+    expect(row).toMatchObject({ name: "dispatch_stock_transfer", status: "conflict", fenceRequired: true, inDoubt: true, idempotencyKey: rpc.mock.calls[0][1].p_idempotency_key });
   });
 });
 

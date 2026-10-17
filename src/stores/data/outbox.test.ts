@@ -129,18 +129,20 @@ describe("drainOutbox", () => {
     expect(currentBackendOrigin()).toBe("http://127.0.0.1:54321");
   });
 
-  it("flags a server-rejected entry as a conflict and keeps draining the rest", async () => {
+  it("flags a refusal the server did not record (direct path) as a conflict that keeps the head of the queue", async () => {
     await enqueueOutbox({ kind: "rpc", name: "complete_sale", args: { n: 1 }, shopId: "shop-1" });
     await enqueueOutbox({ kind: "rpc", name: "adjust_stock", args: { n: 2 }, shopId: "shop-1" });
     rpc.mockResolvedValue({ data: null, error: { message: "Insufficient stock" } });
 
-    await drainOutbox();
+    expect(await drainOutbox()).toBe("backoff");
 
-    expect(rpc).toHaveBeenCalledTimes(2);
-    const entries = await localDb.syncOutbox.toArray();
-    expect(entries).toHaveLength(2);
-    expect(entries.every((e) => e.status === "conflict")).toBe(true);
-    expect(entries.every((e) => e.lastError === "Insufficient stock")).toBe(true);
+    expect(rpc).toHaveBeenCalledTimes(1);
+    const entries = (await localDb.syncOutbox.toArray()).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+    expect(entries[0]).toMatchObject({ status: "conflict", blocksQueue: true });
+    expect(entries[0].lastError).toMatch(/NOT recorded.*Insufficient stock/);
+    expect(entries[1].status).toBe("pending");                     // waits behind it
+    expect(await drainOutbox()).toBe("backoff");                   // never resent automatically
+    expect(rpc).toHaveBeenCalledTimes(1);
   });
 
   it("removes the entry once the server accepts it", async () => {
@@ -166,10 +168,20 @@ describe("drainOutbox", () => {
   });
 });
 
+
+/** A parent that created "shift-local-1" offline: committed on the server,
+ *  its reply not readable here yet (parked — the only bypassable entry), so
+ *  its child waits on the ref without the parent being dead. */
+async function parkedParent(): Promise<void> {
+  await enqueueOutbox({ kind: "rpc", name: "open_shift", args: { p_shop_id: "shop-1" }, shopId: "shop-1", provisional: [{ table: "shifts", ids: ["shift-local-1"] }] });
+  const parent = (await localDb.syncOutbox.toArray()).find((r) => r.name === "open_shift")!;
+  await localDb.syncOutbox.update(parent.localId, { heldReason: "committed-reply-unavailable", nextAttemptAt: new Date(Date.now() + 3_600_000).toISOString() });
+}
 describe("dependent entries (refs)", () => {
-  it("skips a blocked entry but still processes an unrelated ready one", async () => {
-    // e.g. a sale queued against a shift opened in the same offline session
-    // (still provisional) alongside an unrelated, independent adjustment.
+  it("an entry waiting on an unresolved ref keeps the head of the queue: a later entry never overtakes it", async () => {
+    // A later entry may depend on it without a ref (an adjustment of stock
+    // the sale moved, a close of the shift it belongs to).
+    await parkedParent();
     await enqueueOutbox({
       kind: "rpc", name: "complete_sale", args: { p_shift_id: "shift-local-1" }, shopId: "shop-1",
       refs: [{ field: "p_shift_id", provisionalId: "shift-local-1" }],
@@ -177,20 +189,20 @@ describe("dependent entries (refs)", () => {
     await enqueueOutbox({ kind: "rpc", name: "adjust_stock", args: { n: 1 }, shopId: "shop-1" });
     rpc.mockImplementation(async (name: string) => ({ data: validReply(name), error: null }));
 
-    await drainOutbox();
+    expect(await drainOutbox()).toBe("backoff");
 
-    expect(rpc).toHaveBeenCalledTimes(1);
-    expect(rpc).toHaveBeenCalledWith(
-      "adjust_stock",
-      { n: 1, p_expected_actor_id: null, p_idempotency_key: expect.any(String) },
-    );
-    const remaining = await localDb.syncOutbox.toArray();
-    expect(remaining).toHaveLength(1);
-    expect(remaining[0].name).toBe("complete_sale");
-    expect(remaining[0].status).toBe("pending"); // untouched, not a failed attempt
+    expect(rpc).not.toHaveBeenCalled();
+    const remaining = (await localDb.syncOutbox.toArray()).filter((r) => r.name !== "open_shift");
+    expect(remaining).toHaveLength(2);
+    expect(remaining.every((r) => r.status === "pending")).toBe(true); // untouched, not failed attempts
+    // once the parent's id is known, both go, in order
+    await recordIdMapping("shift-local-1", "shift-server-1");
+    await drainOutbox();
+    expect(rpc.mock.calls.map((c) => c[0])).toEqual(["complete_sale", "adjust_stock"]);
   });
 
   it("resolves and sends a dependent entry once its parent's real id is recorded", async () => {
+    await parkedParent();
     await enqueueOutbox({
       kind: "rpc", name: "complete_sale", args: { p_shift_id: "shift-local-1", p_paid_mmk: 5000 }, shopId: "shop-1",
       refs: [{ field: "p_shift_id", provisionalId: "shift-local-1" }],
@@ -208,12 +220,13 @@ describe("dependent entries (refs)", () => {
       "complete_sale",
       { p_shift_id: "shift-server-9", p_paid_mmk: 5000, p_idempotency_key: expect.any(String) },
     );
-    expect(await localDb.syncOutbox.count()).toBe(0);
+    expect((await localDb.syncOutbox.toArray()).filter((r) => r.name !== "open_shift")).toHaveLength(0);
   });
 });
 
 describe("stuck (permanently-blocked) entries", () => {
   it("leaves a recently-blocked entry pending, not flagged", async () => {
+    await parkedParent();
     await enqueueOutbox({
       kind: "rpc", name: "complete_sale", args: { p_shift_id: "shift-local-1" }, shopId: "shop-1",
       refs: [{ field: "p_shift_id", provisionalId: "shift-local-1" }],
@@ -221,24 +234,42 @@ describe("stuck (permanently-blocked) entries", () => {
 
     await drainOutbox();
 
-    const entries = await localDb.syncOutbox.toArray();
+    const entries = (await localDb.syncOutbox.toArray()).filter((r) => r.name !== "open_shift");
     expect(entries[0].status).toBe("pending");
   });
 
-  it("flags an entry blocked for over 24h as a conflict instead of leaving it pending forever", async () => {
+  it("an entry whose parent can never succeed (it is gone and left no real id) is flagged at once — no 24 h wait", async () => {
     await enqueueOutbox({
       kind: "rpc", name: "complete_sale", args: { p_shift_id: "shift-local-1" }, shopId: "shop-1",
       refs: [{ field: "p_shift_id", provisionalId: "shift-local-1" }],
     });
+    await drainOutbox();
     const [entry] = await localDb.syncOutbox.toArray();
+    expect(entry).toMatchObject({ status: "conflict", blocksQueue: true });
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("flags an entry blocked for over 24h as a conflict instead of leaving it pending forever", async () => {
+    await parkedParent();
+    await enqueueOutbox({
+      kind: "rpc", name: "complete_sale", args: { p_shift_id: "shift-local-1" }, shopId: "shop-1",
+      refs: [{ field: "p_shift_id", provisionalId: "shift-local-1" }],
+    });
+    const entry = (await localDb.syncOutbox.toArray()).find((r) => r.name === "complete_sale")!;
+    // created long ago, but only just started waiting: not flagged yet
+    await localDb.syncOutbox.update(entry.localId, { createdAt: new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString() });
+    await drainOutbox();
+    expect((await localDb.syncOutbox.get(entry.localId))!.status).toBe("pending");
+    // waiting for over 24h (since it FIRST waited)
     await localDb.syncOutbox.update(entry.localId, {
-      createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+      refWaitSince: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
     });
 
     await drainOutbox();
 
-    const [updated] = await localDb.syncOutbox.toArray();
+    const updated = (await localDb.syncOutbox.get(entry.localId))!;
     expect(updated.status).toBe("conflict");
+    expect(updated.blocksQueue).toBe(true);
     expect(updated.lastError).toMatch(/stuck/i);
     expect(rpc).not.toHaveBeenCalled(); // never actually attempted — it was never resolvable
   });

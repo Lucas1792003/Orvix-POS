@@ -91,7 +91,9 @@ export interface ReconciliationRecord {
 export interface ReconcileLogEntry {
   id: string;
   at: string;
-  event: "reconciled" | "refused" | "tamper-detected";
+  /** "owner-action": an owner's recovery action on an entry (Confirm with
+   *  server, set aside, restore) — audited, exported with the queue. */
+  event: "reconciled" | "refused" | "tamper-detected" | "owner-action";
   localId: string;
   recordId?: string;
   resolution?: ReconcileResolution;

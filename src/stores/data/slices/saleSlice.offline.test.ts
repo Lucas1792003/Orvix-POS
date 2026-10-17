@@ -227,7 +227,7 @@ describe("createSale offline", () => {
 
     expect(get().sales.find((s: { id: string }) => s.id === provisionalId)?.pendingSync).toBe(true);
     const entries = await localDb.syncOutbox.toArray();
-    expect(entries[0].status).toBe("conflict");
-    expect(entries[0].lastError).toBe("Insufficient stock for Tea Mix");
+    expect(entries[0]).toMatchObject({ status: "conflict", blocksQueue: true });   // not recorded on the server: not final
+    expect(entries[0].lastError).toMatch(/NOT recorded.*Insufficient stock for Tea Mix/);
   });
 });

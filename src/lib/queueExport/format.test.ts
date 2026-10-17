@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   KDF_ITERATIONS, MIN_KDF_ITERATIONS, QueueExportError, assertNoSecretValues, canonicalJson, decryptQueueExport,
   defaultExportFileName, encryptQueueExport, inQueueOrder, parseEnvelope, redactSecrets, summarize,
@@ -16,6 +17,7 @@ const entry = (over: Partial<QueueExportEntry>): QueueExportEntry => ({
   status: "pending", attempts: 0, lastErrorClass: null, lastError: null, nextAttemptAt: null, backendOrigin: "https://pos.example.test", quarantineReason: null,
   archivedAt: null, archivedBy: null, archiveReason: null, statusBeforeArchive: null,
   statusBeforeReconcile: null, reconciliation: null, reconcileRejected: null,
+  actorId: null, inDoubt: null, writeAhead: null, staged: null, fenceRequired: null, serverOutcome: null, heldReason: null, blocksQueue: null, dependencySince: null, refWaitSince: null,
   ...over,
 });
 
@@ -23,7 +25,7 @@ const payload = (entries: QueueExportEntry[] = [entry({})]): QueueExportPayload 
   format: "shwephala-queue-export", formatVersion: 1, appVersion: "1.0.16", exportedAt: "2026-10-13T02:00:00.000Z",
   tillId: "till-abc123", backendHost: "pos.example.test",
   session: { userId: "user-1", orgId: "org-1", shopId: "shop-1", role: "CASHIER" },
-  entries, provisionalIdMap: [], redactedFields: 0, reconciliationLog: [],
+  entries, provisionalIdMap: [], redactedFields: 0, reconciliationLog: [], onlineOperations: [],
 });
 
 async function flipCiphertextByte(text: string): Promise<string> {
@@ -41,6 +43,22 @@ describe("queue export encryption", () => {
     const env = await encryptQueueExport(p, PASS, FAST);
     const back = await decryptQueueExport(JSON.stringify(env), PASS);
     expect(back).toEqual(p);
+  });
+
+  it("086: carries the recovery state (actor, held, server decision); an export from an older build still reads (fields null)", async () => {
+    const held = entry({ seq: 3, opId: "outbox-3", status: "conflict", actorId: "user-1", inDoubt: true, writeAhead: true, staged: false, fenceRequired: true, heldReason: "needs-server-086" });
+    const decided = entry({ seq: 4, opId: "outbox-4", status: "conflict", actorId: "user-1", serverOutcome: "rejected" });
+    const p = payload([held, decided]);
+    expect(await decryptQueueExport(JSON.stringify(await encryptQueueExport(p, PASS, FAST)), PASS)).toEqual(p);
+    // as written by a pre-086 build: none of the recovery fields
+    const old = payload([entry({})]);
+    const stripped = { ...old, entries: old.entries.map((e) => {
+      const { actorId: _a, inDoubt: _b, writeAhead: _c, staged: _d, fenceRequired: _e, serverOutcome: _f, heldReason: _g, ...rest } = e;
+      void [_a, _b, _c, _d, _e, _f, _g];
+      return rest;
+    }) } as unknown as QueueExportPayload;
+    const back = await decryptQueueExport(JSON.stringify(await encryptQueueExport(stripped, PASS, FAST)), PASS);
+    expect(back.entries[0]).toMatchObject({ actorId: null, fenceRequired: null, serverOutcome: null });
   });
 
   it("uses PBKDF2-SHA-256 with 600k iterations, AES-256-GCM, random salt/iv by default", async () => {
@@ -155,5 +173,38 @@ describe("ordering, summary and file name", () => {
     expect(defaultExportFileName("till-ab12cd", new Date("2026-10-13T07:05:09.123Z")))
       .toBe("pending-queue-till-ab12cd-20261013-070509Z.spqx");
     expect(defaultExportFileName("../../etc", new Date("2026-10-13T07:05:09Z"))).toBe("pending-queue-etc-20261013-070509Z.spqx");
+  });
+});
+
+describe("format version 2 (migration 086 final pass)", () => {
+  const online = { id: "op-1", name: "pay_supplier_lump_sum", idempotencyKey: "k1", userId: "u", backendOrigin: "https://pos.example.test", createdAt: "2026-10-17T00:00:00Z", attempts: 1, uncertain: true, lastError: null, blocksReplacement: true };
+
+  it("writes version 2; the summary counts unresolved online-only operations (an export with ONLY such an operation is possible)", async () => {
+    const p = { ...payload([]), formatVersion: 2 as const, onlineOperations: [online] };
+    const env = await encryptQueueExport(p, PASS, FAST);
+    expect(env.formatVersion).toBe(2);
+    expect(env.header.summary).toMatchObject({ total: 1, onlineOperations: 1 });
+    const back = await decryptQueueExport(JSON.stringify(env), PASS);
+    expect(back.onlineOperations).toEqual([online]);
+  });
+
+  it("still reads a genuine version-1 file written by the HEAD build (ae51e69): 086 fields default to null, no online operations", async () => {
+    const file = readFileSync(new URL("./__fixtures__/v1-head.spqx.json", import.meta.url), "utf8");
+    expect(JSON.parse(file).formatVersion).toBe(1);
+    const back = await decryptQueueExport(file, PASS);
+    expect(back.entries[0]).toMatchObject({ opId: "outbox-1", fenceRequired: null, blocksQueue: null, actorId: null, serverOutcome: null });
+    expect(back.onlineOperations).toEqual([]);
+  });
+
+  it("refuses a version it does not know (and an older tool refuses version 2 the same way)", async () => {
+    const env = JSON.parse(JSON.stringify(await encryptQueueExport(payload(), PASS, FAST)));
+    env.formatVersion = 3;
+    await expect(decryptQueueExport(JSON.stringify(env), PASS)).rejects.toMatchObject({ code: "unsupported-version" });
+  });
+
+  it("a header summary that hides an online operation is detected (tampering)", async () => {
+    const env = JSON.parse(JSON.stringify(await encryptQueueExport({ ...payload([]), onlineOperations: [online] }, PASS, FAST)));
+    env.header.summary = { total: 0, byStatus: {}, byOpType: {} };
+    await expect(decryptQueueExport(JSON.stringify(env), PASS)).rejects.toThrow();
   });
 });

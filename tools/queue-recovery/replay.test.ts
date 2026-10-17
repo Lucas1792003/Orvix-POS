@@ -32,6 +32,10 @@ class FakeBackend {
       const shift = u.searchParams.get("shift_id")!.replace(/^eq\./, "");
       return json(200, this.sales.filter((s) => s.shift_id === shift).map((s) => ({ id: s.id })));
     }
+    // identity (as the server reports it) and the 086 probe: an 085 server
+    if (u.pathname.endsWith("/rpc/app_user_id")) return json(200, "user-1");
+    if (u.pathname.endsWith("/rpc/app_role")) return json(200, "CASHIER");
+    if (/\/rpc\/op_(status|execute)$/.test(u.pathname)) return json(404, { code: "PGRST202", message: "Could not find the function" });
     if (this.failNext) {
       const f = this.failNext;
       this.failNext = null;
@@ -83,6 +87,7 @@ const e = (over: Partial<QueueExportEntry> & { opType: string }): QueueExportEnt
     ringUpAt: null, status: "pending", attempts: 2, lastErrorClass: "transient", lastError: "Failed to fetch", nextAttemptAt: null,
     backendOrigin: ORIGIN, quarantineReason: null, archivedAt: null, archivedBy: null, archiveReason: null, statusBeforeArchive: null,
     statusBeforeReconcile: null, reconciliation: null, reconcileRejected: null,
+    actorId: null, inDoubt: null, writeAhead: null, staged: null, fenceRequired: null, serverOutcome: null, heldReason: null, blocksQueue: null, dependencySince: null, refWaitSince: null,
     ...over,
     payload: over.payload !== undefined ? over.payload : { ...(over.kind === "table_write" ? {} : { p_idempotency_key: key }) },
   };
@@ -102,7 +107,7 @@ function outageQueue(): QueueExportPayload {
     format: "shwephala-queue-export", formatVersion: 1, appVersion: "1.0.16", exportedAt: "2026-10-13T02:00:00Z",
     tillId: "till-abc", backendHost: "pos.example.test", session: { userId: "u", orgId: "o", shopId: "shop-1", role: "CASHIER" },
     // shuffled on purpose: the replay must follow seq, not array order
-    entries: [sales[2], cat, shift, sales[0], sales[1]], provisionalIdMap: [], redactedFields: 0, reconciliationLog: [],
+    entries: [sales[2], cat, shift, sales[0], sales[1]], provisionalIdMap: [], redactedFields: 0, reconciliationLog: [], onlineOperations: [],
   };
 }
 
@@ -119,7 +124,7 @@ describe("replayExport", () => {
       [1, "open_shift", "applied"], [2, "complete_sale", "applied"], [3, "complete_sale", "applied"],
       [4, "complete_sale", "applied"], [5, "categories.insert", "applied"],
     ]);
-    const rpcCalls = b.calls.filter((c) => c.url.includes("/rpc/"));
+    const rpcCalls = b.calls.filter((c) => c.url.includes("/rpc/") && !/\/rpc\/(app_user_id|app_role|op_status)$/.test(c.url));
     expect(rpcCalls.map((c) => (c.body as Record<string, unknown>).p_idempotency_key))
       .toEqual(p.entries.filter((x) => x.kind === "rpc").sort((x, y) => x.seq! - y.seq!).map((x) => x.idempotencyKey));
     expect(rpcCalls.slice(1).every((c) => (c.body as Record<string, unknown>).p_shift_id === "shift-real-1")).toBe(true);
@@ -162,25 +167,27 @@ describe("replayExport", () => {
     expect(b.sales).toHaveLength(3);
   });
 
-  it("reports permanent rejections, keeps going, and blocks entries that depend on a rejected one", async () => {
+  it("a refusal the server did not record (legacy direct path) STOPS the run like the till's queue: nothing later is replayed past it", async () => {
     const b = new FakeBackend();
     b.rejectRpc.add("open_shift");
     const r = await replayExport(outageQueue(), opts(b));
-    expect(r.ops.map((o) => o.outcome)).toEqual(["rejected", "blocked-unresolved-ref", "blocked-unresolved-ref", "blocked-unresolved-ref", "applied"]);
+    expect(r.ops.map((o) => o.outcome)).toEqual(["rejected", "not-attempted", "not-attempted", "not-attempted", "not-attempted"]);
     expect(r.ops[0].detail).toContain("Insufficient stock");
-    expect(r.ops[1].detail).toContain("did not succeed");
+    expect(r.stoppedOn).toBe("1");
     expect(b.sales).toHaveLength(0);
+    expect(b.categories.size).toBe(0);                                  // the later, unrelated write is not replayed past it either
+    expect(exitCodeFor(r)).toBe(4);
   });
 
-  it("treats IDEMPOTENCY_MISMATCH as a rejection, never a retry", async () => {
+  it("treats IDEMPOTENCY_MISMATCH as UNKNOWN (the server holds a decision under that key, possibly committed): never a retry, and the run stops", async () => {
     const b = new FakeBackend();
     const p = outageQueue();
     await replayExport(p, opts(b));
     const sale = p.entries.find((x) => x.seq === 2)!;
     sale.payload = { ...sale.payload, p_items: [{ productId: "p1", qty: 9 }] };
     const r = await replayExport(p, opts(b));
-    expect(r.ops.find((o) => o.seq === 2)).toMatchObject({ outcome: "rejected", httpStatus: 409 });
-    expect(r.stoppedOn).toBeNull();
+    expect(r.ops.find((o) => o.seq === 2)).toMatchObject({ outcome: "unknown", httpStatus: 409 });
+    expect(r.stoppedOn).toBe("2");
   });
 
   it("skips conflicts (unless asked), redacted payloads and entries without their original key", async () => {
@@ -192,7 +199,8 @@ describe("replayExport", () => {
     const s3 = p.entries.find((x) => x.seq === 3)!;
     s3.payload = { ...s3.payload, p_idempotency_key: undefined };
     const r = await replayExport(p, opts(b));
-    expect(r.ops.map((o) => o.outcome)).toEqual(["applied", "applied", "rejected", "skipped-redacted", "skipped-conflict"]);
+    // an entry without its original key cannot be replayed: the run stops there
+    expect(r.ops.map((o) => o.outcome)).toEqual(["applied", "applied", "rejected", "not-attempted", "not-attempted"]);
     expect(r.ops[2].detail).toContain("no original idempotency key");
     const p2 = outageQueue();
     p2.entries.find((x) => x.seq === 5)!.status = "conflict";
@@ -278,5 +286,249 @@ describe("target safety", () => {
     const f = confinedFetch(b.fetch, ORIGIN);
     expect(() => f("https://elsewhere.example.test/rest/v1/rpc/x")).toThrow(/outside the target origin/);
     await expect(f(`${ORIGIN}/rest/v1/sales?shift_id=eq.x`)).resolves.toBeInstanceOf(Response);
+  });
+});
+
+// ------------------------------------------------------------ migration 086 --
+/** An 086 server: op_execute runs a UUIDv7 key only for its own actor (the
+ *  caller), op_status looks up / fences, the legacy path refuses UUIDv7 keys. */
+class Fake086 {
+  me = "cash-a";
+  role = "CASHIER";
+  ledger = new Map<string, { state: "committed" | "rejected" | "abandoned"; response: unknown; actor: string | null }>();
+  sales = 0;
+  calls: { url: string; body: Record<string, unknown> }[] = [];
+  next: { status: number; body: unknown } | null = null;
+  fetch: typeof fetch = async (input, init) => {
+    const u = new URL(String(input));
+    const body = (init?.body ? JSON.parse(String(init.body)) : {}) as Record<string, unknown>;
+    this.calls.push({ url: u.pathname, body });
+    const json = (status: number, b: unknown) => new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
+    const rpc = /\/rpc\/(\w+)$/.exec(u.pathname)?.[1];
+    if (rpc === "app_user_id") return json(200, this.me);
+    if (rpc === "app_role") return json(200, this.role);
+    if (rpc === "op_status") {
+      const key = String(body.p_key);
+      const hit = this.ledger.get(key);
+      if (hit) return json(200, { status: hit.state, response: hit.response });
+      if (body.p_fence === true && (body.p_expected_actor_id === this.me || this.role === "ADMIN")) {
+        this.ledger.set(key, { state: "abandoned", response: null, actor: (body.p_expected_actor_id as string) ?? null });
+        return json(200, { status: "abandoned", fenced: true });
+      }
+      return json(200, body.p_fence === true ? { status: "not_found", fenced: false, reason: "not_authorized" } : { status: "not_found" });
+    }
+    if (rpc === "op_execute") {
+      if (body.p_actor_id !== this.me) return json(400, { code: "22023", message: "OP_ACTOR_MISMATCH: this operation belongs to another user" });
+      const key = String(body.p_key);
+      const hit = this.ledger.get(key);
+      if (hit) return json(200, { outcome: hit.state, replayed: true, response: hit.response });
+      if (this.next) { const n = this.next; this.next = null; return json(n.status, n.body); }
+      const response = { sale: { id: `sale-${++this.sales}` } };
+      this.ledger.set(key, { state: "committed", response, actor: this.me });
+      return json(200, { outcome: "committed", replayed: false, response });
+    }
+    if (rpc) {
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-7/.test(String(body.p_idempotency_key))) return json(400, { code: "22023", message: "OP_EXECUTOR_REQUIRED: this operation key must be executed through op_execute" });
+      this.sales++;
+      return json(200, { sale: { id: `sale-${this.sales}` } });
+    }
+    return json(404, { message: "not found" });
+  };
+}
+
+const v7 = (n: number) => `0190a000-0000-7000-8000-${String(n).padStart(12, "0")}`;
+function q086(entries: Partial<QueueExportEntry>[]): QueueExportPayload {
+  seq = 0;
+  return {
+    format: "shwephala-queue-export", formatVersion: 1, appVersion: "1.0.17", exportedAt: "2026-10-17T02:00:00Z",
+    tillId: "till-086", backendHost: "pos.example.test", session: { userId: "cash-a", orgId: "o", shopId: "shop-1", role: "CASHIER" },
+    entries: entries.map((over, i) => {
+      const key = over.idempotencyKey ?? v7(i + 1);
+      const x = e({ opType: "complete_sale", ...over, idempotencyKey: key });
+      x.payload = { p_shop_id: "shop-1", p_shift_id: "shift-1", p_items: [{ product_id: "p1", qty: i + 1 }], p_idempotency_key: key, ...(over.payload ?? {}) };
+      return x;
+    }),
+    provisionalIdMap: [], redactedFields: 0, reconciliationLog: [], onlineOperations: [],
+  };
+}
+const o086 = (b: Fake086, over: Record<string, unknown> = {}) => ({ target: ORIGIN, anonKey: "anon", accessToken: "t", fetchImpl: b.fetch, ...over });
+const sent = (b: Fake086, rpc: string) => b.calls.filter((c) => c.url.endsWith(`/rpc/${rpc}`));
+
+describe("replayExport against an 086 server (H3)", () => {
+  it("a UUIDv7 operation of the signed-in user runs through op_execute with the SERVER-reported actor; a re-run is replayed, never re-executed", async () => {
+    const b = new Fake086();
+    const p = q086([{ actorId: "cash-a" }]);
+    const r = await replayExport(p, o086(b));
+    expect(r.ops[0]).toMatchObject({ outcome: "applied", resultId: "sale-1" });
+    expect(r.signedInAs).toEqual({ userId: "cash-a", role: "CASHIER" });
+    expect(sent(b, "op_execute")[0].body).toMatchObject({ p_key: v7(1), p_rpc: "complete_sale", p_actor_id: "cash-a" });
+    expect(sent(b, "op_execute")[0].body.p_args).not.toHaveProperty("p_idempotency_key");
+    expect(sent(b, "complete_sale")).toHaveLength(0);
+    const again = await replayExport(q086([{ actorId: "cash-a" }]), o086(b));
+    expect(again.ops[0].outcome).toBe("already-applied");
+    expect(b.sales).toBe(1);
+  });
+
+  it("another user's UUIDv7 operation is never run or fenced in this session: looked up, HELD, and the run stops (ordering)", async () => {
+    const b = new Fake086();
+    b.me = "admin-1";
+    b.role = "ADMIN";
+    const r = await replayExport(q086([{ actorId: "cash-a" }, { actorId: "admin-1" }]), o086(b));
+    expect(r.ops.map((o) => o.outcome)).toEqual(["held", "not-attempted"]);
+    expect(r.stoppedOn).toBe("1");
+    expect(sent(b, "op_execute")).toHaveLength(0);
+    expect(sent(b, "op_status").filter((c) => c.body.p_fence === true)).toHaveLength(0);
+    expect(b.ledger.size).toBe(0);
+    expect(exitCodeFor(r)).toBe(4);
+  });
+
+  it("a HELD entry (fenceRequired) is never replayed: looked up and fenced; an earlier commit is reported instead", async () => {
+    const b = new Fake086();
+    b.ledger.set(v7(2), { state: "committed", response: { sale: { id: "sale-earlier" } }, actor: "cash-a" });
+    const r = await replayExport(q086([
+      { actorId: "cash-a", status: "conflict", fenceRequired: true },
+      { actorId: "cash-a", status: "conflict", fenceRequired: true },
+    ]), o086(b));
+    expect(r.ops.map((o) => o.outcome)).toEqual(["abandoned", "already-applied"]);
+    expect(r.ops[1].resultId).toBe("sale-earlier");
+    expect(sent(b, "op_execute")).toHaveLength(0);
+    expect(sent(b, "complete_sale")).toHaveLength(0);
+    expect(b.ledger.get(v7(1))!.state).toBe("abandoned");
+  });
+
+  it("a held entry on a server WITHOUT 086 is held (never replayed) and stops the run", async () => {
+    const b = new FakeBackend();
+    seq = 0;
+    const held = e({ opType: "complete_sale", status: "conflict", fenceRequired: true, actorId: "u" });
+    const later = e({ opType: "complete_sale" });
+    const r = await replayExport({ ...outageQueue(), entries: [held, later] }, opts(b));
+    expect(r.ops.map((o) => o.outcome)).toEqual(["held", "not-attempted"]);
+    expect(b.calls.filter((c) => /\/rpc\/complete_sale$/.test(c.url))).toHaveLength(0);
+  });
+
+  it("an entry the server already decided is reported from the till's record and never sent", async () => {
+    const b = new Fake086();
+    const r = await replayExport(q086([{ actorId: "cash-a", status: "conflict", serverOutcome: "rejected", lastError: "Refused by the server (final): Insufficient stock" }]), o086(b));
+    expect(r.ops[0]).toMatchObject({ outcome: "rejected-final" });
+    expect(b.calls).toHaveLength(0);
+  });
+
+  it("a refusal the server did NOT record (dependency / unclassified) is never final and stops the run", async () => {
+    const b = new Fake086();
+    b.next = { status: 400, body: { code: "P0001", message: "Shift not found", hint: "op_not_recorded:dependency" } };
+    const r1 = await replayExport(q086([{ actorId: "cash-a" }, { actorId: "cash-a" }]), o086(b));
+    expect(r1.ops.map((o) => o.outcome)).toEqual(["held", "not-attempted"]);
+    b.next = { status: 400, body: { code: "22012", message: "division by zero", hint: "op_not_recorded:unclassified" } };
+    const r2 = await replayExport(q086([{ actorId: "cash-a" }]), o086(b));
+    expect(r2.ops[0].outcome).toBe("unknown");
+    expect(r2.stoppedOn).toBe("1");
+    // the same key later commits once
+    const r3 = await replayExport(q086([{ actorId: "cash-a" }]), o086(b));
+    expect(r3.ops[0].outcome).toBe("applied");
+  });
+
+  it("OP_EXECUTOR_REQUIRED on the legacy path is never a final refusal", async () => {
+    const b = new Fake086();
+    const f: typeof fetch = async (input, init) => (/\/rpc\/op_status$/.test(new URL(String(input)).pathname)
+      ? new Response(JSON.stringify({ code: "PGRST202", message: "Could not find the function" }), { status: 404 })
+      : b.fetch(input, init));
+    const r = await replayExport(q086([{ actorId: "cash-a" }]), o086(b, { fetchImpl: f }));
+    expect(r.ops[0].outcome).toBe("unknown");
+    expect(r.ops[0].detail).toMatch(/executor/);
+    expect(b.sales).toBe(0);
+  });
+
+  it("a UUIDv4 (older till) operation keeps the direct path on an 086 server", async () => {
+    const b = new Fake086();
+    const r = await replayExport(q086([{ idempotencyKey: "00000000-0000-4000-8000-000000000001" }]), o086(b));
+    expect(r.ops[0].outcome).toBe("accepted");
+    expect(sent(b, "complete_sale")).toHaveLength(1);
+    expect(sent(b, "op_execute")).toHaveLength(0);
+  });
+});
+
+describe("recovery tool actor safety on the legacy path (F)", () => {
+  it("another user's UUIDv4 entry is HELD on an 086 server (never run in this session) and the run stops", async () => {
+    const b = new Fake086();
+    const p = q086([
+      { idempotencyKey: "00000000-0000-4000-8000-000000000011", actorId: "cash-b" },
+      { idempotencyKey: "00000000-0000-4000-8000-000000000012", actorId: "cash-a" },
+    ]);
+    const r = await replayExport(p, o086(b));
+    expect(r.ops.map((o) => o.outcome)).toEqual(["held", "not-attempted"]);
+    expect(sent(b, "complete_sale")).toHaveLength(0);
+    expect(b.sales).toBe(0);
+  });
+
+  it("on an 085 server too: another user's entry (v4 or v7) is held; the signed-in user's own runs", async () => {
+    const b = new FakeBackend();
+    seq = 0;
+    const own = e({ opType: "categories.insert", kind: "table_write", table: "categories", tableOp: "insert", rowId: "c-own", idempotencyKey: null, payload: { id: "c-own", name: "x" } });
+    const other = e({ opType: "complete_sale", actorId: "someone-else" });
+    other.payload = { p_shop_id: "shop-1", p_shift_id: "s", p_items: [], p_idempotency_key: other.idempotencyKey };
+    const r = await replayExport({ ...outageQueue(), entries: [own, other] }, opts(b));
+    expect(r.executor).toBe("absent");
+    expect(r.ops.map((o) => o.outcome)).toEqual(["applied", "held"]);
+    expect(b.calls.filter((c) => /\/rpc\/complete_sale$/.test(c.url))).toHaveLength(0);
+  });
+
+  it("the server's own 'queued by a different user' refusal (055) is reported held and stops the run — never a final rejection", async () => {
+    const b = new FakeBackend();
+    seq = 0;
+    const x = e({ opType: "complete_sale" });
+    x.payload = { p_shop_id: "shop-1", p_shift_id: "s", p_items: [], p_idempotency_key: x.idempotencyKey };
+    const y = e({ opType: "complete_sale" });
+    b.failNext = { status: 400, body: { code: "P0001", message: "This offline action was queued by a different user — reconnect as them to sync it" } };
+    const r = await replayExport({ ...outageQueue(), entries: [x, y] }, opts(b));
+    expect(r.ops.map((o) => o.outcome)).toEqual(["held", "not-attempted"]);
+  });
+});
+
+describe("recovery tool: blocking conflicts, undecided skips, backend binding, online operations (payment-safety pass)", () => {
+  it("a conflict the server never decided (blocksQueue) stops the run — later entries are not replayed past it", async () => {
+    const b = new FakeBackend();
+    const p = outageQueue();
+    const first = p.entries.find((x) => x.seq === 1)!;
+    Object.assign(first, { status: "conflict", blocksQueue: true, lastError: "Refused, not recorded" });
+    const r = await replayExport(p, opts(b));
+    expect(r.ops[0]).toMatchObject({ seq: 1, outcome: "held" });
+    expect(r.ops.slice(1).every((o) => o.outcome === "not-attempted")).toBe(true);
+    expect(b.calls.filter((c) => c.method === "POST" && /\/rpc\/(open_shift|complete_sale)$/.test(c.url))).toHaveLength(0);
+    expect(exitCodeFor(r)).toBe(4);
+  });
+
+  it("a SKIPPED entry whose outcome is not decided (set aside, in doubt) means the recovery is NOT done (exit 4)", async () => {
+    const b = new FakeBackend();
+    const p = outageQueue();
+    const cat = p.entries.find((x) => x.opType === "categories.insert")!;
+    Object.assign(cat, { status: "archived", statusBeforeArchive: "syncing", inDoubt: true });
+    const r = await replayExport(p, opts(b));
+    expect(r.undecidedSkipped).toBe(1);
+    expect(exitCodeFor(r)).toBe(4);
+  });
+
+  it("an entry queued for ANOTHER backend is never looked up, fenced or executed against the target; a never-doubted one is replayed only with --confirm-host", async () => {
+    const b = new Fake086();
+    const p = q086([{ actorId: "cash-a", status: "conflict", fenceRequired: true, backendOrigin: "https://old.example.test" }]);
+    const r = await replayExport(p, o086(b));
+    expect(r.ops[0]).toMatchObject({ outcome: "held" });
+    expect(b.calls.filter((c) => /op_status|op_execute/.test(c.url) && (c.body as Record<string, unknown>).p_key === p.entries[0].idempotencyKey)).toHaveLength(0);
+    const b2 = new FakeBackend();
+    seq = 0;
+    const clean = e({ opType: "categories.insert", kind: "table_write", table: "categories", tableOp: "insert", rowId: "c9", idempotencyKey: null, payload: { id: "c9", name: "x" }, backendOrigin: "https://old.example.test" });
+    expect((await replayExport({ ...outageQueue(), entries: [clean] }, opts(b2))).ops[0].outcome).toBe("held");
+    expect((await replayExport({ ...outageQueue(), entries: [clean] }, opts(b2, { otherBackendConfirmed: true }))).ops[0].outcome).toBe("applied");
+    const doubted = { ...clean, opId: "x2", rowId: "c10", payload: { id: "c10", name: "y" }, inDoubt: true };
+    expect((await replayExport({ ...outageQueue(), entries: [doubted] }, opts(b2, { otherBackendConfirmed: true }))).ops[0].outcome).toBe("held");
+  });
+
+  it("unresolved online-only operations in the file are reported (never replayed) and the recovery is not done", async () => {
+    const b = new FakeBackend();
+    const p = { ...outageQueue(), onlineOperations: [{ id: "op-1", name: "pay_supplier_lump_sum", idempotencyKey: "k1", userId: "u", backendOrigin: ORIGIN, createdAt: "2026-10-17T00:00:00Z", attempts: 1, uncertain: true, lastError: null }] };
+    const r = await replayExport(p, opts(b));
+    expect(r.onlineUnresolved).toBe(1);
+    expect(r.ops.at(-1)).toMatchObject({ opType: "pay_supplier_lump_sum", outcome: "held" });
+    expect(b.calls.some((c) => /pay_supplier_lump_sum/.test(c.url))).toBe(false);
+    expect(exitCodeFor(r)).toBe(4);
   });
 });

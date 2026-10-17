@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CartItem } from "../../types";
 
@@ -21,10 +21,12 @@ import { createInventorySlice } from "./slices/inventorySlice";
 import { createSaleSlice } from "./slices/saleSlice";
 import { drainOutbox, registerOutboxReconciler, simulateNewAppInstanceForTests } from "./outbox";
 import { resetWriteAheadForTests } from "./writeAhead";
+import { setExecutorCapabilityForTests } from "./idempotentRpc";
 import { resetOnlineOnlyForTests } from "./onlineOnly";
 import { inventoryRealtimeSessionForTests, subscribeInventoryRealtime, type InventoryRealtimeHandle } from "./inventoryRealtime";
 import { useSyncStore } from "../syncStore";
 import { useAppStore } from "../appStore";
+import { useAuthStore } from "../authStore";
 import { localDb } from "../../lib/localDb";
 
 const TEST_AUTH_ID = "auth-test-user";
@@ -111,6 +113,7 @@ const live = async (get: Store["get"]) => {
 
 beforeEach(async () => {
   fake.reset();
+  setExecutorCapabilityForTests("absent");
   fake.server.inventory.set("shop-1:p1", 10);
   await Promise.all(localDb.tables.map((t) => t.clear()));
   await localDb.inventory.put({ shopId: "shop-1", productId: "p1", qtyBaseUnits: 10 });
@@ -165,17 +168,34 @@ describe("D-NEW-1: queued (not sent) operations", () => {
     expect(await localDb.syncOutbox.count()).toBe(1);
   });
 
-  it("a definitive refusal releases the deduction (the server moved no stock)", async () => {
+  it("a refusal the server RECORDED (086) releases the deduction (the server moved no stock and never will)", async () => {
+    fake.enableExecutor();
+    setExecutorCapabilityForTests("available");
+    useAuthStore.setState({ currentUserId: "user-1" });     // a UUIDv7 operation runs only for its actor
+    fake.setCaller("user-1");
+    onTestFinished(() => useAuthStore.setState({ currentUserId: null }));
     const { get } = makeStore();
     await sellOffline(get, 2);
     expect(qty(get)).toBe(8);
     fake.setDefaultMode("permanent-error");
     await drainOutbox();
     const [entry] = await localDb.syncOutbox.toArray();
-    expect(entry.status).toBe("conflict");
+    expect(entry).toMatchObject({ status: "conflict", serverOutcome: "rejected" });
     await settleStock(get);
     expect(qty(get)).toBe(10);
     expect(await mirrored()).toBe(10);
+  });
+
+  it("a refusal the server did NOT record (server without 086) keeps the deduction reserved — it could still run if retried", async () => {
+    const { get } = makeStore();
+    await sellOffline(get, 2);
+    fake.setDefaultMode("permanent-error");
+    expect(await drainOutbox()).toBe("backoff");
+    const [entry] = await localDb.syncOutbox.toArray();
+    expect(entry).toMatchObject({ status: "conflict", blocksQueue: true });
+    expect(entry.serverOutcome).toBeUndefined();
+    await settleStock(get);
+    expect(qty(get)).toBe(8);
   });
 });
 
@@ -253,7 +273,10 @@ describe("D-NEW-1: outcome unknown (in doubt)", () => {
     expect(unconfirmed(get)).toEqual({});
   });
 
-  it("crash after the server commit, before any local staging: the effect is derived from the queued arguments", async () => {
+  it("crash after the server commit, before any local staging: the effect is derived from the queued arguments (086: settled by lookup)", async () => {
+    (await import("../authStore")).useAuthStore.setState({ currentUserId: "user-1" });
+    fake.enableExecutor();
+    setExecutorCapabilityForTests("available");
     const first = makeStore();
     fake.queueModes("commit-then-hang");
     void sell(first.get, 2); // committed on the server; this instance never hears back
@@ -268,7 +291,8 @@ describe("D-NEW-1: outcome unknown (in doubt)", () => {
     expect(unconfirmed(get)).toEqual({ "shop-1|p1": 2 });
 
     expect(await drainOutbox()).toBe("drained");
-    expect(fake.server.executions.complete_sale).toBe(1); // replayed, not re-sold
+    expect(fake.server.executions.complete_sale).toBe(1); // looked up, not re-sold
+    expect(fake.callsFor("op_execute")).toHaveLength(1);
     await settleStock(get);
     expect(qty(get)).toBe(8);
     expect(unconfirmed(get)).toEqual({});
@@ -318,11 +342,13 @@ describe("queue data stays readable by v1.0.16", () => {
 
   it("every row the new lifecycle writes has the v1.0.16 shape and a v1.0.16 status", async () => {
     const { get } = makeStore();
-    await sellOffline(get, 1);                 // pending
-    fake.queueModes("commit-then-timeout");
-    await sellInDoubt(get, 2);                 // pending + inDoubt
+    // (an online sale queues behind unsent entries, so the online ones first)
     fake.queueModes("commit-then-hang");
     void sell(get, 3);                         // syncing write-ahead
+    await vi.waitFor(async () => expect(await localDb.syncOutbox.count()).toBe(1));
+    fake.queueModes("commit-then-timeout");
+    await sellInDoubt(get, 2);                 // pending + inDoubt
+    await sellOffline(get, 1);                 // pending
     await vi.waitFor(async () => expect(await localDb.syncOutbox.count()).toBe(3));
     for (const row of await localDb.syncOutbox.toArray()) {
       expect(V1016_STATUSES).toContain(row.status);

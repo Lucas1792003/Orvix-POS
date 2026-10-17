@@ -17,7 +17,13 @@
 import { z } from "zod";
 
 export const QUEUE_EXPORT_FORMAT = "shwephala-queue-export";
-export const QUEUE_EXPORT_FORMAT_VERSION = 1;
+/** 2 (migration 086 final pass): the 086 recovery fields (actor, held,
+ *  server decision, blocking), the owner-action log and the unresolved
+ *  online-only operations are SAFETY-CRITICAL — an older tool must refuse
+ *  such a file (it rejects any version above its own) rather than silently
+ *  drop them. Files of version 1 are still read. */
+export const QUEUE_EXPORT_FORMAT_VERSION = 2;
+export const SUPPORTED_FORMAT_VERSIONS: readonly number[] = [1, 2];
 export const QUEUE_EXPORT_FILE_EXTENSION = "spqx";
 /** OWASP 2023 guidance for PBKDF2-HMAC-SHA-256. */
 export const KDF_ITERATIONS = 600_000;
@@ -82,7 +88,7 @@ const reconciliationSchema = z.object({
 const reconcileLogSchema = z.object({
   id: z.string(),
   at: z.string(),
-  event: z.enum(["reconciled", "refused", "tamper-detected"]),
+  event: z.enum(["reconciled", "refused", "tamper-detected", "owner-action"]),
   localId: z.string(),
   detail: z.string(),
 }).passthrough();
@@ -142,13 +148,52 @@ const entrySchema = z.object({
   reconciliation: reconciliationSchema.nullable().default(null),
   /** RC3: a reconciliation rejected by the till's integrity check. */
   reconcileRejected: z.object({ detectedAt: z.string(), reason: z.string(), record: z.unknown() }).nullable().default(null),
+  /** Migration 086 (G1 Stage 1) recovery state — additive, null in older
+   *  exports. `actorId`: the app user who created the operation (a UUIDv7
+   *  operation runs only for that user). `fenceRequired`: held — its outcome
+   *  must be ASKED (op_status lookup + fence), it is never replayed.
+   *  `serverOutcome`: the server already decided it (final). An older
+   *  recovery tool drops these fields; held entries are stored as
+   *  "conflict", which every older tool skips unless --include-conflicts. */
+  actorId: z.string().nullable().default(null),
+  inDoubt: z.boolean().nullable().default(null),
+  writeAhead: z.boolean().nullable().default(null),
+  staged: z.boolean().nullable().default(null),
+  fenceRequired: z.boolean().nullable().default(null),
+  serverOutcome: z.enum(["rejected", "abandoned"]).nullable().default(null),
+  heldReason: z.string().nullable().default(null),
+  /** A conflict the server has NOT decided: it blocks later entries (the
+   *  recovery tool stops at it). Plus when it first waited (dependency
+   *  refusal / unresolved ref). Additive, null in older exports. */
+  blocksQueue: z.boolean().nullable().default(null),
+  dependencySince: z.string().nullable().default(null),
+  refWaitSince: z.string().nullable().default(null),
 });
+
+/** An unresolved ONLINE-only operation (supplier payment, void, refund
+ *  request, …): never queued, so it is not an entry — but it may have been
+ *  applied. Exported so a recovery never reports "all done" while one is
+ *  open. Identity, backend and outcome state only. */
+const onlineOperationSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  idempotencyKey: z.string().nullable(),
+  userId: z.string().nullable(),
+  backendOrigin: z.string().nullable(),
+  createdAt: z.string(),
+  attempts: z.number().int().min(0),
+  uncertain: z.boolean(),
+  lastError: z.string().nullable(),
+  /** It may have been applied: a replacement of it is refused until the
+   *  server (or an owner) decides it. */
+  blocksReplacement: z.boolean().default(true),
+}).passthrough();
 
 export type QueueExportEntry = z.infer<typeof entrySchema>;
 
 const payloadSchema = z.object({
   format: z.literal(QUEUE_EXPORT_FORMAT),
-  formatVersion: z.literal(QUEUE_EXPORT_FORMAT_VERSION),
+  formatVersion: z.union([z.literal(1), z.literal(2)]),
   appVersion: z.string(),
   exportedAt: z.string(),
   tillId: z.string(),
@@ -167,12 +212,16 @@ const payloadSchema = z.object({
   redactedFields: z.number().int().min(0),
   /** RC3: the till's local reconciliation log (absent in older files). */
   reconciliationLog: z.array(reconcileLogSchema).default([]),
+  onlineOperations: z.array(onlineOperationSchema).default([]),
 });
 
 export type QueueExportPayload = z.infer<typeof payloadSchema>;
 
 const summarySchema = z.object({
+  /** Queue entries + unresolved online-only operations. */
   total: z.number().int().min(0),
+  /** Unresolved online-only operations (absent when none, and in version 1). */
+  onlineOperations: z.number().int().min(0).optional(),
   byStatus: z.record(z.number().int().min(0)),
   byOpType: z.record(z.number().int().min(0)),
 });
@@ -210,14 +259,14 @@ export type QueueExportEnvelope = z.infer<typeof envelopeSchema>;
 
 // --------------------------------------------------------------- helpers --
 
-export function summarize(entries: readonly Pick<QueueExportEntry, "status" | "opType">[]): QueueExportSummary {
+export function summarize(entries: readonly Pick<QueueExportEntry, "status" | "opType">[], onlineOperations = 0): QueueExportSummary {
   const byStatus: Record<string, number> = {};
   const byOpType: Record<string, number> = {};
   for (const e of entries) {
     byStatus[e.status] = (byStatus[e.status] ?? 0) + 1;
     byOpType[e.opType] = (byOpType[e.opType] ?? 0) + 1;
   }
-  return { total: entries.length, byStatus, byOpType };
+  return { total: entries.length + onlineOperations, byStatus, byOpType, ...(onlineOperations > 0 ? { onlineOperations } : {}) };
 }
 
 /** JSON with object keys sorted at every level — the AES-GCM additional data. */
@@ -353,7 +402,7 @@ export async function encryptQueueExport(
       appVersion: valid.appVersion,
       exportedAt: valid.exportedAt,
       tillId: valid.tillId,
-      summary: summarize(valid.entries),
+      summary: summarize(valid.entries, valid.onlineOperations.length),
     },
     kdf: { name: "PBKDF2", hash: "SHA-256", iterations, salt: toBase64(salt) },
     cipher: { name: "AES-GCM", keyBits: 256, tagBits: 128, iv: toBase64(iv) },
@@ -378,7 +427,7 @@ export function parseEnvelope(input: string | unknown): QueueExportEnvelope {
   if (!v || typeof v !== "object" || v.format !== QUEUE_EXPORT_FORMAT) {
     throw new QueueExportError("bad-format", "Not a Shwe Pha La queue export file.");
   }
-  if (typeof v.formatVersion === "number" && v.formatVersion > QUEUE_EXPORT_FORMAT_VERSION) {
+  if (typeof v.formatVersion === "number" && (v.formatVersion > QUEUE_EXPORT_FORMAT_VERSION || !SUPPORTED_FORMAT_VERSIONS.includes(v.formatVersion))) {
     throw new QueueExportError("unsupported-version", `Export format ${v.formatVersion} is newer than this tool supports (${QUEUE_EXPORT_FORMAT_VERSION}).`);
   }
   const parsed = envelopeSchema.safeParse(value);
@@ -386,7 +435,7 @@ export function parseEnvelope(input: string | unknown): QueueExportEnvelope {
     const first = parsed.error.issues[0];
     throw new QueueExportError("bad-format", `Export envelope is invalid at ${first?.path.join(".") || "(root)"}: ${first?.message ?? "schema"}`);
   }
-  if (parsed.data.formatVersion !== QUEUE_EXPORT_FORMAT_VERSION) {
+  if (!SUPPORTED_FORMAT_VERSIONS.includes(parsed.data.formatVersion)) {
     throw new QueueExportError("unsupported-version", `Unsupported export format version ${parsed.data.formatVersion}.`);
   }
   if (parsed.data.kdf.iterations < MIN_KDF_ITERATIONS) {
@@ -417,7 +466,7 @@ export async function decryptQueueExport(input: string | unknown, passphrase: st
   }
   const payload = validatePayload(value);
   // The clear summary is authenticated, but check it describes this payload.
-  if (canonicalJson(summarize(payload.entries)) !== canonicalJson(env.header.summary)) {
+  if (canonicalJson(summarize(payload.entries, payload.onlineOperations.length)) !== canonicalJson(env.header.summary)) {
     throw new QueueExportError("bad-format", "The file's summary does not match its contents.");
   }
   return payload;

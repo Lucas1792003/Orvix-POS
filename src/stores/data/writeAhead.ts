@@ -1,12 +1,13 @@
 import { localDb, type SyncOutboxEntry } from "../../lib/localDb";
+import { belongsToBackend, currentBackendOrigin } from "../../lib/backendOrigin";
 import type { InventoryMovement } from "../../types";
-import { classifyFailure } from "../../lib/failureClass";
+import { classifyFailure, failureInfo } from "../../lib/failureClass";
 import { appliedLedger, flushStockCommit, noteStagedStock, snapshotStock } from "./stockLedger";
 import {
   acknowledgeEntry, buildOutboxRow, clearWriteAheadInFlight, discardWriteAhead, drainOutbox, markWriteAheadInFlight,
-  notifyQueueChanged, persistStaged,
+  blockingEarlierWork, NOT_YET_CONFIRMED_TEXT, notifyQueueChanged, persistStaged, settleBeforeReplacement,
 } from "./outbox";
-import { callRpc, RpcError, stampOperationArgs, type OperationContext } from "./idempotentRpc";
+import { callRpc, currentActorId, RpcError, stampOperationArgs, type OperationContext } from "./idempotentRpc";
 import { replyProblem } from "./replyShapes";
 import type { LocalRowBatch } from "./localWrites";
 import {
@@ -154,11 +155,19 @@ export const intentOf = (name: string, args: Record<string, unknown>): string =>
   return `${name}:${canonical(rest)}`;
 };
 
-/** Durable rows of this operation whose outcome is still unknown. */
+/** Every earlier attempt of the same intent whose outcome nobody has
+ *  established — whatever its queue status (H1): sending or in doubt,
+ *  HELD for lookup ("conflict" + fenceRequired), parked, or set aside by an
+ *  owner before the server decided it. Only a server decision (committed ->
+ *  reconciled and gone; rejected / abandoned -> serverOutcome) ends it. */
 async function unresolvedTwins(name: string, intent: string): Promise<SyncOutboxEntry[]> {
-  const rows = await localDb.syncOutbox.where("status").anyOf("pending", "syncing", "failed").toArray();
-  return rows.filter((r) => r.kind === "rpc" && r.name === name && r.writeAhead === true
-    && (r.status === "syncing" || r.inDoubt === true) && intentOf(name, r.args ?? {}) === intent);
+  // "quarantined": an attempt queued for another backend still counts — this
+  // server cannot tell whether that one ran (it always blocks a replacement).
+  const rows = await localDb.syncOutbox.where("status").anyOf("pending", "syncing", "failed", "conflict", "archived", "quarantined").toArray();
+  return rows.filter((r) => r.kind === "rpc" && r.name === name && !r.serverOutcome
+    && (r.writeAhead === true || r.fenceRequired === true)
+    && (r.status === "syncing" || r.inDoubt === true || r.fenceRequired === true || r.statusBeforeArchive === "syncing")
+    && intentOf(name, r.args ?? {}) === intent);
 }
 
 export const describeEntry = (entry: SyncOutboxEntry): UnresolvedOperationInfo => {
@@ -199,6 +208,40 @@ async function guardedRun<T>(spec: OfflineCapableSpec<T>, args: Record<string, u
         "An earlier attempt of this operation is still awaiting confirmation. Nothing was sent.", twins.map(describeEntry),
       );
     }
+    // G1 Stage 1: a replacement only once every earlier attempt is known not
+    // to have happened — asked, and stopped on the server (fenced) if it
+    // never arrived. If one DID happen, it is recorded instead.
+    // The twins as they were when the person was asked: durable references
+    // (key, arguments, backend), re-checked with the server even if a row
+    // disappears meanwhile (stabilization A).
+    const origin = currentBackendOrigin();
+    if (twins.some((t) => t.status === "quarantined" || !belongsToBackend(t, origin))) {
+      throw new UnresolvedOperationError(
+        "An earlier attempt was queued for another server. This server cannot tell whether it was applied there, so nothing new was entered. Export it for the owner to check against that server.",
+        twins.map(describeEntry),
+      );
+    }
+    const settled = await settleBeforeReplacement(twins);
+    if (settled === "committed") {
+      throw new PendingConfirmationError(
+        "The earlier attempt reached the server and has now been recorded on this till. Nothing new was entered — do not ring it up again.",
+      );
+    }
+    if (settled !== "proceed") {
+      throw new UnresolvedOperationError(
+        "The earlier attempt could not be confirmed or stopped with the server right now. Nothing new was entered; it is kept with its original key — try again when the server can be reached.",
+        twins.map(describeEntry),
+      );
+    }
+    // Every earlier attempt is now decided on the server. Another attempt
+    // that appeared meanwhile (another window) is not: nothing new.
+    const again = await unresolvedTwins(spec.name, intent);
+    if (again.length) {
+      throw new UnresolvedOperationError(
+        "Another attempt of this operation appeared while the earlier one was being confirmed. Nothing new was entered.",
+        again.map(describeEntry),
+      );
+    }
   }
   return run(spec, args);
 }
@@ -227,8 +270,26 @@ async function run<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>
   const offline = typeof navigator !== "undefined" && navigator.onLine === false;
   if (offline || spec.needsProvisionalRefs) {
     return stageAndCommit(spec, "offline", (entry) => ({
-      put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey }),
+      put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey }, { staged: true }),
     }));
+  }
+  // An online operation never overtakes an unsent entry of this till that it
+  // may depend on (a close before its queued sales, a sale before a queued
+  // restock — entries being sent right now included). It is queued behind
+  // them under the offline rules; if those refuse it, nothing is sent.
+  // Entries it is proven independent of (dependencies.ts) do not hold it.
+  if ((await blockingEarlierWork({ kind: "rpc", name: spec.name, args, shopId: spec.shopId, actorId: currentActorId() })).length) {
+    let result: T;
+    try {
+      result = await stageAndCommit(spec, "offline", (entry) => ({
+        put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey }, { staged: true }),
+      }));
+    } catch (err) {
+      throw new Error(`Not sent: earlier entries on this till have not reached the server yet, and this cannot be queued behind them (${
+        err instanceof Error ? err.message : String(err)}). Let the queue finish (Sync), then try again.`);
+    }
+    void drainOutbox().catch(() => undefined);
+    return result;
   }
 
   // 1. Write-ahead: durable BEFORE the first request. The in-flight mark
@@ -260,6 +321,14 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
   // 2. One attempt, bounded; the reply must have the expected shape.
   const outcome = await callRpc(spec.name, args);
   let error: RpcError | null = outcome.error;
+  if (!error && outcome.responseUnavailable) {
+    // Committed on the server, but this till cannot read the reply (086
+    // withholds another user's reply; a purged one is gone). Not guessed:
+    // kept as unconfirmed; the queue reconciles it by a verified reload.
+    error = new RpcError(`The server applied ${spec.name}, but its reply is not readable on this till`, {
+      status: outcome.status, code: "REPLY_UNAVAILABLE", failure: failureInfo("MALFORMED_SUCCESS"),
+    });
+  }
   if (!error) {
     const problem = replyProblem(spec.name, outcome.data);
     if (problem) {
@@ -280,8 +349,14 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
   }
 
   const { failure } = error;
-  // Definitive refusals, and refusals that must not be traded around offline.
-  if (!failure.retryable || failure.hold === "suspended" || failure.hold === "reauth" || failure.hold === "backend-version") {
+  // Definitive refusals, and refusals that must not be traded around offline
+  // (a missing prerequisite or another user's operation is shown at the
+  // counter, as before 086 — nothing was recorded on the server).
+  // NOT_RECORDED: the server refused it without recording the refusal —
+  // nothing ran, the reply arrived (no copy is in flight): shown, not
+  // staged, and never presented as a final refusal.
+  if (!failure.retryable || failure.hold === "suspended" || failure.hold === "reauth" || failure.hold === "backend-version"
+      || failure.klass === "DEPENDENCY" || failure.klass === "WRONG_ACTOR" || failure.klass === "NOT_RECORDED") {
     await discardWriteAhead(localId, failure.klass);
     throw error;
   }
@@ -294,6 +369,8 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
 
   const pendingChanges = (inDoubt: boolean, entry: EnqueueInput): Partial<SyncOutboxEntry> => ({
     status: "pending", syncingSince: undefined, attempts: 1, failureKind: "transient", lastError: error!.message,
+    // Staged under the offline rules: authorised to reach the server later.
+    staged: true, fenceRequired: false,
     inDoubt, heldReason: failure.klass === "MALFORMED_SUCCESS" ? "unrecognised-reply" : failure.hold ?? undefined,
     provisional: entry.provisional, refs: entry.refs, shopId: entry.shopId ?? spec.shopId,
     // Resend promptly with the same key (a committed attempt is answered
@@ -319,13 +396,28 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
     // Not staged (offline rules refused it, or the local write failed). The
     // durable row stays — pending, in doubt, same key; its stock effect is
     // derived from its arguments (pendingStock.ts).
+    // G1 Stage 1 (C1): it was NOT authorised offline, so it must never be
+    // resent: held ("conflict" + fenceRequired — no build ever sends that
+    // automatically); the queue asks the server and fences it if the server
+    // never saw it (or keeps holding it when the server cannot be asked).
     await persistStaged([], {
-      update: { localId, changes: { ...pendingChanges(true, { kind: "rpc", name: spec.name, shopId: spec.shopId }), provisional: undefined } },
+      update: {
+        localId,
+        changes: {
+          ...pendingChanges(true, { kind: "rpc", name: spec.name, shopId: spec.shopId }),
+          provisional: undefined, staged: false, fenceRequired: true,
+          status: "conflict", heldReason: "outcome-unknown", lastError: NOT_YET_CONFIRMED_TEXT, nextAttemptAt: undefined,
+        },
+      },
     }).catch(() => undefined);
+    if (error.code === "REPLY_UNAVAILABLE") {
+      throw notConfirmed("the server applied it, but this till cannot read its reply; it is being confirmed from the server's records.");
+    }
     console.error(`[sync] ${spec.name}: outcome unknown and not staged locally; kept for confirmation:`, err);
-    throw notConfirmed(
-      `the server did not answer, so it may or may not have received this. It is NOT recorded on this till${
-        err instanceof Error && err.message ? ` (${err.message})` : ""}.`,
+    throw new PendingConfirmationError(
+      `Not recorded on this till: the server did not answer, so it may or may not have received this${
+        err instanceof Error && err.message ? ` (${err.message})` : ""}. It will NOT be sent again: the till asks the server ` +
+      "what happened to it and stops it there if it never arrived. Check Sync before entering it again.",
     );
   }
   throw notConfirmed("the server's reply was lost. It is shown on this till as unconfirmed.");

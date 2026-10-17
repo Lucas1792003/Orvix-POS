@@ -33,8 +33,9 @@ SELECT test.check('t22/085: grants unchanged from 083 - EXECUTE for service_role
   AND NOT has_function_privilege('authenticated', :'SIG', 'EXECUTE')
   AND NOT EXISTS (SELECT 1 FROM pg_proc p, aclexplode(p.proacl) a WHERE p.oid = :'SIG'::regprocedure AND a.grantee = 0)
   AND has_function_privilege('service_role', :'SIG', 'EXECUTE'));
-SELECT test.check('t22/085: SECURITY DEFINER, owner postgres, search_path=public, signature and return type unchanged',
-  (SELECT prosecdef AND pg_get_userbyid(proowner) = 'postgres' AND proconfig = ARRAY['search_path=public']
+SELECT test.check('t22/085: SECURITY DEFINER, owner postgres, search_path=public (086: public, pg_temp), signature and return type unchanged',
+  (SELECT prosecdef AND pg_get_userbyid(proowner) = 'postgres'
+          AND proconfig IN (ARRAY['search_path=public'], ARRAY['search_path=public, pg_temp'])
           AND prorettype = 'jsonb'::regtype AND pg_get_function_identity_arguments(oid) = 'p_token text, p_storage_path text, p_public_url text, p_bytes integer, p_mime_type text'
      FROM pg_proc WHERE oid = :'SIG'::regprocedure));
 SELECT test.check('t22/085: COMMENT keeps the 083: prefix (084''s guard, test.m083) and names 085',

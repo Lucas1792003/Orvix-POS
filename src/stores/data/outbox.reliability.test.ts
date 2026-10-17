@@ -31,7 +31,7 @@ import { createInventorySlice } from "./slices/inventorySlice";
 import { createPurchaseSlice } from "./slices/purchaseSlice";
 import {
   BACKOFF_CAP_MS, clearNeedsReauth, computeBackoffMs, drainOutbox, enqueueOutbox, listOutboxConflicts,
-  listOutboxEntries, readNeedsReauth, registerOutboxReconciler,
+  listOutboxEntries, readNeedsReauth, registerOutboxReconciler, retryOutboxEntry,
 } from "./outbox";
 import { callRpc, newIdempotencyKey } from "./idempotentRpc";
 import { assertOfflineWriteEligible, OFFLINE_WRITE_TRUST_MS } from "../authStore";
@@ -556,19 +556,24 @@ describe("ordering, backoff and classification", () => {
     expect(fake.calls.map((c) => c.name)).toEqual(["open_shift", "open_shift", "complete_sale"]);
   });
 
-  it("a permanent failure becomes a conflict and does not block later independent entries", async () => {
+  it("a refusal the server did not record (no 086) becomes a conflict that keeps the head of the queue; retrying it releases the rest", async () => {
     await enqueueOutbox({ kind: "rpc", name: "complete_sale", args: completeSaleArgs(newIdempotencyKey()), shopId: "shop-1" });
     await enqueueOutbox({ kind: "rpc", name: "complete_sale", args: completeSaleArgs(newIdempotencyKey()), shopId: "shop-1" });
     fake.queueModes("permanent-error");
 
-    await expect(drainOutbox()).resolves.toBe("drained");
+    await expect(drainOutbox()).resolves.toBe("backoff");
 
-    expect(fake.calls).toHaveLength(2);
-    const entries = await localDb.syncOutbox.toArray();
-    expect(entries).toHaveLength(1);
-    expect(entries[0]).toMatchObject({ status: "conflict", failureKind: "permanent", lastError: "Insufficient stock for Tea Mix" });
-    expect(fake.server.sales).toHaveLength(1);
-    expect(useSyncStore.getState().conflictCount).toBe(1);
+    expect(fake.calls).toHaveLength(1);
+    const entries = (await localDb.syncOutbox.toArray()).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ status: "conflict", failureKind: "permanent", blocksQueue: true });
+    expect(entries[0].lastError).toMatch(/NOT recorded.*Insufficient stock for Tea Mix/);
+    expect(fake.server.sales).toHaveLength(0);
+    // a person retries it: both go, in order
+    await retryOutboxEntry(entries[0].localId);
+    await expect(drainOutbox()).resolves.toBe("drained");
+    expect(fake.server.sales).toHaveLength(2);
+    expect(await localDb.syncOutbox.count()).toBe(0);
   });
 
   it("a hung request is cut off by the timeout and treated as transient", async () => {

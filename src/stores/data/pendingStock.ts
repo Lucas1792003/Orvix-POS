@@ -29,6 +29,9 @@ export function withPendingStock(rows: Inventory[], deltas: Map<string, number>)
 //  SET ASIDE / QUARANTINED             (archived, quarantined)
 //      → out of this till's queue but not settled (the owner may still
 //        reconcile it): only its DECREASES count, flagged as above.
+//  HELD FOR CONFIRMATION (G1 Stage 1: conflict + fenceRequired, no server
+//        decision yet) → only its DECREASES count, flagged as above: the
+//        server may have applied it.
 //  acknowledged / conflict / reconciled → nothing (gone, refused by the
 //        server — no stock moved — or settled by the owner).
 //
@@ -68,13 +71,25 @@ export interface StockLedger {
 
 const COUNTED_STATUSES = ["pending", "failed", "syncing", "archived", "quarantined"] as const;
 
+/** A conflict with no server decision: held for lookup + fence, in doubt,
+ *  or refused without a recorded refusal (it could still run). Its decrease
+ *  stays reserved until the server decides (stabilization H). */
+const heldForConfirmation = (entry: SyncOutboxEntry): boolean =>
+  entry.status === "conflict" && !entry.serverOutcome
+  && (entry.fenceRequired === true || entry.inDoubt === true || entry.blocksQueue === true);
+
 /** Only decreases count (the server may already have it, or it is parked). */
 const decreasesOnly = (entry: SyncOutboxEntry): boolean =>
-  entry.inDoubt === true || entry.status === "syncing" || entry.status === "archived" || entry.status === "quarantined";
+  entry.inDoubt === true || entry.status === "syncing" || entry.status === "archived" || entry.status === "quarantined"
+  || heldForConfirmation(entry);
 
-/** Parked entries the server definitively refused moved no stock. */
+/** Entries the server definitively refused (or fenced) moved no stock. A
+ *  set-aside entry whose outcome is NOT established (held for lookup, in
+ *  doubt) keeps its conservative decrease (M2): it may yet have run. */
 const wasRefused = (entry: SyncOutboxEntry): boolean =>
-  entry.status === "archived" && entry.statusBeforeArchive === "conflict";
+  entry.serverOutcome === "rejected" || entry.serverOutcome === "abandoned"
+  || (entry.status === "archived" && entry.statusBeforeArchive === "conflict"
+    && entry.fenceRequired !== true && entry.inDoubt !== true && entry.blocksQueue !== true);
 
 /** Operations whose effect can be derived from their arguments alone. */
 const DERIVABLE = new Set(["complete_sale", "adjust_stock", "receive_stock_transfer"]);
@@ -122,7 +137,8 @@ export async function pendingStockLedger(movementsInState: InventoryMovement[] =
   const ledger: StockLedger = { byEntry: new Map(), pendingConfirmation: new Map(), doubtful: new Set() };
   let entries: SyncOutboxEntry[];
   try {
-    entries = await localDb.syncOutbox.where("status").anyOf([...COUNTED_STATUSES]).toArray();
+    entries = (await localDb.syncOutbox.where("status").anyOf([...COUNTED_STATUSES, "conflict"]).toArray())
+      .filter((e) => e.status !== "conflict" || heldForConfirmation(e));
   } catch (err) {
     throw new StockLedgerUnavailableError(`The sync queue could not be read (${err instanceof Error ? err.message : String(err)}).`);
   }

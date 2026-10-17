@@ -10,7 +10,7 @@
 //    See src/test/hostedGuard.ts for the incident this exists for.
 import { afterEach, vi } from "vitest";
 import { installHostedBackendGuard, takeHostedAttempts } from "./hostedGuard";
-import { clearStoreTimers } from "../stores/data/storeTimers";
+import { clearStoreTimers, storeWorkIdle } from "../stores/data/storeTimers";
 
 export const TEST_BACKEND_URL = "http://127.0.0.1:54321";
 export const TEST_BACKEND_ANON_KEY = "test-anon-key";
@@ -21,7 +21,12 @@ vi.stubEnv("VITE_SUPABASE_EXPECTED_HOST", "");
 
 installHostedBackendGuard();
 
-afterEach(() => {
+afterEach(async () => {
+  // A follow-up refresh a test's store already STARTED must finish before
+  // the next test resets the fake server and clears the database under it
+  // (otherwise its mirror transaction and the next test's clears deadlock in
+  // fake-indexeddb — the long-standing "FULL LOAD" hook timeout under load).
+  await storeWorkIdle();
   // Follow-up refreshes a test's store scheduled must not fire in the next test.
   clearStoreTimers();
   const attempted = takeHostedAttempts();

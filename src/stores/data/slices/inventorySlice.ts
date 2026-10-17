@@ -300,7 +300,7 @@ export const createInventorySlice: StateCreator<DataState, [], [], InventoryStat
     refreshRequested.add(shopId);
     later(() => {
       refreshRequested.delete(shopId);
-      void get().refreshInventoryFromServer({ shopId }).catch(() => undefined);
+      return get().refreshInventoryFromServer({ shopId }).catch(() => undefined);
     }, delayMs);
   };
   registerStockAccess({

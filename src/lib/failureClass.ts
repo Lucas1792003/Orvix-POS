@@ -44,9 +44,23 @@ export type FailureClass =
   /** The server lacks the function/column the client calls (version skew): hold. */
   | "WAITING_BACKEND"
   /** A 2xx whose body is not the expected shape (set by reply validation). */
-  | "MALFORMED_SUCCESS";
+  | "MALFORMED_SUCCESS"
+  /** 086: the operation was fenced before it executed; it never will. */
+  | "ABANDONED"
+  /** 086: a UUIDv7 key outside the server's execution window; never executed. */
+  | "KEY_EXPIRED"
+  /** 086: the operation belongs to another user; it is sent only in that
+   *  user's session (nothing ran, nothing recorded). */
+  | "WRONG_ACTOR"
+  /** 086: refused because a prerequisite may not have synchronised yet
+   *  (another till's queued operation). Nothing recorded; retried later. */
+  | "DEPENDENCY"
+  /** 086: the server refused it but did NOT record the refusal (an
+   *  unexpected / unaudited error, or an actor-less legacy entry): nothing
+   *  ran, nothing is decided — never shown as final; held and retried. */
+  | "NOT_RECORDED";
 
-export type HoldReason = "reauth" | "suspended" | "edge" | "backend-version";
+export type HoldReason = "reauth" | "suspended" | "edge" | "backend-version" | "actor" | "dependency" | "not-recorded";
 
 export interface FailureInfo {
   klass: FailureClass;
@@ -92,11 +106,22 @@ const info = (klass: FailureClass, retryAfterMs?: number): FailureInfo => {
       return { klass, mayHaveCommitted: false, retryable: true, hold: "edge", retryAfterMs };
     case "WAITING_BACKEND":
       return { klass, mayHaveCommitted: false, retryable: true, hold: "backend-version", retryAfterMs };
+    case "WRONG_ACTOR":
+      return { klass, mayHaveCommitted: false, retryable: true, hold: "actor", retryAfterMs };
+    case "DEPENDENCY":
+      return { klass, mayHaveCommitted: false, retryable: true, hold: "dependency", retryAfterMs };
+    case "NOT_RECORDED":
+      return { klass, mayHaveCommitted: false, retryable: true, hold: "not-recorded", retryAfterMs };
     case "REJECTED":
     case "CONTRACT":
+    case "ABANDONED":
+    case "KEY_EXPIRED":
       return { klass, mayHaveCommitted: false, retryable: false, hold: null, retryAfterMs };
   }
 };
+
+/** The fixed meaning of a class (for outcomes the server states itself). */
+export const failureInfo = (klass: FailureClass, retryAfterMs?: number): FailureInfo => info(klass, retryAfterMs);
 
 const lower = (s: unknown): string => (typeof s === "string" ? s.toLowerCase() : "");
 
@@ -155,6 +180,24 @@ export function classifyFailure(signal: FailureSignal): FailureInfo {
   if (code === "OX204" || message.startsWith("MFA_REQUIRED") || text.includes("rule=mfa_required")) {
     return info("AUTH_REAUTH", retryAfterMs);
   }
+  // 086 executor markers (op_execute / op_status / idem_begin). Nothing was
+  // executed or recorded for any of them.
+  if (message.startsWith("OP_NOT_AUTHENTICATED") || text.includes("op_not_recorded:auth")) return info("AUTH_REAUTH", retryAfterMs);
+  if (message.startsWith("OP_ACTOR_MISMATCH") || text.includes("op_not_recorded:actor") && !text.includes("op_not_recorded:actor_unverified")) {
+    return info("WRONG_ACTOR", retryAfterMs);
+  }
+  if (text.includes("op_not_recorded:dependency")) return info("DEPENDENCY", retryAfterMs);
+  // Any other refusal the executor did not record (unclassified, internal,
+  // actor_unverified): nothing ran and nothing is decided. Never final.
+  if (text.includes("op_not_recorded:")) return info("NOT_RECORDED", retryAfterMs);
+  // The legacy path refused a UUIDv7 key (it must go through op_execute):
+  // nothing ran; resent through the executor.
+  if (message.startsWith("OP_EXECUTOR_REQUIRED")) return info("TEMPORARY_SERVER", retryAfterMs);
+  if (message.startsWith("OP_KEY_OUTSIDE_WINDOW")) return info("KEY_EXPIRED");
+  // The RPC is not executable for this role on this server (privilege
+  // parity with the direct path): nothing ran; wait for the server.
+  if (message.startsWith("OP_RPC_DISABLED")) return info("WAITING_BACKEND", retryAfterMs);
+  if (/^OP_(KEY_REQUIRED|ACTOR_REQUIRED|UNKNOWN_RPC|UNKNOWN_ARGUMENT|MISSING_ARGUMENT|INVALID_ARGUMENTS?)\b/.test(message)) return info("CONTRACT");
 
   if (signal.timedOut || code === "TIMEOUT") return info("UNKNOWN_OUTCOME", retryAfterMs);
 
@@ -249,6 +292,9 @@ export function holdBackoffMs(hold: HoldReason | null): number {
     case "backend-version": return 30 * 60_000;
     case "edge": return 60_000;
     case "reauth": return 30_000;
+    case "actor": return 5 * 60_000;
+    case "dependency": return 5 * 60_000;
+    case "not-recorded": return 15 * 60_000;
     default: return 0;
   }
 }

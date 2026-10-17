@@ -33,11 +33,13 @@ import { entryDigest, recordDigest } from "../../lib/reconcile/digest";
 import { isReconcilableStatus, recordConsistencyProblem, validateResolution, type ResolutionInput } from "../../lib/reconcile/policy";
 import type { ReconcileLogEntry, ReconcileOwner, ReconciliationRecord } from "../../lib/reconcile/types";
 import type { ElectronReconcileAttestRequest, ElectronReconcileAttestResult, ElectronReconcileSealItem } from "../../types/electron";
-import { refreshSyncStatus } from "./outbox";
+import { isUndecided, refreshSyncStatus } from "./outbox";
+import { executorCapability } from "./idempotentRpc";
+import { belongsToBackend, currentBackendOrigin } from "../../lib/backendOrigin";
 
 export type ReconcileErrorCode =
   | "not-found" | "already-reconciled" | "not-reconcilable" | "export-first" | "export-stale" | "invalid"
-  | "no-desktop" | "owner-refused" | "offline" | "changed" | "sale-already-linked";
+  | "no-desktop" | "owner-refused" | "offline" | "changed" | "sale-already-linked" | "undecided";
 
 export class ReconcileError extends Error {
   readonly code: ReconcileErrorCode;
@@ -108,6 +110,27 @@ export async function reconcileOutboxEntry(localId: string, input: ReconcileInpu
   const exp = deps.exportedEntry(localId);
   if (!exp) throw new ReconcileError("export-first", "Export pending transactions first (in this session): the file must contain this entry.");
   if (!exp.digest || exp.digest !== digest) throw new ReconcileError("export-stale", "This entry changed after the last export. Export again first.");
+
+  // M3: "recreated" / "cancelled" assert the original never ran. For an
+  // entry whose outcome is not established, that must rest on the server's
+  // durable decision (abandoned = fenced, or rejected) — not on a records
+  // search a delayed copy could still contradict. "Confirm with server"
+  // asks and fences first. Only a server without migration 086 (no fence
+  // exists there) keeps the legacy records-search path for UUIDv4 entries.
+  if ((input.resolution === "recreated" || input.resolution === "cancelled") && isUndecided(row)) {
+    // An entry queued for ANOTHER backend: nothing this server says (or
+    // lacks) proves it never ran there (stabilization B).
+    const foreign = row.status === "quarantined" || row.statusBeforeArchive === "quarantined" || !belongsToBackend(row, currentBackendOrigin());
+    if (foreign) {
+      throw new ReconcileError("undecided",
+        "This entry was queued for another server and its outcome there is unknown. It can only be documented as recreated or cancelled after it has been checked against that server (export it); nothing was reconciled.");
+    }
+    const legacyServer = !/^[0-9a-f]{8}-[0-9a-f]{4}-7/i.test(row.idempotencyKey ?? "") && executorCapability() === "absent";
+    if (!legacyServer) {
+      throw new ReconcileError("undecided",
+        "The server has not decided this operation yet, so it could still be applied. Use \"Confirm with server\" first: it is stopped there if it never arrived, or recorded if it did. Then export again and reconcile.");
+    }
+  }
 
   const at = now();
   const v = validateResolution(input, { entryDigest: digest, now: at.getTime() });

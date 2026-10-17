@@ -25,7 +25,15 @@
 //    that bypass the idempotency ledger like the real ones do;
 //  - channel()/removeChannel() returning a controllable Realtime channel
 //    (`fakeSupabase.realtime`): a test drives the subscribe() status
-//    callback and emits postgres_changes payloads.
+//    callback and emits postgres_changes payloads;
+//  - migration 086 (off by default — like a server at 085, op_execute /
+//    op_status answer PGRST202): `enableExecutor()` turns on op_execute
+//    (durable rejected rows, replay, mismatch, withheld replies for another
+//    actor) and op_status (lookup + fence). "permanent-error" through the
+//    executor is a DEFINITIVE refusal and is recorded; "dependency-error" is
+//    not recorded. op_execute runs an operation only for its own actor
+//    (p_actor_id), requires it for UUIDv7 keys, and a UUIDv7 key sent to a
+//    legacy RPC is refused (OP_EXECUTOR_REQUIRED), as in migration 086.
 //
 // No vitest imports here, so the module also type-checks in the app
 // build; it is only ever imported by tests.
@@ -44,7 +52,9 @@ export type RpcMode =
   | "server-500"
   | "hang"
   /** The server applies the request, then the reply never arrives (crash after commit). */
-  | "commit-then-hang";
+  | "commit-then-hang"
+  /** 086: refused because a prerequisite is missing — never recorded (op_not_recorded:dependency). */
+  | "dependency-error";
 
 export interface RecordedCall {
   name: string;
@@ -69,7 +79,11 @@ export interface FakeServerState {
   payments: { id: string; purchaseOrderId: string; amountMmk: number }[];
   purchaseOrders: Map<string, { id: string; totalMmk: number; paidMmk: number }>;
   shifts: { id: string; shopId: string }[];
-  idempotency: Map<string, { rpc: string; hash: string; response: unknown }>;
+  idempotency: Map<string, {
+    rpc: string; hash: string; response: unknown;
+    /** 086 */
+    state?: "committed" | "rejected" | "abandoned"; actor?: string | null; code?: string; message?: string; purged?: boolean;
+  }>;
   executions: Record<string, number>; // real side effects per RPC name
   seq: number;
 }
@@ -149,6 +163,10 @@ function createFakeSupabase() {
   // The fake server's clock, independent of the client's Date.now() so a
   // test can put the two far apart (the client clock must never matter).
   let serverClockOffsetMs = 0;
+  // Migration 086 emulation.
+  let executor = false;
+  let caller = { id: "user-1", admin: false };
+  const executing = new Set<string>(); // keys whose execution has not returned (hang modes)
   const serverNow = (): string => new Date(Date.now() + serverClockOffsetMs).toISOString();
   const channels: FakeRealtimeChannel[] = [];
 
@@ -213,10 +231,17 @@ function createFakeSupabase() {
     },
   };
 
-  const execute = (name: string, args: Record<string, unknown>) => {
+  const isV7 = (key: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab]/i.test(key);
+  const execute = (name: string, args: Record<string, unknown>, viaExecutor = false) => {
     const key = args.p_idempotency_key;
     if (typeof key !== "string") {
       return { data: null, status: 400, error: { message: "IDEMPOTENCY_KEY_REQUIRED", code: "22023", details: null, hint: null }, replayed: false };
+    }
+    if (executor && !viaExecutor && isV7(key) && name !== "create_app_user") {
+      return {
+        data: null, status: 400, replayed: false,
+        error: { message: "OP_EXECUTOR_REQUIRED: this operation must be sent through op_execute", code: "22023", details: null, hint: null },
+      };
     }
     const hash = canonical(args);
     const existing = server.idempotency.get(key);
@@ -234,11 +259,95 @@ function createFakeSupabase() {
     const handler = handlers[name] ?? (() => validReply(name));
     const response = handler(args);
     server.executions[name] = (server.executions[name] ?? 0) + 1;
-    server.idempotency.set(key, { rpc: name, hash, response });
+    server.idempotency.set(key, { rpc: name, hash, response, state: "committed", actor: caller.id });
     return { data: response, error: null, status: 200, replayed: false };
   };
 
+  const MISSING_FUNCTION = (fn: string) => ({
+    data: null, status: 404, replayed: false,
+    error: { message: `Could not find the function public.${fn} in the schema cache`, code: "PGRST202", details: null, hint: null },
+  });
+
+  /** op_execute, as migration 086 defines it (definitive refusals = "permanent-error"). */
+  const executorRun = (args: Record<string, unknown>, mode: RpcMode) => {
+    const key = String(args.p_key);
+    const rpcName = String(args.p_rpc);
+    const full = { ...(args.p_args as Record<string, unknown>), p_idempotency_key: key };
+    const hash = canonical(full);
+    const existing = server.idempotency.get(key);
+    const ok = (data: unknown, replayed: boolean) => ({ data, error: null, status: 200, replayed });
+    const fail = (message: string, code = "22023", hint: string | null = null) =>
+      ({ data: null, status: 400, replayed: false, error: { message, code, details: null, hint } });
+    const actor = args.p_actor_id;
+    if (typeof actor === "string" && actor !== caller.id) return fail("OP_ACTOR_MISMATCH: this operation belongs to another user");
+    if (typeof actor !== "string" && isV7(key)) return fail("OP_ACTOR_REQUIRED");
+    if (existing) {
+      if (existing.rpc !== rpcName) return ok({ outcome: "mismatch" }, false);
+      const state = existing.state ?? "committed";
+      if (state === "abandoned") return ok({ outcome: "abandoned", replayed: true }, true);
+      if (existing.hash.replace(/^R:/, "") !== hash) return ok({ outcome: "mismatch" }, false);
+      const maySee = existing.actor === caller.id || caller.admin;
+      if (state === "rejected") {
+        return ok({ outcome: "rejected", replayed: true, code: maySee ? existing.code : null, message: maySee ? existing.message : null, withheld: !maySee }, true);
+      }
+      return ok({
+        outcome: "committed", replayed: true, response: maySee && !existing.purged ? existing.response : null,
+        withheld: !maySee, response_purged: existing.purged === true,
+      }, true);
+    }
+    if (mode === "dependency-error") return fail("Shift not found", "P0001", "op_not_recorded:dependency");
+    if (mode === "permanent-error") {
+      server.idempotency.set(key, { rpc: rpcName, hash: `R:${hash}`, response: null, state: "rejected", actor: caller.id, code: "P0001", message: "Insufficient stock for Tea Mix" });
+      return ok({ outcome: "rejected", replayed: false, code: "P0001", message: "Insufficient stock for Tea Mix" }, false);
+    }
+    const result = execute(rpcName, full, true);
+    return ok({ outcome: "committed", replayed: false, response: result.data }, false);
+  };
+
+  /** op_status (+ fence), as migration 086 defines it. */
+  const statusRun = (args: Record<string, unknown>) => {
+    const key = String(args.p_key);
+    const ok = (data: unknown) => ({ data, error: null, status: 200, replayed: false });
+    if (executing.has(key)) return ok({ status: "in_flight" });
+    const existing = server.idempotency.get(key);
+    if (existing) {
+      if (existing.rpc !== args.p_rpc) return ok({ status: "unavailable" });
+      const maySee = existing.actor === caller.id || caller.admin;
+      const state = existing.state ?? "committed";
+      return ok({
+        status: state, response: maySee && state === "committed" && !existing.purged ? existing.response : null,
+        code: maySee && state === "rejected" ? existing.code : null, message: maySee && state === "rejected" ? existing.message : null,
+        withheld: !maySee, response_purged: existing.purged === true,
+      });
+    }
+    if (args.p_fence !== true) return ok({ status: "not_found", executable: true });   // NULL / false: a lookup
+    const actor = args.p_expected_actor_id;
+    // Own operation; ADMIN for a user of the org; ADMIN for an actor-less
+    // legacy entry only with the operation's arguments as evidence.
+    const allowed = (typeof actor === "string" && (actor === caller.id || caller.admin))
+      || (actor == null && caller.admin && args.p_args != null);
+    if (!allowed) return ok({ status: "not_found", fenced: false, reason: "not_authorized" });
+    server.idempotency.set(key, { rpc: String(args.p_rpc), hash: "A:", response: null, state: "abandoned", actor: (actor as string | null) ?? null, code: "FENCED" });
+    return ok({ status: "abandoned", fenced: true });
+  };
+
   const respond = (name: string, args: Record<string, unknown>, mode: RpcMode) => {
+    if (name === "op_execute" || name === "op_status") {
+      if (!executor) return MISSING_FUNCTION(name);
+      if (name === "op_status" && mode === "network-error") return { ...NETWORK_FAILURE, replayed: false };
+      if (name === "op_status" && mode !== "jwt-expired") return statusRun(args);
+      if (name === "op_status") return { data: null, status: 401, replayed: false, error: { message: "JWT expired", code: "PGRST301", details: null, hint: null } };
+      switch (mode) {
+        case "network-error": return { ...NETWORK_FAILURE, replayed: false };
+        case "commit-then-timeout": { executorRun(args, "succeed"); return { ...NETWORK_FAILURE, replayed: false }; }
+        case "jwt-expired":
+        case "gateway-502":
+        case "server-500":
+          break; // as for any RPC (below)
+        default:
+          return executorRun(args, mode);
+      }
+    }
     switch (mode) {
       case "network-error":
         return { ...NETWORK_FAILURE, replayed: false };
@@ -248,6 +357,8 @@ function createFakeSupabase() {
       }
       case "permanent-error":
         return { data: null, status: 400, replayed: false, error: { message: "Insufficient stock for Tea Mix", code: "P0001", details: null, hint: null } };
+      case "dependency-error":
+        return { data: null, status: 400, replayed: false, error: { message: "Shift not found", code: "P0001", details: null, hint: null } };
       case "jwt-expired":
         return { data: null, status: 401, replayed: false, error: { message: "JWT expired", code: "PGRST301", details: null, hint: null } };
       case "gateway-502":
@@ -305,7 +416,11 @@ function createFakeSupabase() {
       };
       return builder;
     }
-    if (mode === "commit-then-hang") execute(name, args);
+    if (mode === "commit-then-hang") {
+      if (name === "op_execute" && executor) executorRun(args, "succeed");
+      else execute(name, args);
+    }
+    if (mode === "hang" && name === "op_execute" && executor) executing.add(String(args.p_key));
     const promise: Promise<unknown> = mode === "hang" || mode === "commit-then-hang"
       ? new Promise(() => undefined)
       : Promise.resolve().then(() => {
@@ -447,6 +562,14 @@ function createFakeSupabase() {
     /** The next calls answer exactly with these raw responses (no side effect). */
     queueReply: (...replies: Record<string, unknown>[]) => { queuedReplies.push(...replies); },
     setDefaultMode: (mode: RpcMode) => { defaultMode = mode; },
+    /** Migration 086 on the fake server (op_execute / op_status). */
+    enableExecutor: (on = true) => { executor = on; },
+    /** Who the server believes is calling (086 visibility / fence rules). */
+    setCaller: (id: string, admin = false) => { caller = { id, admin }; },
+    /** Finish a hung execution's lock (op_status stops saying in_flight). */
+    releaseExecuting: () => { executing.clear(); },
+    /** 086 op_purge_responses for one key. */
+    purgeResponse: (key: string) => { const r = server.idempotency.get(key); if (r) r.purged = true; },
     setSelectMode: (mode: SelectMode) => { selectMode = mode; },
     setSelectHook: (hook: ((request: number) => void) | null) => { selectHook = hook; },
     /** Move the fake server's clock relative to the client's. */
@@ -479,6 +602,9 @@ function createFakeSupabase() {
       selectHook = null;
       serverClockOffsetMs = 0;
       channels.length = 0;
+      executor = false;
+      caller = { id: "user-1", admin: false };
+      executing.clear();
     },
   };
 }

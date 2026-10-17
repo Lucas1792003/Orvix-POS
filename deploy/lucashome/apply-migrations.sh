@@ -28,16 +28,49 @@ rs "$BK/backup-logical.sh >/dev/null && $BK/backup-base.sh >/dev/null && echo 'b
 rs "cd $STACK && docker compose exec -T db psql -U supabase_admin -d postgres -Atc 'select pg_current_wal_lsn(), now()' </dev/null | tee -a /srv/supabase/backups/migration-checkpoints.txt"
 
 echo "== copy files =="
+# A /tmp/mig left by an interrupted run must never be executed: `docker compose cp DIR db:/tmp/mig` copies INTO
+# an existing directory (DIR/ nested below it), so the stale files would run instead. Removed before the
+# copy (and on every exit), then the copied set is verified file by file against the repo.
+cleanup_mig() { rs "cd $STACK && docker compose exec -T db rm -rf /tmp/mig </dev/null" >/dev/null 2>&1 || true; }
+trap cleanup_mig EXIT
+rs "cd $STACK && docker compose exec -T db rm -rf /tmp/mig </dev/null"
 TMP=$(rs 'mktemp -d /tmp/mig.XXXXXX'); for f in $FILES; do scp -q "$MIG/$f" "$HOST:$TMP/$f"; done
 rs "cd $STACK && docker compose cp $TMP db:/tmp/mig >/dev/null && rm -rf $TMP"
+for f in $FILES; do
+  want=$(shasum -a 256 "$MIG/$f" | cut -c1-64)
+  got=$(rs "cd $STACK && docker compose exec -T db sha256sum /tmp/mig/$f </dev/null" | cut -c1-64)
+  [ "$want" = "$got" ] || { echo "COPY MISMATCH for $f: the file in the container is not the repo file; nothing applied."; exit 1; }
+done
 
 echo "== apply (single transaction) =="
 ARGS=""; for f in $FILES; do ARGS="$ARGS --file /tmp/mig/$f"; done
-rs "cd $STACK && docker compose exec -T db psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 --single-transaction $ARGS </dev/null" 2>&1 | grep -vE '^(CREATE|ALTER|GRANT|REVOKE|DROP|INSERT|COMMENT|NOTIFY|DO|SET|BEGIN|COMMIT|UPDATE|DELETE)( |$)' | grep -v '^$' || true
+# psql's exit status decides (ON_ERROR_STOP + --single-transaction: any error rolls everything back and
+# exits non-zero). The output is only filtered for display; a failure is never reported as applied, and
+# no version is recorded.
+set +e
+OUT=$(rs "cd $STACK && docker compose exec -T db psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 --single-transaction $ARGS </dev/null" 2>&1)
+RC=$?
+set -e
+printf '%s\n' "$OUT" | grep -vE '^(CREATE|ALTER|GRANT|REVOKE|DROP|INSERT|COMMENT|NOTIFY|DO|SET|BEGIN|COMMIT|UPDATE|DELETE)( |$)' | grep -v '^$' || true
+if [ "$RC" -ne 0 ]; then
+  if [ "$RC" -eq 3 ] || [ "$RC" -eq 1 ]; then
+    # psql: 3 = an SQL error under ON_ERROR_STOP (rolled back), 1 = psql refused to start (e.g. a missing file).
+    echo "APPLY FAILED (psql exit $RC): the transaction was rolled back; NO migration was applied and none is recorded."
+  else
+    # 2 = connection lost, 255 = ssh failed: the COMMIT may or may not have happened.
+    echo "APPLY OUTCOME UNKNOWN (exit $RC): the connection was lost. NO version is recorded. Check the database (e.g. the"
+    echo "migration's own post-check queries) before doing anything else; never re-run blindly."
+  fi
+  exit 1
+fi
 
 echo "== record versions =="
 VALS=$(echo "$FILES" | awk '{v=substr($0,1,3); n=substr($0,5); sub(/\.sql$/,"",n); printf "(%s%s%s, ARRAY[]::text[], %s%s%s),", "\047", v, "\047", "\047", n, "\047"}' | sed 's/,$//')
-rs "cd $STACK && docker compose exec -T db psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 -Atc \"insert into supabase_migrations.schema_migrations(version, statements, name) values $VALS on conflict (version) do nothing; select 'migrations now: '||count(*)||' max '||max(version) from supabase_migrations.schema_migrations\" </dev/null"
+rs "cd $STACK && docker compose exec -T db psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 -Atc \"insert into supabase_migrations.schema_migrations(version, statements, name) values $VALS on conflict (version) do nothing; select 'migrations now: '||count(*)||' max '||max(version) from supabase_migrations.schema_migrations\" </dev/null" || {
+  echo "RECORD FAILED: the migrations above WERE applied (committed), but their versions are NOT recorded. Check the database,"
+  echo "then record them by hand (or re-run: an idempotent migration such as 086 re-applies cleanly). Not reported as done."
+  exit 1
+}
 
 echo "== supabase_admin default-ACL hardening (self-host image only; see supabase/baseline/README.md) =="
 rs "cd $STACK && docker compose exec -T db psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 -Atc 'alter default privileges for role supabase_admin in schema public revoke execute on functions from anon, public; alter default privileges for role supabase_admin in schema public revoke all on tables from anon' </dev/null"

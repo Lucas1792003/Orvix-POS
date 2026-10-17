@@ -130,6 +130,7 @@ describe("receivePurchaseOrder flow", () => {
     ).rejects.toMatchObject({ name: "PendingConfirmationError" });
     const { localDb } = await import("../../../lib/localDb");
     const [row] = await localDb.syncOutbox.toArray();
-    expect(row).toMatchObject({ name: "receive_purchase_order", status: "pending", inDoubt: true, idempotencyKey: rpc.mock.calls[0][1].p_idempotency_key });
+    // not staged here (no offline authorisation in this mock) -> held for confirmation, never resent
+    expect(row).toMatchObject({ name: "receive_purchase_order", status: "conflict", fenceRequired: true, inDoubt: true, idempotencyKey: rpc.mock.calls[0][1].p_idempotency_key });
   });
 });

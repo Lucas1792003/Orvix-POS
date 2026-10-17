@@ -36,7 +36,11 @@ const USAGE = `usage:
   are reported as skipped-set-aside and never sent.
   --include-reconciled replays entries an owner RECONCILED on the till (RC3: matched /
   recreated / cancelled); without it they are reported as skipped-reconciled (with the
-  owner's record) and never sent. Normally wrong: only on an explicit owner decision.`;
+  owner's record) and never sent. Normally wrong: only on an explicit owner decision.
+  Migration 086: the signed-in user is asked from the server (no actor option exists).
+  A UUIDv7 entry runs through op_execute only for its own creator; another user's is
+  reported 'held'. Entries the till HELD are only looked up / fenced, never replayed.
+  The run stops at the first undecided entry (held, in-flight, unavailable, unknown).`;
 
 interface Args { cmd: string; file: string; flags: Map<string, string | true> }
 
@@ -90,7 +94,11 @@ function printSummary(p: QueueExportPayload): void {
   if (p.redactedFields > 0) console.log(`note: ${p.redactedFields} credential-like field(s) were redacted at export; affected entries are not replayed`);
   for (const e of p.entries) {
     const r = e.reconciliation;
-    console.log(`  ${String(e.seq ?? "-").padStart(3)}  ${e.opType.padEnd(28)}  ${e.status.padEnd(8)}  attempts ${String(e.attempts).padStart(2)}  key ${e.idempotencyKey?.slice(0, 8) ?? "-"}  ring-up ${e.ringUpAt ?? "-"}${e.refs.length ? `  refs ${e.refs.map((x) => x.field).join(",")}` : ""}${e.lastErrorClass ? `  last ${e.lastErrorClass}` : ""}${r ? `  reconciled ${r.resolution}${r.serverRef ? ` -> ${r.serverRef.receiptNo ?? r.serverRef.saleId}` : ""} by ${r.owner.name} at ${r.reconciledAt}` : ""}${e.reconcileRejected ? "  RECONCILIATION REJECTED (integrity)" : ""}`);
+    console.log(`  ${String(e.seq ?? "-").padStart(3)}  ${e.opType.padEnd(28)}  ${e.status.padEnd(8)}  attempts ${String(e.attempts).padStart(2)}  key ${e.idempotencyKey?.slice(0, 8) ?? "-"}  ring-up ${e.ringUpAt ?? "-"}${e.refs.length ? `  refs ${e.refs.map((x) => x.field).join(",")}` : ""}${e.lastErrorClass ? `  last ${e.lastErrorClass}` : ""}${e.actorId ? `  by ${e.actorId}` : ""}${e.fenceRequired ? "  HELD (lookup only)" : ""}${e.serverOutcome ? `  server: ${e.serverOutcome}` : ""}${r ? `  reconciled ${r.resolution}${r.serverRef ? ` -> ${r.serverRef.receiptNo ?? r.serverRef.saleId}` : ""} by ${r.owner.name} at ${r.reconciledAt}` : ""}${e.reconcileRejected ? "  RECONCILIATION REJECTED (integrity)" : ""}`);
+  }
+  if (p.onlineOperations.length) {
+    console.log(`UNRESOLVED ONLINE-ONLY OPERATIONS (${p.onlineOperations.length}) — they may have been applied; never replayed by this tool, verify them on their server:`);
+    for (const o of p.onlineOperations) console.log(`  ${o.name.padEnd(28)}  key ${o.idempotencyKey?.slice(0, 8) ?? "-"}  by ${o.userId ?? "-"}  server ${o.backendOrigin ?? "(not recorded)"}  attempts ${o.attempts}  created ${o.createdAt}`);
   }
   if (p.reconciliationLog.length) {
     console.log(`reconciliation log (${p.reconciliationLog.length}):`);
@@ -129,10 +137,12 @@ async function main(): Promise<number> {
       console.log(JSON.stringify({
         tillId: payload.tillId, exportedAt: payload.exportedAt, appVersion: payload.appVersion,
         backendHost: payload.backendHost, session: payload.session, summary: summarize(payload.entries),
-        entries: payload.entries.map((e) => ({ seq: e.seq, opId: e.opId, opType: e.opType, status: e.status, idempotencyKey: e.idempotencyKey, attempts: e.attempts, backendOrigin: e.backendOrigin })),
+        entries: payload.entries.map((e) => ({ seq: e.seq, opId: e.opId, opType: e.opType, status: e.status, idempotencyKey: e.idempotencyKey, attempts: e.attempts, backendOrigin: e.backendOrigin, actorId: e.actorId, fenceRequired: e.fenceRequired, blocksQueue: e.blocksQueue, serverOutcome: e.serverOutcome })),
+        onlineOperations: payload.onlineOperations.map((o) => ({ id: o.id, name: o.name, idempotencyKey: o.idempotencyKey, userId: o.userId, backendOrigin: o.backendOrigin, attempts: o.attempts, uncertain: o.uncertain })),
       }, null, 1));
     } else printSummary(payload);
-    return 0;
+    // An export that still holds an undecided online money operation is not "clean".
+    return payload.onlineOperations.length ? 4 : 0;
   }
 
   const targetFlag = args.flags.get("target");
@@ -168,6 +178,8 @@ async function main(): Promise<number> {
     includeQuarantined,
     includeSetAside: args.flags.has("include-set-aside"),
     includeReconciled: args.flags.has("include-reconciled"),
+    // the operator repeated the target host: a plain replay into it is allowed
+    otherBackendConfirmed: typeof confirm === "string" && confirm.trim().toLowerCase() === new URL(target.origin).host,
     dryRun,
   });
   console.log(`\n${formatReport(report)}`);

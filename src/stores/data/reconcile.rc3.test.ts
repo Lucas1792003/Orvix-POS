@@ -384,7 +384,8 @@ describe("server committed but the response was lost", () => {
     const row = (await localDb.syncOutbox.get(queued.localId))!;
     const check = await serverCheck(row);
     expect(check).toMatchObject({ result: "recorded", matches: [{ saleId: srv.sales[0].id, receiptNo: srv.sales[0].receipt_no }] });
-    await expectCode(reconcileOutboxEntry(row.localId, await input(row.localId, { check }), deps()), "invalid"); // cancelled
+    // cancelled: refused — the server has not decided it (M3: "Confirm with server" first)
+    await expectCode(reconcileOutboxEntry(row.localId, await input(row.localId, { check }), deps()), "undecided");
     const stored = await reconcileOutboxEntry(row.localId, await input(row.localId, { resolution: "matched", check, reason: "Server has it: receipt matches the export" }), deps());
     expect(stored.reconciliation).toMatchObject({ resolution: "matched", serverRef: { saleId: srv.sales[0].id } });
 
@@ -485,7 +486,7 @@ describe("export / import round trip and the recovery tool", () => {
     await reconcileOutboxEntry(rec.localId, await input(rec.localId), deps());
     const payload = (await collectQueueExportSnapshot(localDb, ctx())).payload;
     const env = await encryptQueueExport(payload, PASS, { iterations: 100_000 });
-    expect(env.formatVersion).toBe(1);
+    expect(env.formatVersion).toBe(2);
     expect(env.header.summary.byStatus).toEqual({ reconciled: 1, archived: 1, conflict: 1 });
     const back = await decryptQueueExport(JSON.stringify(env), PASS);
     const e = back.entries.find((x) => x.opId === rec.localId)!;

@@ -204,12 +204,37 @@ QUEUE_RECOVERY_ANON_KEY="$(ssh -o BatchMode=yes lucashome 'grep "^ANON_KEY=" /sr
   different host (rebuilt stack under a new name, a disposable restore) must
   be repeated with `--confirm-host <host>`.
 - Replay as the user who queued the entries (shift/actor checks, 055/074).
+  The tool asks the server who is signed in; it has no option to name an
+  actor. With migration 086 a UUIDv7 entry runs (through `op_execute`) only
+  for its own creator; anyone else's is reported `held` and never run or
+  fenced — sign in as that user and re-run. The same holds on the legacy
+  path (UUIDv4 entries, and every entry on a server without 086): an RPC
+  entry whose recorded creator is another user is `held`, never sent. Table
+  writes and entries with no recorded creator are replayed as the signed-in
+  user — sign in as the till's cashier, not as an owner, unless the owner
+  entered them. An ADMIN can stop (fence) held entries, never run them.
+- Every lookup, fence or execution goes only to the backend the entry was
+  queued for. A restore under another name: repeat the host with
+  `--confirm-host`; entries that were ever in doubt are still never replayed
+  there. Exit 0 only when nothing undecided remains — including the
+  unresolved online-only operations (payments, voids, refund requests) the
+  export lists ("NOT RECOVERED"). A key mismatch is reported `unknown` (the
+  server already holds a decision under that key — check it, never re-enter
+  blindly).
   Optional `QUEUE_RECOVERY_SERVICE_KEY` (same ssh pattern, `SERVICE_ROLE_KEY`)
   only reads the idempotency ledger so the report says exactly
   `applied` vs `already-applied`.
-- A transient failure stops the run (`not-attempted` for the rest): re-run the
-  same command later. Conflicts the till had parked are skipped unless
-  `--include-conflicts`. Exit 0 = all done; 4 = something rejected/blocked.
+- Entries the till HELD ("Not recorded on this till", `fenceRequired`) are
+  never replayed: the tool asks the server and, if it never saw them, stops
+  them there (`abandoned`). Entries the server already decided are reported
+  (`rejected-final`, `abandoned`), not sent.
+- The run stops at the first entry whose outcome is not decided —
+  `not-attempted` (transient), `in-flight`, `unavailable`, `held`, `unknown` —
+  so later entries never overtake it: resolve it, then re-run the same
+  command. Other conflicts the till had parked are skipped unless
+  `--include-conflicts`. Exit 0 = all done; 4 = anything rejected, held,
+  undecided or blocked. Use the tool from the same build as the tills (an
+  older one ignores the 086 fields; see migration-086.md "downgrade").
 - After a PITR restore (§5.3) a replay re-executes sales whose keys are not in
   the restored ledger — the desired result for sales after the restore point.
 - Then run the §7 queries.
@@ -330,7 +355,9 @@ SELECT 'negative stock', count(*) FROM inventory WHERE qty_base_units < 0;
 ```
 Expected: 0 / 0 / no rows / no rows / 0. Note (1) covers only the last 30
 days at most: `prune_idempotency_keys()` deletes keys older than 30 days (not
-scheduled on lucashome today).
+scheduled on lucashome today). With migration 086 applied the prune keeps
+every v4/pre-086 key and every decision younger than 13 months
+(docs/selfhost-migration/phase-g/migration-086.md "Retention").
 
 ## 8. Evidence (2026-10-13 run)
 

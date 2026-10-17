@@ -26,6 +26,11 @@ create table public.idempotency_keys (
 ```
 Rows are pruned after 30 days (`prune_idempotency_keys()`, called by the
 existing cron pattern later; not required for correctness).
+**Superseded by migration 086** (docs/selfhost-migration/phase-g/migration-086.md):
+the 30-day body deleted refused/fenced decisions and re-opened their keys.
+Since 086 it deletes only UUIDv7 rows older than 13 months, only while the
+086 executor and its `idem_begin` guard are installed; v4/pre-086 keys are
+never pruned, and nothing schedules it.
 
 ### Helper
 ```sql

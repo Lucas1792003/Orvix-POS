@@ -4,7 +4,8 @@ import { supabase } from "../../lib/supabase";
 import { reportError } from "../../lib/errors";
 import { useAppStore } from "../appStore";
 import { mergeProvisionalRows, persistSnapshotToLocal, readLocalSnapshot, type LocalSnapshot } from "./localSync";
-import { countPendingOutbox, drainOutbox, registerOutboxReconciler, setNeedsReauth } from "./outbox";
+import { classifyLegacyQueue, countPendingOutbox, drainOutbox, registerOutboxReconciler, setNeedsReauth } from "./outbox";
+import { registerVerifiedReload } from "./verifiedReload";
 import { bootstrapDeltaCursors, pullDeltaChanges } from "./deltaSync";
 import { refreshInventoryIfNotLive } from "./inventoryRealtime";
 import { fetchAllRows, fetchAllRowsIn, fetchServerTime, type ReadResult, type Row } from "./fetchAll";
@@ -123,6 +124,12 @@ export const useDataStore = create<DataState>()((...args) => {
         console.error("[DB] Failed to hydrate from local cache:", err);
       }
     }
+
+    // Batch 2A queues: classify them while the local evidence of an offline
+    // staging (the shift / transfer row carrying the operation's key) still
+    // exists — the full load below replaces those rows with the server's
+    // (M4). Local only; idempotent; the drain repeats it.
+    await classifyLegacyQueue().catch((err) => console.error("[DB] Failed to classify the sync queue:", err));
 
     // No point firing 27 requests that will just fail — leave whatever we
     // rendered from cache (or the "Loading data…" / Retry screen if this is
@@ -305,6 +312,8 @@ export const useDataStore = create<DataState>()((...args) => {
       if (composed) get().noteStockLedger(composed.applied, new Map(Object.entries(composed.pendingConfirmation)));
       const ledgerForSnapshot = serializeLedger();
       set({ ...snapshot, refundVoidRequests: snapshot.refunds, isLoading: false, isLoaded: true });
+      // Verified only when the stock rows were composed from the server too.
+      if (composed) completedServerLoads += 1;
       if (composed?.followUp) void get().refreshInventoryFromServer({ shopId: null }).catch(() => undefined);
 
       // A full load is an authenticated round trip and carries the
@@ -350,6 +359,8 @@ export const useDataStore = create<DataState>()((...args) => {
 });
 
 let loadInFlight: Promise<void> | null = null;
+/** Full loads that replaced the state with server data (verified reload). */
+let completedServerLoads = 0;
 
 /** Re-apply Realtime inventory events captured during a full load: those
  *  committed at/after the load's server time (or with no known time) win
@@ -415,6 +426,19 @@ async function sessionGone(): Promise<boolean> {
     return false;
   }
 }
+
+// G1 Stage 1 (086): a committed operation whose reply this till cannot read
+// is reconciled from the server's own rows — by a full load that certainly
+// STARTED after the caller learnt the outcome (one already in flight may
+// predate it, so it is awaited and a fresh one run). True only when that
+// load replaced the state with server data.
+registerVerifiedReload(async () => {
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return false;
+  await useDataStore.getState().loadData({ force: true });
+  const before = completedServerLoads;
+  await useDataStore.getState().loadData({ force: true });
+  return completedServerLoads > before;
+});
 
 registerOutboxReconciler("complete_sale", (data, provisional, ackId) =>
   useDataStore.getState().reconcileCompleteSale(data, provisional ?? [], ackId));

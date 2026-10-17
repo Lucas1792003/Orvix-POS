@@ -23,6 +23,7 @@ import {
   simulateNewAppInstanceForTests,
 } from "./outbox";
 import { resetWriteAheadForTests } from "./writeAhead";
+import { setExecutorCapabilityForTests } from "./idempotentRpc";
 import { resetOnlineOnlyForTests } from "./onlineOnly";
 import { registerOperationPrompt, type PromptDecision } from "./operationPrompt";
 import { readPersistedLedger, resetStockLedgerForTests } from "./stockLedger";
@@ -136,6 +137,7 @@ const live = async (get: Store["get"]) => {
 const answer = (decision: PromptDecision) => registerOperationPrompt(async () => decision);
 
 beforeEach(async () => {
+  setExecutorCapabilityForTests("absent");
   fake.reset();
   fake.server.inventory.set("shop-1:p1", 10);
   await Promise.all(localDb.tables.map((t) => t.clear()));
@@ -400,7 +402,9 @@ describe("B: queue-state transitions and transfers", () => {
     fake.setDefaultMode("permanent-error");
     await drainOutbox();
     await settle(get);
-    expect(qty(get)).toBe(10);                                   // refused: released
+    // refused by a server WITHOUT 086: the refusal is not recorded there, so
+    // the sale could still run if retried — the deduction stays reserved
+    expect(qty(get)).toBe(8);
     fake.setDefaultMode("succeed");
     await retryOutboxEntry(entry.localId);
     await settle(get);
@@ -451,32 +455,63 @@ describe("C: checkout crash recovery", () => {
     expect(fake.callsFor("complete_sale")).toHaveLength(1);    // no second request, no new key
   });
 
-  it("…choosing WAIT resends the earlier sale with its original key — one sale", async () => {
+  // G1 Stage 1: the crashed attempt was never evaluated offline, so WAIT
+  // never resends it. Without 086 it is held; with 086 the server is asked.
+  it("…choosing WAIT, server WITHOUT 086: the earlier sale is held (never resent) — one sale on the server, nothing more sent", async () => {
     const { get } = await crashMidCheckout();
     answer("retry");
     await expect(sell(get, 2)).rejects.toMatchObject({ name: "PendingConfirmationError" });
-    await vi.waitFor(() => expect(fake.callsFor("complete_sale")).toHaveLength(2));
-    const [a, b] = fake.callsFor("complete_sale");
-    expect(b.args.p_idempotency_key).toBe(a.args.p_idempotency_key);
+    await vi.waitFor(async () => expect((await localDb.syncOutbox.toArray())[0]).toMatchObject({ heldReason: "needs-server-086" }));
+    expect(fake.callsFor("complete_sale")).toHaveLength(1);
     expect(fake.server.executions.complete_sale).toBe(1);
   });
 
-  it("…choosing NEW SALE (a genuinely separate customer) is a new key", async () => {
+  it("…choosing WAIT, server WITH 086: the lookup finds the committed sale and reconciles it — one sale, nothing resent", async () => {
+    useAuthStore.setState({ currentUserId: "user-1" });
+    fake.enableExecutor();
+    setExecutorCapabilityForTests("available");
+    const { get } = await crashMidCheckout();
+    answer("retry");
+    await expect(sell(get, 2)).rejects.toMatchObject({ name: "PendingConfirmationError" });
+    await vi.waitFor(async () => expect(await localDb.syncOutbox.count()).toBe(0));
+    expect(fake.callsFor("op_execute")).toHaveLength(1);
+    expect(fake.callsFor("op_status")).toHaveLength(1);
+    expect(fake.server.executions.complete_sale).toBe(1);
+    expect(get().sales.map((s: { id: string }) => s.id)).toEqual(["sale-server-1"]);
+  });
+
+  // G1 Stage 1 (finding 7): a replacement only once the earlier attempt is
+  // known not to have happened.
+  it("…choosing NEW SALE, server WITHOUT 086: refused — the earlier sale cannot be confirmed or stopped; no new key", async () => {
     const { get } = await crashMidCheckout();
     answer("new");
-    await sell(get, 2);
-    const keys = fake.callsFor("complete_sale").map((c) => c.args.p_idempotency_key);
-    expect(new Set(keys).size).toBe(2);
+    await expect(sell(get, 2)).rejects.toMatchObject({ name: "UnresolvedOperationError" });
+    expect(new Set(fake.callsFor("complete_sale").map((c) => c.args.p_idempotency_key)).size).toBe(1);
+    expect(fake.server.executions.complete_sale).toBe(1);
+  });
+
+  it("…choosing NEW SALE, server WITH 086: the earlier sale DID commit — it is recorded instead and nothing new is rung up", async () => {
+    useAuthStore.setState({ currentUserId: "user-1" });
+    fake.enableExecutor();
+    setExecutorCapabilityForTests("available");
+    const { get } = await crashMidCheckout();
+    answer("new");
+    await expect(sell(get, 2)).rejects.toMatchObject({ name: "PendingConfirmationError", message: expect.stringMatching(/has now been recorded/) });
+    expect(fake.server.executions.complete_sale).toBe(1);
+    expect(new Set(fake.callsFor("op_execute").map((c) => c.args.p_key)).size).toBe(1);
+    expect(get().sales.map((s: { id: string }) => s.id)).toEqual(["sale-server-1"]);
   });
 
   it("failed local staging after an unknown outcome keeps the original operation (same key, in doubt); stock is still deducted", async () => {
     const { get } = makeStore();
     fake.queueModes("commit-then-timeout");
     vi.spyOn(localDb.sales, "bulkPut").mockRejectedValueOnce(new Error("disk full"));
-    await expect(sell(get, 2)).rejects.toThrow(/Pending confirmation: .*NOT recorded on this till/);
+    await expect(sell(get, 2)).rejects.toThrow(/Not recorded on this till/);
     const [row] = await localDb.syncOutbox.toArray();
     const [sent] = fake.callsFor("complete_sale");
-    expect(row).toMatchObject({ status: "pending", inDoubt: true, writeAhead: true, idempotencyKey: sent.args.p_idempotency_key });
+    expect(row).toMatchObject({
+      status: "conflict", inDoubt: true, writeAhead: true, idempotencyKey: sent.args.p_idempotency_key, fenceRequired: true,
+    });
     expect(get().sales).toHaveLength(0);
     await settle(get);
     expect(qty(get)).toBe(8);                                    // derived from its arguments
@@ -487,9 +522,9 @@ describe("C: checkout crash recovery", () => {
     const { get } = makeStore();
     await localDb.authCache.clear();                            // the 12 h window lapsed
     fake.queueModes("network-error");                            // "Failed to fetch": unknown, not proof of a commit
-    await expect(sell(get, 2)).rejects.toThrow(/NOT recorded on this till/);
+    await expect(sell(get, 2)).rejects.toThrow(/Not recorded on this till/);
     expect(get().sales).toHaveLength(0);
-    expect((await localDb.syncOutbox.toArray())[0]).toMatchObject({ inDoubt: true, writeAhead: true });
+    expect((await localDb.syncOutbox.toArray())[0]).toMatchObject({ inDoubt: true, writeAhead: true, fenceRequired: true });
   });
 
   it("backend unreachable at the gateway (not delivered) with an expired authorisation: refused, nothing kept", async () => {
@@ -504,7 +539,7 @@ describe("C: checkout crash recovery", () => {
   it("insufficient stock during ambiguous connectivity: not staged (no oversell), kept for confirmation", async () => {
     const { get } = makeStore({ inventory: [{ shopId: "shop-1", productId: "p1", qtyBaseUnits: 1 }] });
     fake.queueModes("network-error");
-    await expect(sell(get, 2)).rejects.toThrow(/NOT recorded on this till .*Only 1 in stock/);
+    await expect(sell(get, 2)).rejects.toThrow(/Not recorded on this till.*Only 1 in stock/);
     expect(get().sales).toHaveLength(0);
   });
 

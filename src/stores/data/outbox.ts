@@ -1,14 +1,20 @@
 import { supabase } from "../../lib/supabase";
+import { uuidV7TimeMs } from "../../lib/executorRpcs";
+import { mayDepend, type DependencyContext, type DependencySubject } from "./dependencies";
 import { belongsToBackend, currentBackendOrigin, quarantineForeignOutboxEntries } from "../../lib/backendOrigin";
-import { localDb, SYNC_STATE_KEYS, type SyncOutboxEntry } from "../../lib/localDb";
+import { localDb, RECONCILE_LOG_PREFIX, SYNC_STATE_KEYS, type SyncOutboxEntry } from "../../lib/localDb";
 import { newId } from "../../lib/id";
 import { isNetworkError } from "../../lib/errors";
 import { classifyFailure, holdBackoffMs } from "../../lib/failureClass";
 import { isPrimaryKeyDuplicate, runTableWrite } from "./tableWrite";
-import { callRpc, IDEMPOTENCY_KEY_ARG, newIdempotencyKey, RPC_TIMEOUT_MS, RpcError, setActorSource, stampOperationArgs, type RpcOutcome } from "./idempotentRpc";
+import {
+  callRpc, currentActorId, IDEMPOTENCY_KEY_ARG, lookupOperation, newIdempotencyKey, RPC_TIMEOUT_MS, RpcError, setActorSource,
+  stampOperationArgs, type RpcOutcome,
+} from "./idempotentRpc";
 import { replyProblem } from "./replyShapes";
-import { flushStockCommit, stagedStockInTransaction } from "./stockLedger";
-import { localRowTables, putLocalRowsInTransaction, recordCommittedPut, type LocalRowBatch } from "./localWrites";
+import { flushStockCommit, releaseEntry, stagedStockInTransaction } from "./stockLedger";
+import { deleteLocalRows, localRowTables, putLocalRowsInTransaction, recordCommittedPut, type LocalRowBatch } from "./localWrites";
+import { verifiedReload } from "./verifiedReload";
 import type { Inventory, InventoryMovement } from "../../types";
 import { useAuthStore } from "../authStore";
 import { useSyncStore } from "../syncStore";
@@ -40,9 +46,93 @@ export const byQueueOrder = (a: OutboxRow, b: OutboxRow): number => {
   return a.seq == null ? -1 : 1;
 };
 
+/** G1 Stage 1: an operation whose outcome is unknown and that was never
+ *  authorised offline is HELD as status "conflict" + fenceRequired — a
+ *  status no older build ever sends automatically (downgrade safety). This
+ *  build still processes it: by lookup + fence, never by resending. */
+const isHeldRecovery = (e: SyncOutboxEntry): boolean => e.status === "conflict" && e.fenceRequired === true && !e.serverOutcome;
+/** A conflict the server has not decided: never sent automatically, but it
+ *  keeps the head of the queue until a person retries or sets it aside. */
+const isBlockingConflict = (e: SyncOutboxEntry): boolean =>
+  e.status === "conflict" && e.blocksQueue === true && !e.serverOutcome && e.fenceRequired !== true;
+
 async function pendingInQueueOrder(): Promise<OutboxRow[]> {
-  const rows = (await localDb.syncOutbox.where("status").anyOf("pending", "failed").toArray()) as OutboxRow[];
-  return rows.sort(byQueueOrder);
+  const rows = (await localDb.syncOutbox.where("status").anyOf("pending", "failed", "conflict").toArray()) as OutboxRow[];
+  return rows.filter((r) => r.status !== "conflict" || isHeldRecovery(r) || isBlockingConflict(r)).sort(byQueueOrder);
+}
+
+/** Unsent work of THIS backend that could still change server state — the
+ *  entries being sent right now ("syncing") included; the only bypassable
+ *  entry (committed, reply unreadable here) excluded. */
+async function unsentWork(): Promise<OutboxRow[]> {
+  const origin = currentBackendOrigin();
+  const syncing = (await localDb.syncOutbox.where("status").equals("syncing").toArray()) as OutboxRow[];
+  return [...(await pendingInQueueOrder()), ...syncing].filter((r) => belongsToBackend(r, origin) && !isParked(r));
+}
+
+/** How ids compare in dependency checks (final ordering pass): an id this
+ *  till created offline is compared under its SERVER id once the verified
+ *  mapping exists (provisionalIdMap — written when its creating entry was
+ *  acknowledged); an offline id still unmapped (it appears in a queued
+ *  entry's provisional records, or in a ref) stands for ANY id, so it can
+ *  never prove independence. Whose shift it is comes from the till's shift
+ *  rows (under either id). Stored arguments are never rewritten. */
+async function dependencyContext(): Promise<DependencyContext> {
+  const [maps, rows, shifts] = await Promise.all([
+    localDb.provisionalIdMap.toArray(),
+    localDb.syncOutbox.toArray(),
+    localDb.shifts.toArray(),
+  ]);
+  const real = new Map(maps.map((m) => [m.provisionalId, m.realId]));
+  const unmapped = new Set<string>();
+  for (const r of rows) {
+    if (r.status === "reconciled") continue;
+    for (const p of r.provisional ?? []) for (const id of p.ids) if (!real.has(id)) unmapped.add(id);
+    for (const ref of r.refs ?? []) if (!real.has(ref.provisionalId)) unmapped.add(ref.provisionalId);
+  }
+  const cashier = new Map<string, string>();
+  for (const sh of shifts) {
+    if (!sh?.id || !sh.cashierId) continue;
+    cashier.set(sh.id, sh.cashierId);
+    const mapped = real.get(sh.id);
+    if (mapped) cashier.set(mapped, sh.cashierId);
+  }
+  return {
+    resolve: (id) => real.get(id) ?? (unmapped.has(id) ? "*" : id),
+    shiftCashier: (id) => cashier.get(id) ?? null,
+  };
+}
+
+/** Earlier unsent entries an operation about to be sent ONLINE might depend
+ *  on (dependencies.ts — anything not proven independent). It must never
+ *  overtake them: queued behind them, or refused (shared-till pass). */
+export async function blockingEarlierWork(subject: DependencySubject): Promise<SyncOutboxEntry[]> {
+  const [work, ctx] = await Promise.all([unsentWork(), dependencyContext()]);
+  return work.filter((r) => mayDepend(subject, r, ctx));
+}
+
+/** Any unsent work at all (diagnostics / tests). */
+export async function queueHasUnsentWork(): Promise<boolean> {
+  return (await unsentWork()).length > 0;
+}
+
+/** The entry is waiting for its creator (another app user). */
+const ownedByOther = (entry: SyncOutboxEntry, me: string | null): boolean => {
+  const owner = entry.kind === "rpc" ? actorOf(entry) : null;
+  return Boolean(owner && me && owner !== me);
+};
+
+/** A ref whose creating entry can never succeed any more: set aside,
+ *  reconciled, quarantined or decided (refused / stopped) — or gone without
+ *  leaving the real id. The waiting entry can never resolve it. */
+async function deadParent(entry: SyncOutboxEntry): Promise<boolean> {
+  for (const ref of entry.refs ?? []) {
+    if (await localDb.provisionalIdMap.get(ref.provisionalId)) continue;
+    const parent = await localDb.syncOutbox.filter((r) => (r.provisional ?? []).some((p) => p.ids.includes(ref.provisionalId))).first();
+    if (!parent) return true;
+    if (parent.status === "archived" || parent.status === "reconciled" || parent.status === "quarantined" || parent.serverOutcome) return true;
+  }
+  return false;
 }
 
 
@@ -77,6 +167,9 @@ export function buildOutboxRow(entry: EnqueueInput, overrides: Partial<SyncOutbo
     ...entry,
     args,
     idempotencyKey,
+    // Who created the operation (086 recovery: only that user, or an
+    // administrator, may resolve it on the server).
+    actorId: currentActorId(),
     // Which backend this entry is for (blocker D-d): the drain sends it only
     // to this origin; anywhere else it is quarantined (lib/backendOrigin.ts).
     backendOrigin: currentBackendOrigin(),
@@ -198,6 +291,7 @@ export function writeAheadInFlightCount(): number {
 export function simulateNewAppInstanceForTests(): void {
   inFlightWriteAhead.clear();
   startupRecoveryDone = false;
+  draining = false;   // a new process has no drain running (a hung one died with the old one)
 }
 
 /**
@@ -361,6 +455,13 @@ export async function recoverStrandedSyncing(olderThanMs: number = SYNCING_STALE
       entry.status = "pending";
       // The request was sent and no reply arrived: it may have committed.
       entry.inDoubt = true;
+      // G1 Stage 1: a write-ahead row whose offline eligibility was never
+      // established (its FIRST online attempt, or a row with nothing staged
+      // that an older build left) is never resent blindly: it is held and
+      // the drain asks the server, fencing it if the server never saw it.
+      if (entry.writeAhead === true && entry.staged !== true && ((entry.attempts ?? 0) === 0 || !(entry.provisional?.length))) {
+        holdForRecovery(entry);
+      }
       entry.attempts = (entry.attempts ?? 0) + 1;
       entry.failureKind = "transient";
       entry.lastError = "Interrupted while sending (no reply from the server). Resent with the same idempotency key, so it cannot be applied twice.";
@@ -375,6 +476,72 @@ export async function recoverStrandedSyncing(olderThanMs: number = SYNCING_STALE
 }
 
 let startupRecoveryDone = false;
+
+/** Text for an operation whose outcome is unknown and that this till never
+ *  authorised offline. */
+export const NOT_YET_CONFIRMED_TEXT =
+  "Not recorded on this till: the server may or may not have received it. It is NEVER resent — the till asks the server " +
+  "what happened to it and stops it there if it never arrived.";
+
+/** Batch 2A staged close_shift / dispatch_stock_transfer with no provisional
+ *  rows: the staging wrote the operation's own key onto the local shift /
+ *  transfer row. That row is proof the operation was authorised offline —
+ *  while it survives (a later full load replaces it with the server's). */
+async function stagedWithoutProvisional(entry: SyncOutboxEntry): Promise<boolean> {
+  const key = entry.idempotencyKey;
+  if (!key) return false;
+  if (entry.name === "close_shift" && typeof entry.args?.p_shift_id === "string") {
+    const shift = await localDb.shifts.get(entry.args.p_shift_id);
+    return shift?.idempotencyKey === key && Boolean(shift.endedAt);
+  }
+  if (entry.name === "dispatch_stock_transfer" && typeof entry.args?.p_transfer_id === "string") {
+    const transfer = await localDb.stockTransfers.get(entry.args.p_transfer_id);
+    return transfer?.idempotencyKey === key && Boolean(transfer.dispatchedAt);
+  }
+  return false;
+}
+
+/** Mark an entry (in a modify/transaction) as held for lookup + fence. */
+function holdForRecovery(entry: SyncOutboxEntry): void {
+  entry.fenceRequired = true;
+  entry.staged = false;
+  entry.status = "conflict";
+  entry.inDoubt = true;
+  entry.heldReason = "outcome-unknown";
+  entry.failureKind = "transient";
+  entry.lastError = NOT_YET_CONFIRMED_TEXT;
+  entry.nextAttemptAt = undefined;
+  delete entry.syncingSince;
+}
+
+/**
+ * G1 Stage 1, once per entry: rows written by an older build carry no
+ * `staged` flag. A queued offline operation (not write-ahead) was authorised
+ * offline. A write-ahead row in doubt with nothing staged cannot prove it
+ * was — it is held for lookup + fence and never resent. Identity (key,
+ * arguments) is untouched. Returns how many were held.
+ */
+export async function classifyLegacyQueue(): Promise<number> {
+  const n = await localDb.transaction("rw", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, async () => {
+    let held = 0;
+    const rows = await localDb.syncOutbox.where("status").anyOf("pending", "failed").toArray();
+    for (const entry of rows) {
+      if (entry.kind !== "rpc" || entry.staged !== undefined || entry.fenceRequired !== undefined) continue;
+      const proven = !(entry.writeAhead === true && entry.inDoubt === true) || (entry.provisional?.length ?? 0) > 0
+        || (await stagedWithoutProvisional(entry));
+      if (proven) {
+        await localDb.syncOutbox.update(entry.localId, { staged: true });
+      } else {
+        holdForRecovery(entry);
+        await localDb.syncOutbox.put(entry);
+        held += 1;
+      }
+    }
+    return held;
+  });
+  if (n > 0) notifyQueueChanged();
+  return n;
+}
 
 // Resolves an entry's `refs` against provisionalIdMap and returns the args
 // to actually send — or null if a reference hasn't synced yet (e.g. a sale
@@ -574,14 +741,18 @@ const getLockManager = (): LockManagerLike | null => {
  * instance finding the lock taken returns "locked" without sending.
  */
 async function withDrainLock(fn: () => Promise<DrainResult>): Promise<DrainResult> {
+  return withDrainLockOr(fn, "locked");
+}
+
+async function withDrainLockOr<T>(fn: () => Promise<T>, busyValue: T): Promise<T> {
   const locks = getLockManager();
   if (locks) {
     const result = await locks.request(DRAIN_LOCK_NAME, { ifAvailable: true }, async (lock) =>
-      lock ? fn() : "locked",
+      lock ? fn() : busyValue,
     );
-    return result as DrainResult;
+    return result as T;
   }
-  if (!(await acquireLease())) return "locked";
+  if (!(await acquireLease())) return busyValue;
   leaseHeld = true;
   try {
     return await fn();
@@ -651,6 +822,8 @@ async function runDrainPass(): Promise<DrainResult> {
     console.warn(`[sync] ${recovered} entr${recovered === 1 ? "y" : "ies"} left 'syncing' by an interrupted request returned to the queue (same idempotency key).`);
     await refreshSyncStatus();
   }
+  const legacyHeld = await classifyLegacyQueue();
+  if (legacyHeld > 0) console.warn(`[sync] ${legacyHeld} older unconfirmed entr${legacyHeld === 1 ? "y is" : "ies are"} held for confirmation (never resent).`);
   await pruneProvisionalIdMap();
   // Never send an entry to a backend other than the one it was queued for
   // (main.tsx does this at startup too; repeated here so the drain does not
@@ -659,8 +832,7 @@ async function runDrainPass(): Promise<DrainResult> {
     await refreshSyncStatus();
     notifyQueueChanged();
   }
-  const queued = await localDb.syncOutbox.where("status").anyOf("pending", "failed").count();
-  if (queued === 0) return "drained";
+  if ((await pendingInQueueOrder()).length === 0) return "drained";
   // An online attempt is in flight (here or in another window): let it
   // finish first (its reply decides whether dependent queued work can go).
   if ((await rowsInFlightAnywhere()).size > 0) return "backoff";
@@ -677,34 +849,75 @@ async function runDrainPass(): Promise<DrainResult> {
     await renewLease();
     const pending = await pendingInQueueOrder();
 
-    // Skip past entries still waiting on a dependency (e.g. a sale queued
-    // against a shift opened in the same offline session) rather than
-    // stalling the whole queue behind them.
+    // Strict queue order: the first entry that is not provably finished on
+    // the server is the head; nothing that could depend on it overtakes it.
+    // Shared-till pass: an entry that cannot be sent in THIS session (it
+    // belongs to another app user — it waits for them) does not stop the
+    // whole till. Later entries PROVEN independent of it (dependencies.ts)
+    // pass; anything that may depend on it — or on an entry waiting behind
+    // it — waits too. This user's own blocked entries (an undecided
+    // conflict, a ref still unresolved, a backoff) stop the pass as before.
+    // A committed entry whose reply cannot be read here is always passed.
+    const me = currentActorId();
+    const meIsAdmin = useAuthStore.getState().currentRole === "ADMIN";
+    const depCtx = await dependencyContext();
     let entry: SyncOutboxEntry | null = null;
     let resolvedArgs: Record<string, unknown> | null = null;
+    let waitingOnRef: SyncOutboxEntry | null = null;
+    const passed: SyncOutboxEntry[] = [];
     for (const candidate of pending) {
+      if (isParked(candidate)) continue;
+      if (passed.some((p) => mayDepend(candidate, p, depCtx))) {
+        passed.push(candidate);                      // waits with what it depends on
+        continue;
+      }
+      if (ownedByOther(candidate, me) && !(candidate.fenceRequired === true && meIsAdmin)) {
+        // (An ADMIN may still ask about — and fence — another user's HELD
+        // entry: it was never authorised offline; the server authorizes it.)
+        if (candidate.status === "pending" && (candidate.heldReason !== "needs-original-user" || !candidate.nextAttemptAt)) {
+          await park(candidate, "needs-original-user", OTHER_USER_TEXT, 5 * 60_000);
+        }
+        passed.push(candidate);
+        continue;
+      }
+      if (isBlockingConflict(candidate)) return "backoff";   // a person decides; never sent automatically
+      if (candidate.heldReason === "needs-original-user" && candidate.nextAttemptAt) {
+        // its creator is signed in again: due now (not after the 5-minute park)
+        await localDb.syncOutbox.update(candidate.localId, { nextAttemptAt: undefined });
+        candidate.nextAttemptAt = undefined;
+      }
       const args = await resolveArgs(candidate);
       if (args) {
         entry = candidate;
         resolvedArgs = args;
-        break;
+      } else {
+        waitingOnRef = candidate;
       }
+      break;
     }
     if (!entry) {
-      // Nothing ready to send. Flag anything that's been blocked on a
-      // dependency for too long — otherwise it sits `pending` forever,
-      // indistinguishable from "hasn't had a chance yet".
+      if (!waitingOnRef) return passed.length ? "backoff" : "drained";
+      // The head waits for a record another entry creates. If that entry can
+      // never succeed (set aside, refused, gone), say so now — no 24 h wait;
+      // otherwise flag it after 24 h of waiting (from when it first waited).
+      // Either way it keeps the head: nothing that may depend on it passes.
       const now = Date.now();
-      for (const candidate of pending) {
-        if (!candidate.refs?.length) continue;
-        if (now - Date.parse(candidate.createdAt) < STUCK_ENTRY_MAX_AGE_MS) continue;
+      const candidate = waitingOnRef;
+      const since = candidate.refWaitSince ?? new Date(now).toISOString();
+      if (!candidate.refWaitSince) await localDb.syncOutbox.update(candidate.localId, { refWaitSince: since });
+      const dead = await deadParent(candidate);
+      if (dead || now - Date.parse(since) >= STUCK_ENTRY_MAX_AGE_MS) {
         await localDb.syncOutbox.update(candidate.localId, {
           status: "conflict",
           failureKind: "permanent",
-          lastError: "Stuck waiting on a dependency that never synced — its parent entry may need to be retried or this one dismissed.",
+          blocksQueue: true,
+          lastError: dead
+            ? "Stuck: it needs a record that an earlier entry was to create, but that entry was set aside, refused or stopped. A person decides (retry the earlier one, or an owner sets this one aside). Later entries that may depend on it wait."
+            : "Stuck waiting on a dependency that never synced — its parent entry may need to be retried, or an owner sets this one aside. Later entries wait behind it.",
         });
+        notifyQueueChanged(candidate);
       }
-      return "drained";
+      return "backoff";
     }
 
     // The head of the line is still backing off from a transient failure.
@@ -725,13 +938,51 @@ async function runDrainPass(): Promise<DrainResult> {
     // assigns one, but be safe) — mint it now so that from this attempt on
     // every retry is idempotent.
     if (entry.kind === "rpc" && !entry.idempotencyKey) {
+      // A pre-Phase-D entry: a legacy (v4) key, as the build that queued it
+      // would have minted — it has no recorded actor, so a UUIDv7 key could
+      // never be executed for it (op_execute requires the actor for v7).
       const key = typeof resolvedArgs?.[IDEMPOTENCY_KEY_ARG] === "string"
         ? (resolvedArgs[IDEMPOTENCY_KEY_ARG] as string)
-        : newIdempotencyKey();
+        : crypto.randomUUID();
       entry.idempotencyKey = key;
       entry.args = { ...(entry.args ?? {}), [IDEMPOTENCY_KEY_ARG]: key };
       resolvedArgs = { ...(resolvedArgs ?? {}), [IDEMPOTENCY_KEY_ARG]: key };
       await localDb.syncOutbox.update(entry.localId, { idempotencyKey: key, args: entry.args });
+    }
+
+    // A row of an older build that has not been classified yet (restored or
+    // retried while this pass runs): classify it before anything is sent.
+    if (entry.kind === "rpc" && entry.staged === undefined && entry.fenceRequired === undefined) {
+      await classifyLegacyQueue();
+      const fresh = await localDb.syncOutbox.get(entry.localId);
+      if (fresh && fresh.staged === undefined && fresh.fenceRequired === undefined) {
+        if (fresh.writeAhead === true) {
+          holdForRecovery(fresh);                  // never resent without a lookup
+          await localDb.syncOutbox.put(fresh);
+        } else {
+          await localDb.syncOutbox.update(entry.localId, { staged: true });
+        }
+      }
+      continue;
+    }
+    // G1 Stage 1: an operation whose outcome is unknown and that was never
+    // authorised offline is NEVER resent; the server is asked instead.
+    if (entry.kind === "rpc" && entry.fenceRequired === true) {
+      const resolved = await resolveByLookup(entry, resolvedArgs);
+      if (resolved === "next") continue;
+      return resolved;
+    }
+    // An operation is sent only in its creator's session (the server
+    // enforces it too): drained by someone else, it waits for them.
+    if (entry.kind === "rpc") {
+      const owner = actorOf(entry);
+      const me = currentActorId();
+      if (owner && me && owner !== me) {
+        // Head of the queue: later entries may depend on it (e.g. a restock
+        // entered by its manager before this cashier's sale).
+        await park(entry, "needs-original-user", OTHER_USER_TEXT, 5 * 60_000);
+        return "backoff";
+      }
     }
 
     const sentAt = new Date().toISOString();
@@ -740,7 +991,48 @@ async function runDrainPass(): Promise<DrainResult> {
 
     let outcome: RpcOutcome = entry.kind === "table_write"
       ? await runTableWrite(entry.table!, entry.op!, entry.row, entry.id!)
-      : await callRpc(entry.name, resolvedArgs ?? {});
+      : await callRpc(entry.name, resolvedArgs ?? {}, { actorId: actorOf(entry) });
+    if (entry.kind === "rpc" && outcome.via) {
+      await localDb.syncOutbox.update(entry.localId, { protocol: outcome.via });
+    }
+
+    // Committed on the server, reply not readable here (another user's, or
+    // purged): reconciled by a verified reload, never guessed.
+    if (!outcome.error && outcome.responseUnavailable) {
+      const done = await acknowledgeCommittedWithoutReply(entry);
+      if (done === "next") continue;
+      return done;
+    }
+    // The server's ledger holds a FINAL decision (086): never resent.
+    if (outcome.error && (outcome.serverOutcome === "rejected" || outcome.serverOutcome === "abandoned")) {
+      await markFinal(entry, outcome.serverOutcome, outcome.error.message);
+      continue;
+    }
+    // Not executed and not recorded: belongs to another user, or waits for
+    // a prerequisite another till has not synchronised yet. Kept, same key.
+    if (outcome.error?.failure.klass === "WRONG_ACTOR") {
+      await park(entry, "needs-original-user", OTHER_USER_TEXT, 5 * 60_000);
+      return "backoff";
+    }
+    if (outcome.error?.failure.klass === "DEPENDENCY") {
+      // The 24 h clock starts at the FIRST dependency refusal (a till that
+      // was offline for days still gets its grace period).
+      const since = entry.dependencySince ?? new Date().toISOString();
+      if (Date.now() - Date.parse(since) >= STUCK_ENTRY_MAX_AGE_MS) {
+        await localDb.syncOutbox.update(entry.localId, {
+          status: "conflict", failureKind: "permanent", syncingSince: undefined, attempts: entry.attempts + 1, nextAttemptAt: undefined,
+          heldReason: undefined, blocksQueue: true, dependencySince: since,
+          lastError: `Still refused after a day, waiting for data that never arrived (${outcome.error.message}). Needs a person; later entries wait behind it.`,
+        });
+        notifyQueueChanged(entry);
+      } else {
+        await localDb.syncOutbox.update(entry.localId, { dependencySince: since });
+        await park(entry, "dependency",
+          `Waiting for related data to reach the server (${outcome.error.message}). Not recorded there; retried automatically with the same key.`,
+          Math.max(computeBackoffMs(entry.attempts + 1), 5 * 60_000));
+      }
+      return "backoff";   // later entries may depend on it (e.g. a close after this sale)
+    }
 
     // A 2xx is not success by itself (plan v2 §5.2): an RPC reply must have
     // the shape its reconciler needs, or the outcome is unknown.
@@ -762,6 +1054,20 @@ async function runDrainPass(): Promise<DrainResult> {
           const held = await holdOrRetry(entry, outcome.error);
           return held;
         }
+        // A key dated in the FUTURE (a till clock running ahead) is refused
+        // only until real time catches up — never a final outcome.
+        const keyTime = uuidV7TimeMs(entry.idempotencyKey);
+        if (failure.klass === "KEY_EXPIRED" && keyTime !== null && keyTime > Date.now()) {
+          await park(entry, "future-key",
+            "This till's clock was ahead when it was entered; the server accepts it once the time is reached. Kept with its key; later entries wait.",
+            Math.max(Math.min(keyTime - 30 * 24 * 60 * 60_000 - Date.now(), 6 * 60 * 60_000), 5 * 60_000));
+          return "backoff";
+        }
+        // Not decided on the server (a legacy direct refusal is never
+        // recorded; it could still run if retried): it keeps the head of the
+        // queue until a person retries or sets it aside. A key mismatch or
+        // a key too old to execute can never run under this key.
+        const dead = failure.klass === "CONTRACT" || failure.klass === "KEY_EXPIRED";
         await localDb.syncOutbox.update(entry.localId, {
           status: "conflict",
           syncingSince: undefined,
@@ -769,9 +1075,12 @@ async function runDrainPass(): Promise<DrainResult> {
           failureKind: "permanent",
           nextAttemptAt: undefined,
           heldReason: undefined,
-          lastError: outcome.error.message,
+          blocksQueue: dead ? undefined : true,
+          lastError: dead ? outcome.error.message
+            : `Refused by the server, but the refusal is NOT recorded there (not final): ${outcome.error.message}. Later entries wait until a person retries it or an owner sets it aside.`,
         });
         notifyQueueChanged(entry);
+        if (!dead) return "backoff";
         continue;
       }
     }
@@ -783,37 +1092,230 @@ async function runDrainPass(): Promise<DrainResult> {
     // the original response, which is reconciled exactly like a first-time
     // success (contract: "treat the stored response as a first-time success").
     if (entry.kind === "table_write") void touchAuthCache();
-    const reconcile = reconcilers[entry.name];
-    if (reconcile) {
-      // A reconciler that throws must not take the queue down with it, and
-      // must not lose the entry: keep it (the server HAS the operation — a
-      // resend returns the same stored reply) and stop this pass.
-      try {
-        beginMappingCapture();
-        reconcile(outcome.data, entry.provisional, entry.localId);
-        // The reply's stock rows must be on disk (with the ledger) BEFORE
-        // the entry disappears, or a crash in between could show stock as
-        // if the sale had never happened.
-        await flushStockCommit(entry.localId);
-      } catch (err) {
-        endMappingCapture();
-        console.error(`[sync] Reconciling ${entry.name} failed; the entry is kept and resent later:`, err);
-        await localDb.syncOutbox.update(entry.localId, {
-          status: "pending", syncingSince: undefined, attempts: entry.attempts + 1, failureKind: "transient",
-          inDoubt: true, heldReason: "reconcile-failed",
-          lastError: `Applied on the server, but this till could not record the reply (${err instanceof Error ? err.message : String(err)}). Kept; resent with the same key.`,
-          nextAttemptAt: new Date(Date.now() + Math.max(computeBackoffMs(entry.attempts + 1), 60_000)).toISOString(),
-        });
-        notifyQueueChanged(entry);
-        return "network";
-      }
-    }
-    // Acknowledge: the id mappings the reconciler produced and the removal
-    // of the entry commit together, or not at all (Batch 2A item 7).
-    await acknowledgeEntry(entry.localId, endMappingCapture());
-    notifyQueueChanged(entry);
-    useSyncStore.getState().setStatus({ lastTransientError: null });
+    if ((await applyServerReply(entry, outcome.data)) === "network") return "network";
   }
+}
+
+/** Reconcile a committed reply and acknowledge the entry (exactly once:
+ *  the entry and its mappings go in one transaction). "network" when the
+ *  reconciler failed — the entry is kept and asked about again later. */
+async function applyServerReply(entry: SyncOutboxEntry, data: unknown): Promise<"ok" | "network"> {
+  const reconcile = reconcilers[entry.name];
+  if (reconcile) {
+    // A reconciler that throws must not take the queue down with it, and
+    // must not lose the entry: keep it (the server HAS the operation — a
+    // resend returns the same stored reply) and stop this pass.
+    try {
+      beginMappingCapture();
+      reconcile(data, entry.provisional, entry.localId);
+      // The reply's stock rows must be on disk (with the ledger) BEFORE
+      // the entry disappears, or a crash in between could show stock as
+      // if the sale had never happened.
+      await flushStockCommit(entry.localId);
+    } catch (err) {
+      endMappingCapture();
+      console.error(`[sync] Reconciling ${entry.name} failed; the entry is kept and resent later:`, err);
+      await localDb.syncOutbox.update(entry.localId, {
+        status: keptStatus(entry, "pending"), syncingSince: undefined, attempts: entry.attempts + 1, failureKind: "transient",
+        inDoubt: true, heldReason: "reconcile-failed",
+        lastError: `Applied on the server, but this till could not record the reply (${err instanceof Error ? err.message : String(err)}). Kept; resent with the same key.`,
+        nextAttemptAt: new Date(Date.now() + Math.max(computeBackoffMs(entry.attempts + 1), 60_000)).toISOString(),
+      });
+      notifyQueueChanged(entry);
+      return "network";
+    }
+  }
+  // Acknowledge: the id mappings the reconciler produced and the removal
+  // of the entry commit together, or not at all (Batch 2A item 7).
+  await acknowledgeEntry(entry.localId, endMappingCapture());
+  notifyQueueChanged(entry);
+  useSyncStore.getState().setStatus({ lastTransientError: null });
+  return "ok";
+}
+
+// ----------------------------------------------------------------------
+// G1 Stage 1 recovery (migration 086): final outcomes, lookup + fence,
+// committed-without-reply.
+// ----------------------------------------------------------------------
+
+/** Text shown for an operation this till did not record and will not send
+ *  until the server can say what happened to it. */
+export const NOT_RECORDED_HELD_TEXT =
+  "NOT recorded on this till. The server may or may not have received it, and this server cannot confirm it yet " +
+  "(it needs the operation-status update, migration 086). It is held with its original key and will NOT be sent automatically.";
+
+const OTHER_USER_TEXT =
+  "Entered by another user: it is sent only when that user signs in on this till, and later entries wait behind it. " +
+  "An administrator can check it, or an owner can set it aside to let the rest of the queue continue.";
+
+/** The ONLY hold later entries may pass (stabilization pass, H2): the
+ *  server has confirmed the operation COMMITTED (its reply just cannot be
+ *  read here), so it can never change server state again, and anything that
+ *  needs its ids still waits on its refs. Every other hold — another
+ *  user's entry, a missing prerequisite, an unknown outcome — keeps its
+ *  place at the head of the queue: a later entry may depend on it. */
+const isParked = (entry: SyncOutboxEntry): boolean =>
+  entry.heldReason === "committed-reply-unavailable"
+  && Boolean(entry.nextAttemptAt) && Date.parse(entry.nextAttemptAt!) > Date.now();
+
+/** The server decided this key for good: it never executes from here. Its
+ *  local stock effect is released by the next recompute (conflict rows are
+ *  not counted — pendingStock.ts). */
+async function markFinal(entry: SyncOutboxEntry, outcome: "rejected" | "abandoned", message: string): Promise<void> {
+  await localDb.syncOutbox.update(entry.localId, {
+    // A set-aside / quarantined entry keeps that status; it now carries the server's decision.
+    status: keptStatus(entry, "conflict"), serverOutcome: outcome, failureKind: "permanent", syncingSince: undefined,
+    attempts: entry.attempts + 1, inDoubt: false, heldReason: undefined, nextAttemptAt: undefined,
+    lastError: outcome === "abandoned"
+      ? `Not applied: ${message}`
+      : `Refused by the server (final; it will not be sent again): ${message}`,
+  });
+  notifyQueueChanged(entry);
+}
+
+/** Audit line for an owner's recovery action (exported with the queue). */
+async function ownerAudit(localId: string, detail: string): Promise<void> {
+  const at = new Date().toISOString();
+  const line = { id: newId("rlog"), at, event: "owner-action" as const, localId, ownerUserId: useAuthStore.getState().currentUserId ?? null, detail: detail.slice(0, 300) };
+  await localDb.syncState.put({ key: `${RECONCILE_LOG_PREFIX}${line.id}`, value: JSON.stringify(line), updatedAt: at }).catch(() => undefined);
+}
+
+/** The status a rewrite may give an entry: a set-aside or quarantined entry
+ *  keeps it, a held recovery stays "conflict" (no older build sends it). */
+const keptStatus = (entry: SyncOutboxEntry, otherwise: SyncOutboxEntry["status"]): SyncOutboxEntry["status"] =>
+  entry.status === "archived" || entry.status === "quarantined" ? entry.status
+    : entry.fenceRequired === true && otherwise === "pending" ? "conflict" : otherwise;
+
+/** Keep an entry, its key and arguments, and look again after `delayMs`.
+ *  A held recovery stays "conflict" (never sent by any older build). */
+async function park(entry: SyncOutboxEntry, heldReason: string, lastError: string, delayMs: number): Promise<void> {
+  await localDb.syncOutbox.update(entry.localId, {
+    status: keptStatus(entry, entry.fenceRequired === true ? "conflict" : "pending"),
+    syncingSince: undefined, failureKind: "transient", heldReason, lastError,
+    inDoubt: entry.inDoubt === true || entry.fenceRequired === true,
+    nextAttemptAt: new Date(Date.now() + delayMs).toISOString(),
+  });
+  notifyQueueChanged(entry);
+}
+
+const actorOf = (entry: SyncOutboxEntry): string | null =>
+  entry.actorId ?? (typeof entry.args?.p_expected_actor_id === "string" ? (entry.args.p_expected_actor_id as string) : null);
+
+/**
+ * An operation that must never be resent: ask the server (op_status) and,
+ * if the server never saw it, fence it so a late copy can never execute.
+ * "next" when the entry was settled or parked; a DrainResult to stop.
+ */
+async function resolveByLookup(entry: SyncOutboxEntry, resolvedArgs: Record<string, unknown> | null = null): Promise<DrainResult | "next"> {
+  if (!entry.idempotencyKey) {
+    await park(entry, "outcome-unknown", "No operation key on this entry: it cannot be checked with the server. Kept; never sent. Later entries wait behind it until an owner sets it aside.", 30 * 60_000);
+    return "backoff";
+  }
+  const actorId = actorOf(entry);
+  // The arguments let the server verify, from its own rows, which
+  // organisation the operation belongs to (needed when no actor is known).
+  const { absent, status, error } = await lookupOperation(entry.name, entry.idempotencyKey, {
+    fence: true, actorId, args: resolvedArgs ?? entry.args ?? null,
+  });
+  await localDb.syncOutbox.update(entry.localId, { protocol: "lookup" });
+  if (absent) {
+    await park(entry, "needs-server-086", NOT_RECORDED_HELD_TEXT, 30 * 60_000);
+    return "backoff";
+  }
+  if (error || !status) {
+    // Could not ask (network, timeout, server error): try again later, same
+    // entry, nothing sent.
+    const err = error ?? new RpcError("No status reply", { failure: { klass: "UNKNOWN_OUTCOME", mayHaveCommitted: true, retryable: true, hold: null } });
+    if (err.failure.klass === "AUTH_REAUTH" || err.failure.klass === "AUTH_REFRESH") return holdOrRetry(entry, err);
+    await park(entry, "status-unreachable", `The server could not be asked about this operation (${err.message}). Kept; asked again later — never resent.`,
+      Math.max(computeBackoffMs(entry.attempts + 1), 30_000));
+    useSyncStore.getState().setStatus({ lastTransientError: err.message });
+    return err.failure.hold ? "backoff" : "network";
+  }
+  switch (status.status) {
+    case "committed": {
+      if (status.withheld || status.responsePurged || status.response == null) return acknowledgeCommittedWithoutReply(entry);
+      const problem = replyProblem(entry.name, status.response);
+      if (problem) {
+        await park(entry, "unrecognised-reply", `Applied on the server, but its stored reply could not be read (${problem}). Kept.`, 30 * 60_000);
+        return "next";
+      }
+      return (await applyServerReply(entry, status.response)) === "network" ? "network" : "next";
+    }
+    case "rejected":
+      await markFinal(entry, "rejected", status.message ?? "the details are visible to the person who entered it or an administrator.");
+      return "next";
+    case "abandoned":
+      await markFinal(entry, "abandoned",
+        "it never ran on the server and has been stopped there, so it can never be applied. Enter it again as a new operation if it is still needed.");
+      return "next";
+    case "in_flight":
+      await park(entry, "in-flight", "The server is still processing this operation. Asked again shortly.", Math.max(computeBackoffMs(entry.attempts + 1), 5_000));
+      return "backoff";
+    case "unavailable":
+      await park(entry, "outcome-unavailable",
+        "The server cannot report on this operation to this till. Kept with its original key; never resent. An administrator should check it.", 30 * 60_000);
+      return "backoff";
+    case "not_found":
+    default:
+      if (status.reason === "expired") {
+        await park(entry, "expired-unverifiable",
+          "Too old for the server to confirm or stop automatically. It is never sent; an owner must check the server records and reconcile it.",
+          24 * 60 * 60_000);
+      } else if (!actorId) {
+        await park(entry, "needs-administrator",
+          "Recorded by an older version without its user: only an administrator can resolve it (the server checks it belongs to this organisation). Never resent. If it still cannot be resolved, an owner exports and reconciles it.",
+          30 * 60_000);
+      } else {
+        await park(entry, "needs-original-user",
+          "Not recorded on this till and not yet confirmed by the server. Only the person who entered it, or an administrator, can resolve it — sign in as one of them. Never resent.",
+          5 * 60_000);
+      }
+      // Undecided: it may still run (a delayed copy), so nothing after it may
+      // overtake it (H2) — e.g. a close of the shift it belongs to.
+      return "backoff";
+  }
+}
+
+/**
+ * The server says COMMITTED but this till cannot read the reply. Never
+ * guessed: the entry stays (in doubt — its decrease keeps counting) until a
+ * full reload from the server has the authoritative rows; only then is it
+ * acknowledged, its provisional rows dropped and its stock effect released
+ * — once. An operation other queued entries reference (their provisional
+ * ids need the server's) waits for someone who can read the reply.
+ */
+async function acknowledgeCommittedWithoutReply(entry: SyncOutboxEntry): Promise<DrainResult | "next"> {
+  const ids = new Set((entry.provisional ?? []).flatMap((p) => p.ids));
+  if (ids.size) {
+    const others = await localDb.syncOutbox.filter((r) => r.localId !== entry.localId && r.status !== "reconciled").toArray();
+    if (others.some((r) => (r.refs ?? []).some((ref) => ids.has(ref.provisionalId)))) {
+      await park(entry, "committed-reply-unavailable",
+        "Applied on the server, but its reply belongs to another user. Later entries need it: sign in as the person who entered it, or an administrator.",
+        5 * 60_000);
+      return "next";
+    }
+  }
+  await localDb.syncOutbox.update(entry.localId, {
+    status: keptStatus(entry, "pending"), syncingSince: undefined, inDoubt: true, heldReason: "committed-verifying",
+    lastError: "Applied on the server; confirming it by reloading the server's records.",
+    nextAttemptAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  notifyQueueChanged(entry);
+  if (!(await verifiedReload())) {
+    await localDb.syncOutbox.update(entry.localId, {
+      nextAttemptAt: new Date(Date.now() + Math.max(computeBackoffMs(entry.attempts + 1), 60_000)).toISOString(),
+      attempts: entry.attempts + 1,
+    });
+    return "network";
+  }
+  releaseEntry(entry.localId);
+  await deleteLocalRows(entry.provisional);
+  await acknowledgeEntry(entry.localId, []);
+  notifyQueueChanged(entry);
+  // Drop the provisional rows from what is shown (they are no longer queued).
+  void verifiedReload();
+  return "next";
 }
 
 const malformedReply = (rpc: string, problem: string, status?: number): RpcError =>
@@ -838,11 +1340,12 @@ async function holdOrRetry(entry: SyncOutboxEntry, error: RpcError): Promise<Dra
   const authFailures = failure.klass === "AUTH_REAUTH" ? (entry.authFailures ?? 0) + 1 : 0;
   const delay = Math.max(computeBackoffMs(attempts), holdBackoffMs(failure.hold), failure.retryAfterMs ?? 0);
   await localDb.syncOutbox.update(entry.localId, {
-    status: "pending",
+    // A held recovery stays "conflict" (downgrade safety), whatever the failure.
+    status: entry.fenceRequired === true ? "conflict" : "pending",
     syncingSince: undefined,
     attempts,
     failureKind: "transient",
-    lastError: error.message,
+    lastError: entry.fenceRequired === true ? `${NOT_YET_CONFIRMED_TEXT} (${error.message})` : error.message,
     inDoubt: entry.inDoubt === true || failure.mayHaveCommitted,
     heldReason: failure.klass === "MALFORMED_SUCCESS" ? "unrecognised-reply" : failure.hold ?? undefined,
     authFailures,
@@ -901,13 +1404,150 @@ export async function retryOutboxEntry(localId: string): Promise<void> {
   if (entry.status === "reconciled") {
     throw new Error("This entry was reconciled by the owner. It is never sent again from this till.");
   }
+  if (entry.serverOutcome) {
+    throw new Error(entry.serverOutcome === "abandoned"
+      ? "This operation was stopped before the server applied it; it can never be sent. Enter it again as a new operation if it is still needed."
+      : "The server refused this operation for good; it is never sent again. Enter a new one if it is still needed.");
+  }
   if (entry.status === "quarantined" || !belongsToBackend(entry, currentBackendOrigin())) {
     throw new Error("This entry was queued for another server and cannot be retried here. Export it for the owner.");
   }
+  if (entry.fenceRequired === true) {
+    // Held for confirmation: "retry" asks the server again now — it is never
+    // resent, and it stays out of every older build's automatic queue.
+    await localDb.syncOutbox.update(localId, { nextAttemptAt: undefined });
+    notifyQueueChanged();
+    return;
+  }
+  if (entry.kind === "rpc" && entry.writeAhead === true && entry.inDoubt === true && entry.staged !== true) {
+    // An in-doubt attempt never authorised offline (an older build's row):
+    // "retry" means ask the server, never resend.
+    holdForRecovery(entry);
+    await localDb.syncOutbox.put(entry);
+    notifyQueueChanged();
+    return;
+  }
   await localDb.syncOutbox.update(localId, {
     status: "pending", lastError: undefined, nextAttemptAt: undefined, failureKind: undefined,
+    blocksQueue: undefined, dependencySince: undefined, refWaitSince: undefined,
   });
   notifyQueueChanged();
+}
+
+/** An entry whose outcome nobody has established: it was sent (or may have
+ *  been) and the server has not decided it for this till yet. */
+export const isUndecided = (entry: SyncOutboxEntry): boolean =>
+  entry.kind === "rpc" && !entry.serverOutcome && Boolean(entry.idempotencyKey)
+  && (entry.fenceRequired === true || entry.inDoubt === true || entry.status === "syncing" || entry.statusBeforeArchive === "syncing");
+
+/**
+ * Owner action (set aside / conflict entries the drain no longer handles):
+ * ask the server what became of an undecided operation and, if it never
+ * arrived, fence it — so a later reconciliation ("recreated" / "cancelled")
+ * rests on a durable server decision. Committed -> reconciled and removed.
+ * Returns what the server said; nothing is ever resent.
+ */
+export async function confirmWithServer(localId: string): Promise<"committed" | "rejected" | "abandoned" | "undecided"> {
+  const entry = await localDb.syncOutbox.get(localId);
+  if (entry && (entry.status === "quarantined" || !belongsToBackend(entry, currentBackendOrigin()))) {
+    // Never asked of (or fenced on) a server it was not queued for: "not
+    // found" here proves nothing about the server it was sent to.
+    throw new Error("This entry was queued for another server. It can only be checked against that server (export it for the owner); nothing was asked or changed here.");
+  }
+  // An entry authorised offline (staged) is a real operation waiting to be
+  // sent: it is looked up, NEVER fenced — confirming must not cancel it
+  // (shared-till pass). Only an attempt never authorised offline (held, or a
+  // write-ahead row with nothing staged) is fenced when the server never saw it.
+  const fenceIt = (e: SyncOutboxEntry) => e.fenceRequired === true || (e.writeAhead === true && e.staged !== true);
+  const r = await settleBeforeReplacement([localId], { fence: fenceIt });
+  const after = await localDb.syncOutbox.get(localId);
+  await ownerAudit(localId, `confirm-with-server: ${r === "committed" ? "committed (recorded)" : after?.serverOutcome ?? (entry && !fenceIt(entry) ? "not decided — authorised offline, looked up only (never fenced)" : "not decided")}${
+    entry && ownedByOther(entry, currentActorId()) ? ` (entered by ${actorOf(entry)})` : ""}`);
+  if (r === "committed") return "committed";
+  const row = await localDb.syncOutbox.get(localId);
+  if (row?.serverOutcome === "rejected" || row?.serverOutcome === "abandoned") return row.serverOutcome;
+  return "undecided";
+}
+
+/**
+ * Before a person enters a REPLACEMENT for earlier attempts of the same
+ * operation, every earlier attempt is settled with the SERVER (stabilization
+ * pass A/B). `earlier` are the attempts as they were when the person was
+ * asked — durable references (key, name, arguments, actor, backend), so a
+ * row that disappears meanwhile (a drain committed and acknowledged it, or
+ * reconciled it) is never mistaken for "it did not happen":
+ *  - each one is asked again under the drain lock, by its OWN key, row or
+ *    no row: committed -> recorded ("committed": nothing new may be
+ *    created); rejected / abandoned (fenced now if the server never saw it)
+ *    -> the replacement may proceed; in flight, unknown, unreachable, no
+ *    086 -> "blocked";
+ *  - an attempt queued for ANOTHER backend (or quarantined) is never looked
+ *    up or fenced here — a "not found" from this server proves nothing
+ *    about that one -> "blocked".
+ */
+export async function settleBeforeReplacement(
+  earlier: (string | SyncOutboxEntry)[],
+  opts: { fence?: (entry: SyncOutboxEntry) => boolean } = {},
+): Promise<"proceed" | "committed" | "blocked"> {
+  const snapshots: SyncOutboxEntry[] = [];
+  for (const ref of earlier) {
+    const snap = typeof ref === "string" ? await localDb.syncOutbox.get(ref) : ref;
+    if (!snap) return "blocked";                 // no durable reference to ask about
+    snapshots.push(snap);
+  }
+  const origin = currentBackendOrigin();
+  for (const snap of snapshots) {
+    if (snap.status === "quarantined" || !belongsToBackend(snap, origin)) return "blocked";
+  }
+  const run = async (): Promise<"proceed" | "committed" | "blocked"> => {
+    const busy = await rowsInFlightAnywhere();
+    let committed = false;
+    let reloadNeeded = false;
+    for (const snap of snapshots) {
+      await renewLease();
+      if (busy.has(snap.localId)) return "blocked";   // the original is being sent right now
+      const row = await localDb.syncOutbox.get(snap.localId);
+      if (row && (row.status === "quarantined" || !belongsToBackend(row, origin))) return "blocked";
+      if (row?.serverOutcome) continue;              // decided on the server: rejected / abandoned
+      const subject = row ?? snap;
+      if (subject.kind !== "rpc" || !subject.idempotencyKey) return "blocked";
+      const { absent, status, error } = await lookupOperation(subject.name, subject.idempotencyKey, {
+        fence: opts.fence ? opts.fence(subject) : true, actorId: actorOf(subject), args: (row ? await resolveArgs(row) : null) ?? subject.args ?? null,
+      });
+      if (absent || error || !status) return "blocked";
+      if (status.status === "committed") {
+        committed = true;
+        if (!row || row.status === "reconciled") {
+          // Already recorded on this till (or by the owner): just refresh.
+          reloadNeeded = true;
+        } else if (status.withheld || status.responsePurged || status.response == null || replyProblem(row.name, status.response)) {
+          const done = await acknowledgeCommittedWithoutReply(row);
+          if (done !== "next" || (await localDb.syncOutbox.get(row.localId))) return "blocked";
+        } else if ((await applyServerReply(row, status.response)) !== "ok") {
+          return "blocked";
+        }
+      } else if (status.status === "rejected") {
+        if (row && row.status !== "reconciled") await markFinal(row, "rejected", status.message ?? "the details are visible to the person who entered it or an administrator.");
+      } else if (status.status === "abandoned") {
+        if (row && row.status !== "reconciled") await markFinal(row, "abandoned", "it never ran on the server and has been stopped there.");
+      } else {
+        return "blocked";                            // in flight, unavailable, not fenced
+      }
+    }
+    if (reloadNeeded) void verifiedReload();
+    return committed ? "committed" : "proceed";
+  };
+  // Never alongside a drain pass of this instance (the Dexie lease cannot
+  // tell the two apart): wait for it (bounded); another window's pass holds
+  // the lock.
+  for (let i = 0; draining && i < 200; i++) await new Promise((r) => setTimeout(r, 100));
+  if (draining) return "blocked";
+  draining = true;
+  try {
+    return await withDrainLockOr(run, "blocked");
+  } finally {
+    draining = false;
+  }
 }
 
 // ----------------------------------------------------------------------
@@ -969,6 +1609,10 @@ export async function setAsideOutboxEntry(
   });
   void refreshSyncStatus();
   notifyQueueChanged(updated);
+  // Set aside is NOT "cancelled" and NOT "never executed": the entry, its key
+  // and its conservative stock reservation stay; it just stops blocking.
+  await ownerAudit(localId, `set-aside (was ${updated.statusBeforeArchive ?? "?"}; not cancelled — its outcome is ${updated.serverOutcome ?? (isUndecided(updated) ? "UNKNOWN (it may have been applied)" : "not established")})${
+    ownedByOther(updated, currentActorId()) ? `, entered by ${actorOf(updated)}` : ""}`);
   return updated;
 }
 
@@ -986,6 +1630,18 @@ export async function restoreSetAsideEntry(localId: string): Promise<SyncOutboxE
     if (entry.status !== "archived") throw new OutboxActionError("not-set-aside", "This entry is not set aside.");
     const before = entry.statusBeforeArchive ?? "pending";
     const next: SyncOutboxEntry = { ...entry, status: before === "syncing" ? "pending" : before };
+    // An entry whose outcome is unknown (it was being sent, or is in doubt)
+    // is never blindly resent: never authorised offline -> held (lookup +
+    // fence first); authorised offline (staged) -> in doubt, resent only with
+    // its own key (the server answers a committed key from its ledger).
+    if (entry.kind === "rpc" && !entry.serverOutcome && before !== "quarantined" && (before === "syncing" || entry.inDoubt === true)) {
+      if (entry.fenceRequired === true || (entry.writeAhead === true && entry.staged !== true)) {
+        holdForRecovery(next);
+      } else {
+        next.inDoubt = true;
+        next.staged = true;
+      }
+    }
     delete next.statusBeforeArchive;
     delete next.archivedAt;
     delete next.archivedBy;
@@ -996,6 +1652,7 @@ export async function restoreSetAsideEntry(localId: string): Promise<SyncOutboxE
   });
   void refreshSyncStatus();
   notifyQueueChanged(restored);
+  await ownerAudit(localId, `restore -> ${restored.status}${restored.fenceRequired ? " (held: looked up before anything is sent)" : ""}`);
   return restored;
 }
 
@@ -1005,7 +1662,11 @@ export async function listSetAsideEntries(): Promise<SyncOutboxEntry[]> {
 }
 
 export async function countPendingOutbox(): Promise<number> {
-  return localDb.syncOutbox.where("status").anyOf("pending", "syncing", "failed").count();
+  // Held recoveries ("conflict" + fenceRequired, no server decision) still
+  // need the server's answer: they count, so the periodic drain asks again.
+  const queued = await localDb.syncOutbox.where("status").anyOf("pending", "syncing", "failed").count();
+  const held = await localDb.syncOutbox.where("status").equals("conflict").filter(isHeldRecovery).count();
+  return queued + held;
 }
 
 /** Everything the server does not have yet and the owner has not

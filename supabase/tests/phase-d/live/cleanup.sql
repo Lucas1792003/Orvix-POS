@@ -250,6 +250,7 @@ SELECT 'audit_logs', count(*) FROM d;
 
 WITH d AS (DELETE FROM idempotency_keys
             WHERE actor_id LIKE 'qa-%' OR actor_id IN (SELECT id FROM qa_users)
+               OR org_id IN (SELECT id FROM qa_orgs)   -- 086: a fenced legacy entry may have no actor
             RETURNING 1)
 SELECT 'idempotency_keys', count(*) FROM d;
 
