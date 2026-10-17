@@ -155,8 +155,9 @@ describe("Realtime gap reconciliation", () => {
     expect(syncState()).toBe("subscribed");
     expect(qty(get, "p1")).toBe(13);
     expect((await localDb.inventory.get(["shop-1", "p1"]))?.qtyBaseUnits).toBe(13);
-    // one select per join
-    expect(fake.selectCalls).toBe(2);
+    // one complete read per join; a paged read (ORV-001) is the data page
+    // plus the empty page that proves it is complete: 2 joins × 2 requests
+    expect(fake.selectCalls).toBe(4);
     // and no write RPC was ever sent by a refresh
     expect(fake.calls.filter((c) => c.name !== "resolve_event_time")).toHaveLength(0);
   });
@@ -189,9 +190,30 @@ describe("Realtime gap reconciliation", () => {
     expect(await get().refreshInventoryFromServer({ shopId: "shop-1" })).toBe(true);
     expect(qty(get, "p1")).toBe(8);
 
-    // A genuinely newer event after the refresh is applied.
-    ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1", qty: 6, commitTimestamp: new Date(Date.parse(fake.serverNow()) + 1000).toISOString() });
+    // A genuinely newer event after the refresh is applied. "Newer" means
+    // newer than everything already applied (A's sale committed at t0+2 s):
+    // the refresh no longer LOWERS a row's watermark to its own server time
+    // (Batch 1-code, G-5), so an event between the refresh and A's commit
+    // would be a reordered stale delivery, not a newer state.
+    const newer = Math.max(Date.parse(fake.serverNow()), t0 + 2000) + 1000;
+    ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1", qty: 6, commitTimestamp: new Date(newer).toISOString() });
     expect(qty(get, "p1")).toBe(6);
+  });
+
+  it("a refresh never lowers a row's watermark below an event it already applied (reordered delivery cannot roll the row back)", async () => {
+    const { get } = makeStore();
+    handle = connect(get);
+    const ch = fake.realtime.current();
+    ch.emitStatus("SUBSCRIBED");
+    await settle();
+    const t0 = Date.parse(fake.serverNow());
+    // Committed after the refresh below reads the server clock.
+    ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1", qty: 4, commitTimestamp: new Date(t0 + 5000).toISOString() });
+    fake.server.inventory.set("shop-1:p1", 4);
+    expect(await get().refreshInventoryFromServer({ shopId: "shop-1" })).toBe(true);
+    // An older change (t0+3 s) delivered late must not overwrite qty 4.
+    ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1", qty: 9, commitTimestamp: new Date(t0 + 3000).toISOString() });
+    expect(qty(get, "p1")).toBe(4);
   });
 
   it("clears the stale state through the periodic refresh while the channel stays down, and bounds it when the refresh fails", async () => {
@@ -383,5 +405,234 @@ describe("Realtime gap reconciliation", () => {
     vi.stubGlobal("navigator", { onLine: false });
     expect(await get().refreshInventoryFromServer({ shopId: "shop-1" })).toBe(false);
     expect(fake.selectCalls).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Batch 1-code (ORV-001, G-5): the refresh reads every page past the
+// 1,000-row cap, keeps live updates that arrive between its pages, and a
+// failed page changes nothing.
+// ---------------------------------------------------------------------------
+describe("paged inventory refresh", () => {
+  const pid = (i: number) => `p-${String(i).padStart(5, "0")}`;
+  const seedServer = (n: number, qtyOf = (i: number) => i) => {
+    fake.server.inventory.clear();
+    for (let i = 0; i < n; i += 1) fake.server.inventory.set(`shop-1:${pid(i)}`, qtyOf(i));
+  };
+
+  it("reads all 2,500 rows of a shop (3 pages + end), mirrors them and drops rows the server no longer has", async () => {
+    seedServer(2500);
+    const { get } = makeStore();
+    expect(await get().refreshInventoryFromServer({ shopId: "shop-1" })).toBe(true);
+    expect(get().inventory.filter((r: { shopId: string }) => r.shopId === "shop-1")).toHaveLength(2500);
+    expect(qty(get, pid(2499))).toBe(2499);
+    expect(qty(get, "p1")).toBeUndefined(); // the seeded local row is gone server-side
+    expect(await localDb.inventory.where("shopId").equals("shop-1").count()).toBe(2500);
+    expect(fake.selectCalls).toBe(4);
+  });
+
+  it("a live update that commits between two pages is kept, not rolled back by the older page", async () => {
+    seedServer(1500, () => 10);
+    const { get } = makeStore();
+    handle = connect(get);
+    const ch = fake.realtime.current();
+    // Page 1 (rows p-00000..p-00999) has been read when, before page 2, a
+    // sale elsewhere moves p-00005 to 3 and its event arrives.
+    fake.setSelectHook((request) => {
+      if (request !== 1) return;
+      fake.server.inventory.set(`shop-1:${pid(5)}`, 3);
+      ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: pid(5), qty: 3 });
+    });
+    expect(await get().refreshInventoryFromServer({ shopId: "shop-1" })).toBe(true);
+    expect(qty(get, pid(5))).toBe(3);
+    expect((await localDb.inventory.get(["shop-1", pid(5)]))?.qtyBaseUnits).toBe(3);
+    expect(qty(get, pid(6))).toBe(10);
+  });
+
+  it("a live DELETE between pages removes the row even though page 1 still had it", async () => {
+    seedServer(1500, () => 10);
+    const { get } = makeStore();
+    handle = connect(get);
+    const ch = fake.realtime.current();
+    fake.setSelectHook((request) => {
+      if (request !== 1) return;
+      fake.server.inventory.delete(`shop-1:${pid(7)}`);
+      ch.emitChange({ eventType: "DELETE", shopId: "shop-1", productId: pid(7) });
+    });
+    expect(await get().refreshInventoryFromServer({ shopId: "shop-1" })).toBe(true);
+    expect(qty(get, pid(7))).toBeUndefined();
+    expect(get().inventory.filter((r: { shopId: string }) => r.shopId === "shop-1")).toHaveLength(1499);
+  });
+
+  it("a page that fails mid-read changes nothing: rows, mirror and the pending-delta view stay as they were", async () => {
+    seedServer(1500, () => 50);
+    const { get } = makeStore();
+    fake.setSelectHook((request) => { if (request === 1) fake.setSelectMode("network-error"); });
+    expect(await get().refreshInventoryFromServer({ shopId: "shop-1" })).toBe(false);
+    expect(get().inventory).toEqual([{ shopId: "shop-1", productId: "p1", qtyBaseUnits: 10 }]);
+    expect(await localDb.inventory.toArray()).toEqual([{ shopId: "shop-1", productId: "p1", qtyBaseUnits: 10 }]);
+  });
+
+  it("a queued offline sale's delta is applied to a row that a live event replaced during the read", async () => {
+    seedServer(1200, () => 10);
+    fake.server.inventory.set("shop-1:p1", 10);
+    const { get } = makeStore({ shifts: [{ id: "shift-1", shopId: "shop-1", cashierId: "user-1", openingCashMmk: 0, startedAt: "t0" }] });
+    handle = connect(get);
+    const ch = fake.realtime.current();
+    vi.stubGlobal("navigator", { onLine: false });
+    await get().createSale({ ...saleInput, cartItems: [cartItem({ qty: 2 })] }); // queued: p1 −2 locally
+    vi.stubGlobal("navigator", { onLine: true });
+    fake.setSelectHook((request) => {
+      if (request !== 1) return;
+      fake.server.inventory.set("shop-1:p1", 9); // another till sold one
+      ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1", qty: 9 });
+    });
+    expect(await get().refreshInventoryFromServer({ shopId: "shop-1" })).toBe(true);
+    expect(qty(get, "p1")).toBe(7); // server 9 − the 2 still queued
+  });
+});
+
+// ---------------------------------------------------------------------------
+// H2 (ORV-021): a live server row must not "un-sell" a sale still queued on
+// this till, must never subtract a sale twice, and older async work must
+// never overwrite a newer event. The queue itself is never touched.
+// ---------------------------------------------------------------------------
+describe("H2: live stock events while offline stock changes are queued", () => {
+  const mirrored = async (productId: string) => (await localDb.inventory.get(["shop-1", productId]))?.qtyBaseUnits;
+  const queueOfflineSale = async (get: () => { createSale: (i: unknown) => Promise<string> }, qty: number) => {
+    vi.stubGlobal("navigator", { onLine: false });
+    await get().createSale({ ...saleInput, cartItems: [cartItem({ qty })] });
+    vi.stubGlobal("navigator", { onLine: true });
+  };
+  const live = async (get: ReturnType<typeof makeStore>["get"]) => {
+    handle = connect(get);
+    const ch = fake.realtime.current();
+    ch.emitStatus("SUBSCRIBED");
+    await settle();
+    return ch;
+  };
+
+  it("a real server stock change during an outstanding offline sale shows server − queued, in memory and in the mirror, never the raw row", async () => {
+    const { get } = makeStore();
+    await queueOfflineSale(get, 2);                     // local 10 → 8, queued
+    const ch = await live(get);                          // refresh keeps 8 (server 10 − 2)
+    expect(qty(get, "p1")).toBe(8);
+    const outbox = await localDb.syncOutbox.toArray();
+
+    fake.server.inventory.set("shop-1:p1", 9);           // another till sold 1
+    ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1", qty: 9 });
+    expect(qty(get, "p1")).toBe(8);                      // not the raw 9, even for an instant
+    await vi.waitFor(() => expect(qty(get, "p1")).toBe(7));
+    await vi.waitFor(async () => expect(await mirrored("p1")).toBe(7));
+    expect(await localDb.syncOutbox.toArray()).toEqual(outbox); // queue untouched
+    expect(fake.server.inventory.get("shop-1:p1")).toBe(9);     // server value untouched
+
+    // The sale drains: server 7, authoritative row 7, no double subtraction.
+    expect(await drainOutbox()).toBe("drained");
+    expect(fake.server.inventory.get("shop-1:p1")).toBe(7);
+    expect(qty(get, "p1")).toBe(7);
+    ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1" }); // its own commit event
+    expect(qty(get, "p1")).toBe(7);
+    await vi.waitFor(async () => expect(await mirrored("p1")).toBe(7));
+  });
+
+  it("with nothing queued the server row is applied synchronously and mirrored", async () => {
+    const { get } = makeStore();
+    const ch = await live(get);
+    ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1", qty: 4 });
+    expect(qty(get, "p1")).toBe(4);
+    await vi.waitFor(async () => expect(await mirrored("p1")).toBe(4));
+  });
+
+  it("rapid events: the last one wins, with the queued delta, and an earlier event's async step never overwrites it", async () => {
+    const { get } = makeStore();
+    await queueOfflineSale(get, 2);
+    const ch = await live(get);
+    const t = Date.parse(fake.serverNow());
+    ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1", qty: 9, commitTimestamp: new Date(t + 1000).toISOString() });
+    ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1", qty: 6, commitTimestamp: new Date(t + 2000).toISOString() });
+    await vi.waitFor(() => expect(qty(get, "p1")).toBe(4)); // 6 − 2
+    await new Promise((r) => setTimeout(r, 20));
+    expect(qty(get, "p1")).toBe(4);
+    expect(await mirrored("p1")).toBe(4);
+  });
+
+  it("a sale acknowledged by the server before its own event arrives is not subtracted twice", async () => {
+    const { get } = makeStore();
+    await queueOfflineSale(get, 2);
+    const ch = await live(get);
+    expect(await drainOutbox()).toBe("drained");         // server 8; reconcile wrote 8; nothing pending
+    ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1" }); // server row 8
+    expect(qty(get, "p1")).toBe(8);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(qty(get, "p1")).toBe(8);
+  });
+
+  it("a sale acknowledged WHILE an event is being processed: the drain's authoritative row stands, never double-subtracted", async () => {
+    const { get } = makeStore();
+    await queueOfflineSale(get, 2);
+    const ch = await live(get);
+    fake.server.inventory.set("shop-1:p1", 9);           // another till sold 1 (server 9)
+    ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1", qty: 9 }); // async step in flight
+    expect(await drainOutbox()).toBe("drained");         // our sale lands: server 7
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fake.server.inventory.get("shop-1:p1")).toBe(7);
+    expect(qty(get, "p1")).toBe(7);
+  });
+
+  it("a DELETE cancels the pending correction of an earlier update", async () => {
+    const { get } = makeStore();
+    await queueOfflineSale(get, 2);
+    const ch = await live(get);
+    ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1", qty: 9 });
+    ch.emitChange({ eventType: "DELETE", shopId: "shop-1", productId: "p1" });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(qty(get, "p1")).toBeUndefined();
+  });
+
+  it("an event whose async step is overtaken by a paged refresh does not overwrite the refresh's rows", async () => {
+    const { get } = makeStore();
+    await queueOfflineSale(get, 2);
+    const ch = await live(get);
+    ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: "p1", qty: 9, commitTimestamp: new Date(Date.parse(fake.serverNow()) - 60_000).toISOString() });
+    fake.server.inventory.set("shop-1:p1", 5);
+    expect(await get().refreshInventoryFromServer({ shopId: "shop-1" })).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(qty(get, "p1")).toBe(3); // refresh: 5 − 2
+  });
+});
+
+// M1: refresh-buffer events WITH commit timestamps (real postgres_changes
+// always carry one): committed before the refresh's server time → already in
+// the pages, ignored; after it → applied over the older page.
+describe("M1: timestamp-aware refresh buffer", () => {
+  const pid = (i: number) => `p-${String(i).padStart(5, "0")}`;
+  const seed = (n: number) => { fake.server.inventory.clear(); for (let i = 0; i < n; i += 1) fake.server.inventory.set(`shop-1:${pid(i)}`, 10); };
+
+  it("an event committed BEFORE the refresh's server time but delivered between pages is ignored (the pages include it)", async () => {
+    seed(1500);
+    const { get } = makeStore();
+    handle = connect(get);
+    const ch = fake.realtime.current();
+    fake.setSelectHook((request) => {
+      if (request !== 1) return;
+      ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: pid(5), qty: 99, commitTimestamp: new Date(Date.parse(fake.serverNow()) - 30_000).toISOString() });
+    });
+    expect(await get().refreshInventoryFromServer({ shopId: "shop-1" })).toBe(true);
+    expect(qty(get, pid(5))).toBe(10);
+  });
+
+  it("an event committed AFTER the refresh's server time is applied over the older page", async () => {
+    seed(1500);
+    const { get } = makeStore();
+    handle = connect(get);
+    const ch = fake.realtime.current();
+    fake.setSelectHook((request) => {
+      if (request !== 1) return;
+      fake.server.inventory.set(`shop-1:${pid(5)}`, 3);
+      ch.emitChange({ eventType: "UPDATE", shopId: "shop-1", productId: pid(5), qty: 3, commitTimestamp: new Date(Date.parse(fake.serverNow()) + 1_000).toISOString() });
+    });
+    expect(await get().refreshInventoryFromServer({ shopId: "shop-1" })).toBe(true);
+    expect(qty(get, pid(5))).toBe(3);
   });
 });

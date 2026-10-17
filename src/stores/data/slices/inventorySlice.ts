@@ -1,5 +1,5 @@
 import type { StateCreator } from "zustand";
-import type { DataState, InventoryState, AdjustStockInput } from "../types";
+import type { BufferedInventoryEvent, DataState, InventoryState, AdjustStockInput } from "../types";
 import type { AuditLog, Inventory, InventoryMovement } from "../../../types";
 import { isNetworkError } from "../../../lib/errors";
 import { newId } from "../../../lib/id";
@@ -10,7 +10,8 @@ import { assertOfflineWriteEligible } from "../../authStore";
 import { supabase } from "../../../lib/supabase";
 import { localDb } from "../../../lib/localDb";
 import { mapInventory } from "../mappers";
-import { inventoryKey, pendingStockDeltas } from "../pendingStock";
+import { inventoryKey, pendingStockDeltas, withPendingStock } from "../pendingStock";
+import { fetchAllRows } from "../fetchAll";
 import { useAppStore } from "../../appStore";
 
 // Shape returned by the adjust_stock RPC (camelCase keys).
@@ -80,6 +81,60 @@ export const createInventorySlice: StateCreator<DataState, [], [], InventoryStat
   const noteEvent = (key: string, commitTimestamp?: string): void => {
     const eventTs = parseTs(commitTimestamp);
     if (!Number.isNaN(eventTs)) watermarks.set(key, eventTs);
+  };
+  // Watermarks only move forward: a refresh's server time must not lower
+  // the watermark an event newer than it already set.
+  const raiseWatermark = (key: string, ts: number): void => {
+    const known = watermarks.get(key);
+    if (known === undefined || ts > known) watermarks.set(key, ts);
+  };
+
+  // Realtime events accepted WHILE a paged refresh or a full load is reading
+  // (one buffer per read in flight). The pages may have been read before
+  // such an event committed, so replacing the rows with them would roll it
+  // back (G-5); each reader re-applies the newest buffered event per row on
+  // top of its pages. Latest commit time wins; an event without a commit
+  // time is treated as newest.
+  const eventBuffers = new Set<Map<string, BufferedInventoryEvent>>();
+  const bufferEvent = (key: string, event: BufferedInventoryEvent): void => {
+    for (const buffer of eventBuffers) {
+      const prev = buffer.get(key);
+      if (!prev || !(event.ts < prev.ts)) buffer.set(key, event);
+    }
+  };
+  const eventTs = (commitTimestamp?: string): number => {
+    const ts = parseTs(commitTimestamp);
+    return Number.isNaN(ts) ? Number.POSITIVE_INFINITY : ts;
+  };
+
+  // Pending offline stock on live rows (H2, ORV-021). A Realtime row is the
+  // SERVER's value; operations still queued on this till (pendingStock.ts)
+  // are not in it, so showing it raw "un-sells" an offline sale until the
+  // queue drains (oversell risk).
+  //  - No queued stock change for the row (no provisional movement with
+  //    pendingSync in memory — every offline stock write creates one, and
+  //    the drain's reconcile removes it): the server row is exact and is
+  //    applied synchronously, as before.
+  //  - Otherwise the row is NOT shown raw: the current row stays until the
+  //    queued deltas are read from the outbox, then server row + those
+  //    deltas is applied. pendingStockDeltas counts only pending/failed
+  //    entries — never one being sent or already acknowledged — so a sale is
+  //    never subtracted twice.
+  // Either way the result is (re)computed from the outbox before the local
+  // mirror is written, and dropped when a newer event for the row arrived
+  // (eventSeq), when a refresh or full load replaced the rows meanwhile
+  // (they re-apply buffered events themselves), or when another writer
+  // replaced the row (a drain's authoritative row, a local write).
+  const eventSeq = new Map<string, number>();
+  let refreshGeneration = 0;
+  const nextSeq = (key: string): number => {
+    const seq = (eventSeq.get(key) ?? 0) + 1;
+    eventSeq.set(key, seq);
+    return seq;
+  };
+  const replaceRow = (current: Inventory[], row: Inventory): Inventory[] => {
+    const idx = current.findIndex((i) => i.shopId === row.shopId && i.productId === row.productId);
+    return idx >= 0 ? current.map((i, n) => (n === idx ? row : i)) : [...current, row];
   };
 
   // Manual inventory adjustment / damage write-off — a single atomic Supabase
@@ -214,22 +269,46 @@ export const createInventorySlice: StateCreator<DataState, [], [], InventoryStat
       const key = inventoryKey(row.shopId, row.productId);
       if (isStaleEvent(key, commitTimestamp)) return;
       noteEvent(key, commitTimestamp);
-      set((s) => {
-        const idx = s.inventory.findIndex(
-          (i) => i.shopId === row.shopId && i.productId === row.productId
-        );
-        const inventory = idx >= 0
-          ? s.inventory.map((i, n) => (n === idx ? row : i))
-          : [...s.inventory, row];
-        return { inventory };
-      });
-      void putLocalRows({ inventory: [row] });
+      bufferEvent(key, { row, shopId: row.shopId, productId: row.productId, ts: eventTs(commitTimestamp) });
+      const seq = nextSeq(key);
+      const generation = refreshGeneration;
+      const mayHavePending = get().movements.some(
+        (m) => m.pendingSync && m.shopId === row.shopId && m.productId === row.productId,
+      );
+      // The row this handler expects to find when its async step runs.
+      const expected = mayHavePending
+        ? get().inventory.find((i) => i.shopId === row.shopId && i.productId === row.productId)
+        : row;
+      if (!mayHavePending) set((s) => ({ inventory: replaceRow(s.inventory, row) }));
+      void (async () => {
+        let pending: Map<string, number>;
+        try {
+          pending = await pendingStockDeltas(get().movements);
+        } catch (err) {
+          console.error("[DB] Realtime stock: could not read queued deltas:", err);
+          return;
+        }
+        if (eventSeq.get(key) !== seq || refreshGeneration !== generation) return;
+        const current = get().inventory.find((i) => i.shopId === row.shopId && i.productId === row.productId);
+        if (current !== expected) return; // replaced by another writer: theirs stands
+        const corrected = withPendingStock([row], pending)[0];
+        if (corrected !== current) set((s) => ({ inventory: replaceRow(s.inventory, corrected) }));
+        // Straight to the mirror, NOT putLocalRows: that would also record the
+        // row as a local write a running full load re-applies over its pages
+        // (localWrites.ts) — even for an event that predates the load. The
+        // load re-applies captured events itself, by commit time.
+        await localDb.inventory.put(corrected).catch((err) => {
+          console.error("[DB] Realtime stock: failed to mirror the row:", err);
+        });
+      })();
     },
 
     applyInventoryRealtimeDelete: (shopId: string, productId: string, commitTimestamp?: string) => {
       const key = inventoryKey(shopId, productId);
       if (isStaleEvent(key, commitTimestamp)) return;
       noteEvent(key, commitTimestamp);
+      bufferEvent(key, { row: null, shopId, productId, ts: eventTs(commitTimestamp) });
+      nextSeq(key); // cancels a pending correction of an earlier update
       set((s) => ({ inventory: s.inventory.filter((i) => !(i.shopId === shopId && i.productId === productId)) }));
       localDb.inventory.delete([shopId, productId]).catch((err) => {
         console.error("[DB] Failed to remove a deleted inventory row from the local cache:", err);
@@ -239,65 +318,93 @@ export const createInventorySlice: StateCreator<DataState, [], [], InventoryStat
     refreshInventoryFromServer: async (options) => {
       if (typeof navigator !== "undefined" && navigator.onLine === false) return false;
       const shopId = options?.shopId !== undefined ? options.shopId : useAppStore.getState().currentShopId;
+      const inScope = (row: { shopId: string }): boolean => (shopId ? row.shopId === shopId : true);
 
-      // 1. Server time BEFORE the read (resolve_event_time(NULL) is now(),
-      //    migration 045; granted to authenticated by 064). Anything
-      //    committed before this instant is visible to the SELECT below,
-      //    so a Realtime event with an older commit_timestamp that is still
-      //    delivered afterwards must not overwrite the rows. Client clocks
-      //    are never involved.
-      let watermark: number;
+      // Events accepted from here on are re-applied over the pages (G-5).
+      const buffer = new Map<string, BufferedInventoryEvent>();
+      eventBuffers.add(buffer);
       try {
-        const { data, error } = await supabase.rpc("resolve_event_time", { p_client_time: null });
-        if (error) {
-          console.error("[DB] Inventory refresh: could not read server time:", error.message);
+        // 1. Server time BEFORE the read (resolve_event_time(NULL) is now(),
+        //    migration 045; granted to authenticated by 064). Anything
+        //    committed before this instant is visible to the pages below,
+        //    so a Realtime event with an older commit_timestamp that is still
+        //    delivered afterwards must not overwrite the rows. Client clocks
+        //    are never involved.
+        let watermark: number;
+        try {
+          const { data, error } = await supabase.rpc("resolve_event_time", { p_client_time: null });
+          if (error) {
+            console.error("[DB] Inventory refresh: could not read server time:", error.message);
+            return false;
+          }
+          watermark = Date.parse(String(data));
+        } catch (err) {
+          console.error("[DB] Inventory refresh: could not read server time:", err);
           return false;
         }
-        watermark = Date.parse(String(data));
-      } catch (err) {
-        console.error("[DB] Inventory refresh: could not read server time:", err);
-        return false;
-      }
 
-      // 2. The authoritative rows for the scope.
-      let serverRows: Inventory[];
-      try {
-        const query = supabase.from("inventory").select("*");
-        const { data, error } = await (shopId ? query.eq("shop_id", shopId) : query);
-        if (error) {
-          console.error("[DB] Inventory refresh failed:", error.message);
+        // 2. The authoritative rows for the scope — every page (ORV-001),
+        //    all-or-nothing: a failed or interrupted read changes nothing.
+        const res = await fetchAllRows({
+          table: "inventory",
+          keys: ["shop_id", "product_id"],
+          filter: shopId ? (q) => q.eq("shop_id", shopId) : undefined,
+        });
+        if (res.error) {
+          console.error("[DB] Inventory refresh failed:", res.error.message);
           return false;
         }
-        serverRows = (data ?? []).map(mapInventory);
-      } catch (err) {
-        console.error("[DB] Inventory refresh failed:", err);
-        return false;
-      }
+        const serverRows: Inventory[] = res.data.map(mapInventory);
 
-      // 3. Provisional deltas of operations still queued — read AFTER the
-      //    select so an entry the drain finished meanwhile (its effect now
-      //    inside the server rows) is not applied twice.
-      const pending = await pendingStockDeltas(get().movements);
-      const rows = serverRows.map((row) => {
-        const delta = pending.get(inventoryKey(row.shopId, row.productId));
-        return delta ? { ...row, qtyBaseUnits: row.qtyBaseUnits + delta } : row;
-      });
+        // 3. Provisional deltas of operations still queued — read AFTER the
+        //    pages so an entry the drain finished meanwhile (its effect now
+        //    inside the server rows) is not applied twice.
+        const pending = await pendingStockDeltas(get().movements);
+        const byKey = new Map(withPendingStock(serverRows, pending).map((r) => [inventoryKey(r.shopId, r.productId), r]));
 
-      // 4. Replace — not merge — the scope.
-      const inScope = (row: Inventory): boolean => (shopId ? row.shopId === shopId : true);
-      if (!Number.isNaN(watermark)) {
-        if (shopId) {
-          for (const row of serverRows) watermarks.set(inventoryKey(row.shopId, row.productId), watermark);
-        } else {
-          // Rows that vanished server-side must not be resurrected by a
-          // late event either: stamp every key we knew plus every key read.
-          for (const key of watermarks.keys()) watermarks.set(key, watermark);
-          for (const row of serverRows) watermarks.set(inventoryKey(row.shopId, row.productId), watermark);
+        // 4. Live events newer than the watermark that arrived during the
+        //    read win over the pages (they may postdate them). Their rows are
+        //    server rows too, so the queued deltas apply to them as well.
+        for (const [key, event] of buffer) {
+          if (!inScope(event) || event.ts < watermark) continue;
+          if (event.row) byKey.set(key, withPendingStock([event.row], pending)[0]);
+          else byKey.delete(key);
         }
+        const rows = [...byKey.values()];
+
+        // 5. Replace — not merge — the scope.
+        if (!Number.isNaN(watermark)) {
+          if (shopId) {
+            for (const row of serverRows) raiseWatermark(inventoryKey(row.shopId, row.productId), watermark);
+          } else {
+            // Rows that vanished server-side must not be resurrected by a
+            // late event either: stamp every key we knew plus every key read.
+            for (const key of [...watermarks.keys()]) raiseWatermark(key, watermark);
+            for (const row of serverRows) raiseWatermark(inventoryKey(row.shopId, row.productId), watermark);
+          }
+        }
+        refreshGeneration += 1; // corrections of earlier events are superseded by these rows
+        set((s) => ({ inventory: [...s.inventory.filter((row) => !inScope(row)), ...rows] }));
+        await replaceLocalInventory(shopId ?? null, rows);
+        return true;
+      } finally {
+        eventBuffers.delete(buffer);
       }
-      set((s) => ({ inventory: [...s.inventory.filter((row) => !inScope(row)), ...rows] }));
-      await replaceLocalInventory(shopId ?? null, rows);
-      return true;
+    },
+
+    captureInventoryEvents: () => {
+      const buffer = new Map<string, BufferedInventoryEvent>();
+      eventBuffers.add(buffer);
+      return {
+        finish: () => {
+          eventBuffers.delete(buffer);
+          return [...buffer.values()];
+        },
+      };
+    },
+
+    notePendingStockDeltas: () => {
+      refreshGeneration += 1; // a full load replaced every row
     },
 
     recordDamage: async ({ shopId, productId, qty, reason, actorId }) => {

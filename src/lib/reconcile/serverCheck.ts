@@ -61,6 +61,8 @@ export interface SaleReader {
 
 const SALE_COLUMNS = "id,shop_id,shift_id,receipt_no,created_at,paid_mmk,payment_method,cart_discount_pct";
 export const CANDIDATE_LIMIT = 50;
+/** PostgREST's max rows per response (PGRST_DB_MAX_ROWS, deploy/lucashome/env.settings.md). */
+export const SERVER_ROW_CAP = 1000;
 /** The loose search starts this long before the (client-clock) ring-up
  *  time: a till clock running fast is stamped with server time (045). */
 const CLOCK_SKEW_MS = 24 * 60 * 60 * 1000;
@@ -102,7 +104,20 @@ export function supabaseSaleReader(client: SelectOnlyClient): SaleReader {
       if (shiftId) q = q.eq("shift_id", shiftId);
       return run(q.order("created_at").limit(limit));
     },
-    saleItems: (saleIds) => run(client.from("sale_items").select("sale_id,product_id,base_quantity_sold").in("sale_id", saleIds).limit(5000)),
+    // PostgREST caps every response at SERVER_ROW_CAP rows without saying so
+    // (a `.limit(5000)` here was silently cut to 1,000). A read that comes
+    // back full may be truncated, and a truncated line list could make two
+    // different sales look identical — so it is an error (inconclusive),
+    // never a verdict.
+    saleItems: async (saleIds) => {
+      const res = await run<ServerSaleItemRow[]>(
+        client.from("sale_items").select("sale_id,product_id,base_quantity_sold").in("sale_id", saleIds).limit(SERVER_ROW_CAP),
+      );
+      if (!res.error && res.data.length >= SERVER_ROW_CAP) {
+        return { data: null, error: { message: `more than ${SERVER_ROW_CAP - 1} line items to compare; the result may be incomplete` } };
+      }
+      return res;
+    },
     saleById: (id) => run(sales().eq("id", id).limit(2)),
     saleByReceipt: (shopId, receiptNo) => run(sales().eq("shop_id", shopId).eq("receipt_no", receiptNo).limit(2)),
   };

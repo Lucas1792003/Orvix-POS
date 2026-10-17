@@ -457,5 +457,24 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
       auditLogs: [...result.auditLogs, ...state.auditLogs],
     }));
   },
+
+  // Online only (a decision, like approval — never queued). The server
+  // checks the request is still pending and the approver may decide it.
+  rejectRefund: async ({ refundId, reason }) => {
+    const { data, error } = await callRpc(
+      "reject_refund_void_request",
+      { p_request_id: refundId, p_reason: reason, p_idempotency_key: newIdempotencyKey() },
+      { retries: ONLINE_ONLY_RETRIES },
+    );
+    if (error) throw error;
+    if (!data) throw new Error("Rejection returned no data.");
+    const result = data as RequestResult;
+    set((state) => ({
+      refunds: mergeRefundRequest(state.refunds, result.request),
+      refundVoidRequests: mergeRefundRequest(state.refundVoidRequests, result.request),
+      auditLogs: [...(result.auditLogs ?? []), ...state.auditLogs],
+    }));
+    void putLocalRows({ refunds: [result.request], auditLogs: result.auditLogs ?? [] });
+  },
   };
 };

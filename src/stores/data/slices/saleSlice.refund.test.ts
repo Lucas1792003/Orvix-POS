@@ -102,3 +102,32 @@ describe("approveRefund flow", () => {
     await expect(get().approveRefund({ refundId: "req-1" })).rejects.toThrow("Already approved");
   });
 });
+
+describe("rejectRefund (Batch 1-code: existing reject_refund_void_request, now reachable from the UI)", () => {
+  it("calls reject_refund_void_request with the reason and an idempotency key, and updates the request", async () => {
+    rpc.mockResolvedValue({
+      data: { request: { id: "req-2", type: "PARTIAL", status: "REJECTED", saleId: "sale-1" }, auditLogs: [{ id: "au-9" }] },
+      error: null,
+    });
+    const { get } = makeStore({
+      refundVoidRequests: [{ id: "req-2", type: "PARTIAL", status: "REQUESTED" }],
+      refunds: [{ id: "req-2", type: "PARTIAL", status: "REQUESTED" }],
+    });
+    await get().rejectRefund({ refundId: "req-2", reason: "Wrong amount" });
+    expect(rpc.mock.calls[0][0]).toBe("reject_refund_void_request");
+    expect(rpc.mock.calls[0][1]).toEqual({ p_request_id: "req-2", p_reason: "Wrong amount", p_idempotency_key: expect.any(String) });
+    expect(get().refundVoidRequests.find((r: { id: string }) => r.id === "req-2").status).toBe("REJECTED");
+    expect(get().refunds.find((r: { id: string }) => r.id === "req-2").status).toBe("REJECTED");
+    expect(get().auditLogs[0].id).toBe("au-9");
+    // the sale and stock are untouched by a rejection
+    expect(get().sales).toEqual([{ id: "sale-1", status: "COMPLETED" }]);
+    expect(get().inventory).toEqual([{ shopId: "shop-1", productId: "p1", qtyBaseUnits: 90 }]);
+  });
+
+  it("surfaces the server's refusal and changes nothing", async () => {
+    rpc.mockResolvedValue({ data: null, error: { message: "Request is not pending", code: "P0001" } });
+    const { get } = makeStore({ refundVoidRequests: [{ id: "req-3", type: "PARTIAL", status: "APPROVED" }], refunds: [] });
+    await expect(get().rejectRefund({ refundId: "req-3", reason: "x" })).rejects.toMatchObject({ message: "Request is not pending" });
+    expect(get().refundVoidRequests[0].status).toBe("APPROVED");
+  });
+});

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { supabase } from "../../lib/supabase";
 import { reportError } from "../../lib/errors";
+import { fetchAllRows, fetchAllRowsIn } from "../../stores/data/fetchAll";
 import type { PaymentMethod, SaleStatus } from "../../types";
 
 // Reports must aggregate over the FULL selected date range, but the data store
@@ -32,12 +32,6 @@ interface RangedSalesResult {
   error: string | null;
 }
 
-const chunk = <T,>(arr: T[], size: number): T[][] => {
-  const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-};
-
 /**
  * Fetch sales + line items for a date range (YYYY-MM-DD, inclusive). `shopId`
  * null = all shops the user can see. Empty start/end short-circuits to no data
@@ -65,13 +59,17 @@ export const useRangedSales = (
 
     (async () => {
       try {
-        let query = supabase
-          .from("sales")
-          .select("id, shop_id, status, total_mmk, payment_method, created_at")
-          .gte("created_at", `${start}T00:00:00`)
-          .lte("created_at", `${end}T23:59:59.999`);
-        if (shopId) query = query.eq("shop_id", shopId);
-        const salesRes = await query;
+        // Every page (ORV-001): an unpaged read stopped silently at the
+        // server's 1,000-row cap and the report under-counted.
+        const salesRes = await fetchAllRows({
+          table: "sales",
+          keys: ["id"],
+          columns: "id, shop_id, status, total_mmk, payment_method, created_at",
+          filter: (q) => {
+            const ranged = q.gte("created_at", `${start}T00:00:00`).lte("created_at", `${end}T23:59:59.999`);
+            return shopId ? ranged.eq("shop_id", shopId) : ranged;
+          },
+        });
         if (salesRes.error) throw salesRes.error;
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -84,27 +82,24 @@ export const useRangedSales = (
           createdAt: r.created_at,
         }));
 
-        // Line items for those sales, fetched in id-batches to stay under URL
-        // limits on wide ranges.
-        const ids = rangedSales.map((s) => s.id);
-        const rangedItems: RangedSaleItem[] = [];
-        for (const batch of chunk(ids, 200)) {
-          if (batch.length === 0) continue;
-          const itemsRes = await supabase
-            .from("sale_items")
-            .select("sale_id, product_id, qty_units, unit_cost_mmk_snapshot")
-            .in("sale_id", batch);
-          if (itemsRes.error) throw itemsRes.error;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          for (const r of (itemsRes.data ?? []) as any[]) {
-            rangedItems.push({
-              saleId: r.sale_id,
-              productId: r.product_id,
-              qtyUnits: r.qty_units,
-              unitCostMmkSnapshot: r.unit_cost_mmk_snapshot ?? undefined,
-            });
-          }
-        }
+        // Line items for those sales, in id-batches (URL length), each batch
+        // paged — a batch of 200 sales can have more than 1,000 lines.
+        const itemsRes = await fetchAllRowsIn({
+          table: "sale_items",
+          keys: ["id"],
+          columns: "id, sale_id, product_id, qty_units, unit_cost_mmk_snapshot",
+          column: "sale_id",
+          values: rangedSales.map((s) => s.id),
+          chunkSize: 200,
+        });
+        if (itemsRes.error) throw itemsRes.error;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rangedItems: RangedSaleItem[] = (itemsRes.data as any[]).map((r) => ({
+          saleId: r.sale_id,
+          productId: r.product_id,
+          qtyUnits: r.qty_units,
+          unitCostMmkSnapshot: r.unit_cost_mmk_snapshot ?? undefined,
+        }));
 
         if (cancelled) return;
         setSales(rangedSales);

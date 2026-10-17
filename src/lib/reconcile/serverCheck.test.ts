@@ -144,3 +144,24 @@ describe("verifyRecreatedSale", () => {
     expect(await verifyRecreatedSale(srv, { ...base, saleIdOrReceipt: " " })).toMatchObject({ ok: false });
   });
 });
+
+describe("supabaseSaleReader.saleItems and the server row cap (Batch 1-code)", () => {
+  const readerReturning = (rows: number) => {
+    const data = Array.from({ length: rows }, (_, i) => ({ sale_id: "s1", product_id: `p${i}`, base_quantity_sold: 1 }));
+    const b: Record<string, unknown> = {};
+    for (const m of ["eq", "gte", "lte", "in", "order", "limit"]) b[m] = () => b;
+    b.then = (res: (v: unknown) => void) => res({ data, error: null });
+    return supabaseSaleReader({ from: () => ({ select: () => b }) } as unknown as SelectOnlyClient);
+  };
+
+  it("a read that comes back full (possibly cut by the server's silent cap) is an error, never a verdict", async () => {
+    const r = await readerReturning(1000).saleItems(["s1"]);
+    expect(r.error?.message).toMatch(/may be incomplete/);
+  });
+
+  it("a read below the cap is returned as is", async () => {
+    const r = await readerReturning(999).saleItems(["s1"]);
+    expect(r.error).toBeNull();
+    expect(r.data).toHaveLength(999);
+  });
+});

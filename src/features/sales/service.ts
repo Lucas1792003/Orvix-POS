@@ -1,10 +1,4 @@
-import type { SaleItem } from "../../types";
-
-export const buildRefundItems = (items: SaleItem[], selection: Record<string, number>) =>
-  items
-    .filter((item) => selection[item.productId])
-    .map((item) => ({
-      productId: item.productId,
-      qtyUnits: selection[item.productId],
-      amountMmk: Math.round((selection[item.productId] / item.qtyUnits) * item.lineTotalMmk),
-    }));
+// Refund amounts now come from features/sales/refundMath.ts (net of the
+// cart discount, per sale line). The old `buildRefundItems` — line total
+// before the cart discount, keyed by product — was removed with it.
+export { buildRefundState, planRefundRequest, refundRequestExcessMmk } from "./refundMath";

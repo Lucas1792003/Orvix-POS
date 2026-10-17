@@ -10,7 +10,7 @@ import { ReceiptPreview } from "../pos/ReceiptPreview";
 import { SaleVoucher } from "../sales/SaleVoucher";
 import { RefundModal } from "../sales/RefundModal";
 import { VoidModal } from "../sales/VoidModal";
-import { buildRefundItems } from "../../features/sales/service";
+import { buildRefundState, planRefundRequest } from "../../features/sales/service";
 import { hasPermission } from "../../lib/permissions";
 import { formatDateTime } from "../../lib/utils";
 import { printReceipt } from "../../lib/print";
@@ -112,6 +112,15 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
   const canApproveRefund = hasPermission(currentUser, "pos:refund");
   const isNormal = sale.status === "NORMAL";
   const pendingRequests = refundsForSale.filter((r) => r.status === "REQUESTED");
+  // Refund state from the net amounts actually paid (refundMath.ts): what is
+  // left to refund per line, and whether the sale is only partly refunded
+  // (the server marks any refunded sale REFUNDED, ORV-030).
+  const refundState = buildRefundState(sale, saleItems, refundsForSale);
+  const refundPlan = planRefundRequest(refundState, refundSelection);
+  const hasRefundableUnits = refundState.lines.some((line) => !line.ambiguous && line.remainingSoldUnits > 0);
+  const statusNote = refundState.partiallyRefunded
+    ? "PARTIALLY REFUNDED"
+    : sale.status !== "NORMAL" ? sale.status : undefined;
 
   // Print and Reprint both require at least one sale item. complete_sale
   // is transactional so this should always be true in practice; if items
@@ -159,8 +168,8 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
 
   const handleRequestRefund = async () => {
     if (!currentUserId) return;
-    const items = buildRefundItems(saleItems, refundSelection);
-    if (items.length === 0) return;
+    if (refundPlan.items.length === 0 || refundPlan.errors.length > 0) return;
+    const items = refundPlan.items;
     try {
       await requestRefund({ saleId: sale.id, items, reason: refundReason || "No reason", actorId: currentUserId });
       setRefundOpen(false);
@@ -190,9 +199,14 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
     }
   };
 
-  const showRequestActions = isNormal && (canRequestVoid || canRequestRefund);
+  // Void: only an untouched sale (the server voids NORMAL sales only).
+  // Refund: any non-void sale with units left and no refund already waiting.
+  const showVoidRequest = canRequestVoid && isNormal && !refundState.hasApprovedRefund;
+  const showRefundRequest = canRequestRefund && sale.status !== "VOID" && hasRefundableUnits && !refundState.hasPendingRefund;
+  const showRequestActions = showVoidRequest || showRefundRequest;
+  // The server refuses approving one's own request: do not offer it.
   const visibleApprovals = pendingRequests.filter(
-    (r) => (r.type === "VOID" ? canApproveVoid : canApproveRefund)
+    (r) => (r.type === "VOID" ? canApproveVoid : canApproveRefund) && r.createdBy !== currentUserId
   );
 
   const printToolbar = (
@@ -253,7 +267,7 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
               lines={lines}
               shop={shop}
               cashier={cashier}
-              statusNote={sale.status !== "NORMAL" ? sale.status : undefined}
+              statusNote={statusNote}
             />
           }
         />
@@ -263,7 +277,7 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
           lines={lines}
           shop={shop}
           cashier={cashier}
-          statusNote={sale.status !== "NORMAL" ? sale.status : undefined}
+          statusNote={statusNote}
         />
       )}
 
@@ -291,10 +305,10 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
           <div className="text-sm font-medium text-slate-700">Request actions</div>
           <p className="mt-1 text-xs text-slate-500">Requests require manager approval.</p>
           <div className="mt-3 flex flex-wrap gap-2">
-            {canRequestVoid && (
+            {showVoidRequest && (
               <Button variant="danger" onClick={() => setVoidOpen(true)}>Request void</Button>
             )}
-            {canRequestRefund && (
+            {showRefundRequest && (
               <Button variant="secondary" onClick={() => setRefundOpen(true)}>Request refund</Button>
             )}
           </div>
@@ -330,11 +344,12 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
 
       <RefundModal
         open={refundOpen}
-        items={saleItems}
+        lines={refundState.lines}
         selection={refundSelection}
+        plan={refundPlan}
         reason={refundReason}
         productNames={productNames}
-        onChangeSelection={(productId, qty) => setRefundSelection((prev) => ({ ...prev, [productId]: qty }))}
+        onChangeSelection={(lineKey, units) => setRefundSelection((prev) => ({ ...prev, [lineKey]: units }))}
         onChangeReason={setRefundReason}
         onClose={() => setRefundOpen(false)}
         onSubmit={() => void handleRequestRefund()}

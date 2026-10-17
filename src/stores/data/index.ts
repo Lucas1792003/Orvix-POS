@@ -7,6 +7,10 @@ import { mergeProvisionalRows, persistSnapshotToLocal, readLocalSnapshot, type L
 import { countPendingOutbox, drainOutbox, registerOutboxReconciler, setNeedsReauth } from "./outbox";
 import { bootstrapDeltaCursors, pullDeltaChanges } from "./deltaSync";
 import { refreshInventoryIfNotLive } from "./inventoryRealtime";
+import { fetchAllRows, fetchAllRowsIn, fetchServerTime, type ReadResult, type Row } from "./fetchAll";
+import { inventoryKey, pendingStockDeltas, withPendingStock } from "./pendingStock";
+import type { BufferedInventoryEvent } from "./types";
+import type { Inventory } from "../../types";
 import { applyRecordedWrites, beginWriteRecording, endWriteRecording } from "./localWrites";
 import { refreshAuthCacheSnapshot, touchAuthCache } from "../authCache";
 import { useAuthStore } from "../authStore";
@@ -128,6 +132,9 @@ export const useDataStore = create<DataState>()((...args) => {
     // opened, a sale completed) is newer than the snapshot they return —
     // re-applied below so the load cannot roll it back (see localWrites.ts).
     const recorder = beginWriteRecording();
+    // Realtime inventory events that arrive while the pages are read: the
+    // pages may predate them, so they are re-applied on top (H2 / G-5).
+    const liveEvents = get().captureInventoryEvents();
     try {
       // A session the server has revoked (refresh token invalid) is dropped
       // by supabase-js the moment it tries to refresh; the reads below
@@ -137,10 +144,36 @@ export const useDataStore = create<DataState>()((...args) => {
       // the till bounced to /login and lost its offline mirror).
       if (await sessionGone()) {
         endWriteRecording(recorder);
+        liveEvents.finish();
         set({ isLoading: false });
         await setNeedsReauth("The server rejected this device's sign-in. Sign in again to resume syncing.");
         return;
       }
+      // Server clock BEFORE the first read: the delta cursors start just
+      // before it (bootstrapDeltaCursors), so a row changed while the pages
+      // below are being read is pulled again by the next delta pull rather
+      // than skipped. Null (older server / failure) keeps the old seeding.
+      const serverTimeBeforeLoad = await fetchServerTime();
+
+      // Every table that is meant to be complete is read with keyset paging
+      // (fetchAll.ts): past PostgREST's 1,000-row cap, all-or-nothing. The
+      // three recent-history windows (movements, sales, audit) are bounded
+      // on purpose; they get a unique tie-breaker so the window is
+      // deterministic. sale_items is scoped to the sales actually loaded.
+      // Complete reads come back in key order; tables the UI showed in
+      // their old physical (≈ creation) order are re-sorted oldest first
+      // (then id), so lists keep their order and become deterministic (M2).
+      const all = (table: string) => fetchAllRows({ table, keys: ["id"] });
+      const byCreation = (table: string, column = "created_at") => all(table).then(sortedBy(column));
+      // One promise, awaited twice: a supabase-js builder re-sends its
+      // request every time it is awaited.
+      const salesRead = Promise.resolve(supabase.from("sales").select("*")
+        .order("created_at", { ascending: false }).order("id", { ascending: false }).limit(1000));
+      const saleItemsRead = salesRead.then((res): Promise<ReadResult> => {
+        if (res.error) return Promise.resolve({ data: null, error: { message: res.error.message, code: res.error.code } });
+        const ids = ((res.data ?? []) as { id: string }[]).map((s) => s.id);
+        return fetchAllRowsIn({ table: "sale_items", keys: ["id"], column: "sale_id", values: ids });
+      });
       const [
         shops, users, categories, brands, unitTypes, products, productUnits, barcodes, priceTiers,
         priceLevels, productUnitPrices,
@@ -149,32 +182,34 @@ export const useDataStore = create<DataState>()((...args) => {
         stockTransfers, stockTransferItems, shifts, sales, saleItems,
         reprintLogs, refunds, auditLogs, businessProfileRes,
       ] = await Promise.all([
-        supabase.from("shops").select("*"),
-        supabase.from("users").select("*"),
-        supabase.from("categories").select("*"),
-        supabase.from("brands").select("*").order("sort_order", { ascending: true }),
-        supabase.from("unit_types").select("*").order("sort_order", { ascending: true }),
-        supabase.from("products").select("*"),
-        supabase.from("product_units").select("*").order("sort_order", { ascending: true }),
-        supabase.from("product_barcodes").select("*"),
-        supabase.from("price_tiers").select("*"),
-        supabase.from("price_levels").select("*").order("sort_order", { ascending: true }),
-        supabase.from("product_unit_prices").select("*"),
-        supabase.from("inventory").select("*"),
-        supabase.from("inventory_movements").select("*").order("created_at", { ascending: false }).limit(500),
-        supabase.from("suppliers").select("*"),
-        supabase.from("purchase_orders").select("*"),
-        supabase.from("purchase_order_items").select("*"),
-        supabase.from("supplier_payments").select("*").order("paid_at", { ascending: false }),
-        supabase.from("supplier_products").select("*"),
-        supabase.from("stock_transfers").select("*"),
-        supabase.from("stock_transfer_items").select("*"),
-        supabase.from("shifts").select("*"),
-        supabase.from("sales").select("*").order("created_at", { ascending: false }).limit(1000),
-        supabase.from("sale_items").select("*"),
-        supabase.from("reprint_logs").select("*"),
-        supabase.from("refund_void_requests").select("*"),
-        supabase.from("audit_logs").select("*").order("created_at", { ascending: false }).limit(500),
+        byCreation("shops"),
+        byCreation("users"),
+        byCreation("categories"),
+        all("brands").then(sortedBy("sort_order")),
+        all("unit_types").then(sortedBy("sort_order")),
+        byCreation("products"),
+        all("product_units").then(sortedBy("sort_order")),
+        all("product_barcodes"),
+        byCreation("price_tiers"),
+        all("price_levels").then(sortedBy("sort_order")),
+        byCreation("product_unit_prices"),
+        fetchAllRows({ table: "inventory", keys: ["shop_id", "product_id"] }),
+        supabase.from("inventory_movements").select("*")
+          .order("created_at", { ascending: false }).order("id", { ascending: false }).limit(500),
+        byCreation("suppliers"),
+        byCreation("purchase_orders"),
+        all("purchase_order_items"),
+        all("supplier_payments").then(sortedBy("paid_at", "desc")),
+        fetchAllRows({ table: "supplier_products", keys: ["supplier_id", "product_id"] }).then(sortedBy("created_at")),
+        byCreation("stock_transfers"),
+        all("stock_transfer_items"),
+        byCreation("shifts", "started_at"),
+        salesRead,
+        saleItemsRead,
+        byCreation("reprint_logs", "printed_at"),
+        byCreation("refund_void_requests"),
+        supabase.from("audit_logs").select("*")
+          .order("created_at", { ascending: false }).order("id", { ascending: false }).limit(500),
         supabase.from("business_profile").select("*").eq("id", "default").maybeSingle(),
       ]);
 
@@ -193,6 +228,7 @@ export const useDataStore = create<DataState>()((...args) => {
       if (failedRead?.error) throw failedRead.error;
       if (await sessionGone()) {
         endWriteRecording(recorder);
+        liveEvents.finish();
         set({ isLoading: false });
         await setNeedsReauth("The server rejected this device's sign-in. Sign in again to resume syncing.");
         return;
@@ -205,6 +241,8 @@ export const useDataStore = create<DataState>()((...args) => {
       // clear "no shop selected" blocked state for ADMIN instead. See
       // `getEffectiveShopId` for the contract.
       const shopsList: ReturnType<typeof mapShop>[] = (shops.data ?? []).map(mapShop);
+      // Queued offline stock deltas, read AFTER the server rows (see below).
+      const pendingStock = await pendingStockDeltas(get().movements);
       const { currentShopId, setShopId } = useAppStore.getState();
       if (currentShopId && !shopsList.find((s) => s.id === currentShopId)) {
         setShopId(null);
@@ -222,7 +260,11 @@ export const useDataStore = create<DataState>()((...args) => {
         priceTiers: (priceTiers.data ?? []).map(mapPriceTier),
         priceLevels: (priceLevels.data ?? []).map(mapPriceLevel),
         productUnitPrices: (productUnitPrices.data ?? []).map(mapProductUnitPrice),
-        inventory: (inventory.data ?? []).map(mapInventory),
+        // Stock effects of operations still queued offline are not in the
+        // server's rows yet: re-apply them (read AFTER the server rows, like
+        // refreshInventoryFromServer), or the full load would show stock as
+        // if those sales/adjustments had never happened until the next refresh.
+        inventory: withPendingStock((inventory.data ?? []).map(mapInventory), pendingStock),
         movements: (movements.data ?? []).map(mapMovement),
         suppliers: (suppliers.data ?? []).map(mapSupplier),
         purchaseOrders: (purchaseOrders.data ?? []).map(mapPurchaseOrder),
@@ -242,7 +284,11 @@ export const useDataStore = create<DataState>()((...args) => {
       // Keep offline-created rows that are still queued for replay visible
       // (and mirrored) across the reload — see mergeProvisionalRows — and
       // re-apply writes that completed while the reads were in flight.
-      const snapshot = applyRecordedWrites(await mergeProvisionalRows(serverSnapshot), endWriteRecording(recorder));
+      const recorded = applyRecordedWrites(await mergeProvisionalRows(serverSnapshot), endWriteRecording(recorder));
+      // Live stock changes committed after the load began win over the
+      // pages, with the queued offline deltas applied to them as well.
+      const snapshot = { ...recorded, inventory: applyLiveInventoryEvents(recorded.inventory, liveEvents.finish(), serverTimeBeforeLoad, pendingStock) };
+      get().notePendingStockDeltas(pendingStock);
       set({ ...snapshot, refundVoidRequests: snapshot.refunds, isLoading: false, isLoaded: true });
 
       // A full load is an authenticated round trip and carries the
@@ -270,7 +316,7 @@ export const useDataStore = create<DataState>()((...args) => {
       // always safe to (re)set the delta-pull cursors from it — the next
       // background refresh (see AppLayout.tsx) can then pull just what
       // changed since, instead of another full 27-table reload.
-      bootstrapDeltaCursors(snapshot).catch((err) => {
+      bootstrapDeltaCursors(snapshot, serverTimeBeforeLoad).catch((err) => {
         console.error("[DB] Failed to bootstrap delta-sync cursors:", err);
       });
       // We just proved the network is reachable — replay anything queued
@@ -280,6 +326,7 @@ export const useDataStore = create<DataState>()((...args) => {
       });
     } catch (err) {
       endWriteRecording(recorder);
+      liveEvents.finish();
       const message = reportError("loadData", err, "Failed to load data. Please try again.");
       set({ isLoading: false, loadError: message });
     }
@@ -287,6 +334,59 @@ export const useDataStore = create<DataState>()((...args) => {
 });
 
 let loadInFlight: Promise<void> | null = null;
+
+/** Re-apply Realtime inventory events captured during a full load: those
+ *  committed at/after the load's server time (or with no known time) win
+ *  over the pages; the queued offline deltas apply to them too. */
+export function applyLiveInventoryEvents(
+  rows: Inventory[], events: BufferedInventoryEvent[], serverTimeBeforeLoad: string | null, pending: Map<string, number>,
+): Inventory[] {
+  const since = serverTimeBeforeLoad ? Date.parse(serverTimeBeforeLoad) : Number.NEGATIVE_INFINITY;
+  const live = events.filter((e) => !(e.ts < since));
+  if (live.length === 0) return rows;
+  const byKey = new Map(rows.map((r) => [inventoryKey(r.shopId, r.productId), r]));
+  for (const e of live) {
+    const key = inventoryKey(e.shopId, e.productId);
+    if (e.row) byKey.set(key, withPendingStock([e.row], pending)[0]);
+    else byKey.delete(key);
+  }
+  return [...byKey.values()];
+}
+
+/** Re-order a complete read client-side (the keyset read is in key order).
+ *  Like Postgres: NULLs last ascending, first descending; ties by id (or the
+ *  composite key). Timestamps compare as instants, numbers as numbers. */
+export function sortedBy(column: string, direction: "asc" | "desc" = "asc") {
+  return (res: ReadResult): ReadResult => {
+    if (res.error) return res;
+    const sign = direction === "asc" ? 1 : -1;
+    const tie = (row: Row): string => String(row.id ?? `${row.supplier_id ?? ""}|${row.product_id ?? ""}`);
+    const compare = (x: unknown, y: unknown): number => {
+      if (typeof x === "number" && typeof y === "number") return x - y;
+      const sx = String(x);
+      const sy = String(y);
+      const dx = Date.parse(sx);
+      const dy = Date.parse(sy);
+      if (/^\d{4}-\d{2}-\d{2}/.test(sx) && /^\d{4}-\d{2}-\d{2}/.test(sy) && !Number.isNaN(dx) && !Number.isNaN(dy)) return dx - dy;
+      return sx < sy ? -1 : sx > sy ? 1 : 0;
+    };
+    const data = [...res.data].sort((a, b) => {
+      const x = a[column];
+      const y = b[column];
+      const xNull = x === null || x === undefined;
+      const yNull = y === null || y === undefined;
+      if (xNull !== yNull) return (xNull ? 1 : -1) * sign; // NULLS LAST asc / FIRST desc
+      if (!xNull) {
+        const c = compare(x, y);
+        if (c !== 0) return c * sign;
+      }
+      const tx = tie(a);
+      const ty = tie(b);
+      return tx < ty ? -1 : tx > ty ? 1 : 0;
+    });
+    return { data, error: null };
+  };
+}
 
 // True when supabase-js holds no session any more (a refused refresh clears
 // it). A network failure while refreshing keeps the session and returns

@@ -31,6 +31,8 @@
 // build; it is only ever imported by tests.
 // ----------------------------------------------------------------------
 
+import { createFakePostgrest } from "./fakePostgrest";
+
 export type RpcMode =
   | "succeed"
   | "network-error"
@@ -135,6 +137,10 @@ function createFakeSupabase() {
   const authUser = { id: "auth-test-user", email: "cashier@shop.test" };
   let selectMode: SelectMode = "succeed";
   let selectCalls = 0;
+  // Test hook run before each select request (each page) is answered, with
+  // the 0-based request number since the last reset: lets a test change the
+  // server or deliver a Realtime event BETWEEN the pages of one read.
+  let selectHook: ((request: number) => void) | null = null;
   // The fake server's clock, independent of the client's Date.now() so a
   // test can put the two far apart (the client clock must never matter).
   let serverClockOffsetMs = 0;
@@ -342,29 +348,23 @@ function createFakeSupabase() {
       })
       .filter((row) => !shopId || row.shop_id === shopId);
 
+  // Reads go through the PostgREST emulator (fakePostgrest.ts): filters,
+  // keyset or(), order, limit and the silent 1,000-row cap. Every request
+  // (each page) counts as one select call.
+  const inventoryTable: { inventory: Record<string, unknown>[] } = { inventory: [] };
+  const postgrest = createFakePostgrest({
+    tables: inventoryTable,
+    beforeRequest: () => {
+      selectHook?.(selectCalls);
+      selectCalls += 1;
+      inventoryTable.inventory = inventoryRows();
+      if (selectMode === "network-error") return { message: NETWORK_FAILURE.error.message, code: "" };
+      return undefined;
+    },
+  });
   const from = (table: string) => {
     if (table !== "inventory") throw new Error(`fakeSupabase.from(): table "${table}" is not modelled`);
-    let shopFilter: string | undefined;
-    const run = () => {
-      selectCalls += 1;
-      if (selectMode === "network-error") return Promise.resolve({ ...NETWORK_FAILURE });
-      return Promise.resolve({ data: inventoryRows(shopFilter), error: null, status: 200, statusText: "OK" });
-    };
-    const builder = {
-      select: () => builder,
-      eq: (column: string, value: string) => {
-        if (column !== "shop_id") throw new Error(`fakeSupabase: unsupported filter column ${column}`);
-        shopFilter = value;
-        return builder;
-      },
-      then<T1 = unknown, T2 = never>(
-        onfulfilled?: ((value: unknown) => T1 | PromiseLike<T1>) | null,
-        onrejected?: ((reason: unknown) => T2 | PromiseLike<T2>) | null,
-      ): Promise<T1 | T2> {
-        return run().then(onfulfilled, onrejected);
-      },
-    };
-    return builder;
+    return postgrest.from(table);
   };
 
   // ---- Realtime ------------------------------------------------------------
@@ -424,6 +424,7 @@ function createFakeSupabase() {
     queueModes: (...modes: RpcMode[]) => { queuedModes.push(...modes); },
     setDefaultMode: (mode: RpcMode) => { defaultMode = mode; },
     setSelectMode: (mode: SelectMode) => { selectMode = mode; },
+    setSelectHook: (hook: ((request: number) => void) | null) => { selectHook = hook; },
     /** Move the fake server's clock relative to the client's. */
     setServerClockOffset: (ms: number) => { serverClockOffsetMs = ms; },
     serverNow,
@@ -450,6 +451,7 @@ function createFakeSupabase() {
       authListeners.length = 0;
       selectMode = "succeed";
       selectCalls = 0;
+      selectHook = null;
       serverClockOffsetMs = 0;
       channels.length = 0;
     },

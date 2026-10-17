@@ -121,6 +121,10 @@ export interface ProvisionalIdMapping {
 export interface SyncMetaEntry {
   table: string;
   lastPulledAt: string;
+  /** Delta keyset tie-breaker: id of the last row pulled at `lastPulledAt`
+   *  (deltaSync.ts). Not indexed — no schema version change. Absent on
+   *  cursors written before it existed, read as "". */
+  lastPulledId?: string;
 }
 
 /** Last-known resolved app user for a Supabase auth identity, cached so

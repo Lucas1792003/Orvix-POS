@@ -210,9 +210,23 @@ export interface ProductState {
  *  stores/data/outbox.ts and localWrites.ts. */
 export type ProvisionalRef = { table: string; ids: string[] }[];
 
+/** A Realtime inventory change captured while a paged read is in flight
+ *  (row null = DELETE; ts = server commit time in ms, +Infinity if unknown). */
+export interface BufferedInventoryEvent {
+  row: Inventory | null;
+  shopId: string;
+  productId: string;
+  ts: number;
+}
+
 export interface InventoryState {
   inventory: Inventory[];
   movements: InventoryMovement[];
+  /** Internal (loadData): collect Realtime inventory events until finish(). */
+  captureInventoryEvents: () => { finish: () => BufferedInventoryEvent[] };
+  /** Internal (loadData): the pending deltas a full load applied; supersedes
+   *  in-flight Realtime corrections. */
+  notePendingStockDeltas: (pending: Map<string, number>) => void;
   adjustStock: (input: AdjustStockInput) => Promise<void>;
   recordDamage: (input: { shopId: string; productId: string; qty: number; reason: string; actorId: string }) => Promise<void>;
   getInventoryQty: (shopId: string, productId: string) => number;
@@ -263,6 +277,8 @@ export interface SaleState {
   requestVoid: (input: { saleId: string; reason: string; actorId: string }) => Promise<void>;
   requestRefund: (input: { saleId: string; items: RefundItemInput[]; reason: string; actorId: string }) => Promise<void>;
   approveRefund: (input: { refundId: string; approverId: string }) => Promise<void>;
+  /** Online only, like approval: reject_refund_void_request (070) with a reason. */
+  rejectRefund: (input: { refundId: string; reason: string }) => Promise<void>;
   /** Internal — called by the outbox drain once complete_sale actually runs
    *  server-side, to replace the provisional local sale with the
    *  authoritative one. Not for direct UI use. */
