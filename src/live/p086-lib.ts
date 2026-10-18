@@ -125,11 +125,16 @@ export function snapDiff(a: Record<string, string>, b: Record<string, string>): 
   return Object.keys(a).filter((k) => a[k] !== b[k]).map((k) => `${k}: ${a[k].split(":")[0]}→${b[k]?.split(":")[0]}`);
 }
 
-export const ledgerRow = (key: string): any => {
-  const out = sql1(`SELECT row_to_json(k) FROM public.idempotency_keys k WHERE key = ${lit(key)}::uuid;`);
+// The ledger is per organisation (org_id, key). Without `org` these expect at
+// most ONE row for the key (a second organisation's row makes them throw —
+// tests that use a key in two organisations pass the organisation).
+const orgFilter = (org?: string) => (org ? ` AND org_id = ${lit(org)}` : "");
+export const ledgerRow = (key: string, org?: string): any => {
+  const out = sql1(`SELECT row_to_json(k) FROM public.idempotency_keys k WHERE key = ${lit(key)}::uuid${orgFilter(org)};`);
   return out ? JSON.parse(out) : null;
 };
-export const ledgerRowText = (key: string): string => sql1(`SELECT coalesce((SELECT k::text FROM public.idempotency_keys k WHERE key = ${lit(key)}::uuid), '<none>');`);
+export const ledgerRowText = (key: string, org?: string): string =>
+  sql1(`SELECT coalesce((SELECT k::text FROM public.idempotency_keys k WHERE key = ${lit(key)}::uuid${orgFilter(org)}), '<none>');`);
 
 /** Schema fingerprint of what 086 touches (public functions, the ledger
  *  table, public triggers, schemas). Equal before install and after rollback

@@ -19,8 +19,8 @@
 --       searched FIRST for tables: a SQL session with TEMP privilege can
 --       shadow `users` and run an ADMIN-only RPC as a cashier.
 --
--- WHAT IT DOES (additive; the 30 idempotent RPC bodies are NOT changed;
---   idem_finish is NOT changed)
+-- WHAT IT DOES (29 of the 30 idempotent RPC bodies are NOT changed;
+--   pay_supplier_lump_sum and idem_finish are -- see 1b and 2b)
 --   1. idempotency_keys: state (committed|rejected|abandoned, default
 --      committed), outcome_code, outcome_message, decided_at, response_purged_at,
 --      a state/prefix CHECK and an index on decided_at. Existing rows keep
@@ -28,7 +28,8 @@
 --      A rejected row stores 'R:'||hash, an abandoned (fenced) row 'A:': the
 --      idem_begin hash comparison is verbatim, so a legacy call with such a
 --      key always gets IDEMPOTENCY_MISMATCH (also after a rollback).
---   2. idem_begin: ONE added guard. A key that is an RFC 9562 UUIDv7 (minted
+--   2. idem_begin: the UUIDv7 guard (and the per-organisation ledger
+--      identity, 1b). A key that is an RFC 9562 UUIDv7 (minted
 --      only by 086 clients) is accepted only when op_execute is running
 --      that very key (transaction-local setting orvix.op_execute_key, which
 --      no PostgREST request can set). On an 086 server a UUIDv7 operation
@@ -75,16 +76,36 @@
 --     postgres; idempotency_keys is owned by postgres; the ledger has
 --     exactly the 085 or the 086 columns; every hardened function exists
 --     with search_path=public or public, pg_temp.
---   * after: the 31 untouched bodies unchanged, idem_begin = the 086 body;
+--   * after: the 29 untouched bodies unchanged; idem_begin, idem_finish and
+--     pay_supplier_lump_sum = the 086 bodies; ledger identity (org_id, key);
 --     ledger columns/constraint; every op_* function owned by postgres with
 --     search_path pg_catalog, pg_temp; EXECUTE exactly authenticated on
 --     op_execute/op_status and nobody else on any op_* helper; no public
 --     function left with search_path=public.
 --
--- ROLLBACK (doc "Rollback"): functions only + restore the 085 idem_begin
---   body (search_path kept hardened). KEEP the columns, constraint,
+--   1b. FINANCIAL-SAFETY CORRECTIONS (before any deployment):
+--      * the ledger identity is PER ORGANISATION: primary key (org_id, key),
+--        the organisation always from the session (never from the caller).
+--        A key names an operation of the caller's own organisation only:
+--        another organisation can neither claim (fence) it nor learn it
+--        exists; the same key in two organisations is two operations. Rows
+--        whose organisation was never recorded (pre-074 / bootstrap) move to
+--        the reserved '!unattributed' namespace and keep refusing the key in
+--        every organisation (as 074 refused them). idem_begin, idem_finish,
+--        op_execute and op_status look up (org_id, key); the advisory lock is
+--        per (org_id, key).
+--      * pay_supplier_lump_sum locks the supplier's received purchase orders
+--        (oldest first) BEFORE computing the balance and refuses — never
+--        silently reduces — a payment it cannot apply in full.
+-- ROLLBACK (doc "Rollback"): functions only + idem_begin WITHOUT the UUIDv7
+--   guard on the per-organisation ledger (NOT the 085 key-only body: it would
+--   read another organisation's row). KEEP the per-organisation identity,
+--   idem_finish and pay_supplier_lump_sum (086), the columns, constraint,
 --   tombstones, the prune (inert without the executor) and the hardened
---   search paths. Never restore 062's prune body.
+--   search paths. Never restore 062's prune body. NEVER re-run any migration
+--   062..085 once 086 is applied (their key-only idem_begin / idem_finish
+--   would mix organisations' rows of one key; 062 would hand one
+--   organisation's stored reply to another).
 -- FORWARD RECOVERY: idempotent; re-run.
 -- ============================================================
 
@@ -96,7 +117,9 @@ SET lock_timeout = '3s';
 DO $guard$
 DECLARE
   v_expected CONSTANT jsonb := '{{EXPECTED_MD5}}'::jsonb;
-  v_idem_begin_086 CONSTANT text := '{{IDEM_BEGIN_086_MD5}}';
+  -- bodies 086 itself installs (re-apply) or its rollback leaves (re-apply after a rollback)
+  v_also_ok  CONSTANT jsonb := '{{ALSO_OK_MD5}}'::jsonb;
+  v_pk text;
   v_harden   CONSTANT text[] := ARRAY[{{HARDEN_ARRAY}}]::text[];
   k text; v_md5 text; v_cols text; v_cfg text; v_secdef boolean; v_owner text;
 BEGIN
@@ -105,7 +128,7 @@ BEGIN
       FROM pg_proc WHERE oid = to_regprocedure(k);
     IF v_md5 IS NULL THEN
       RAISE EXCEPTION '086 preflight: % does not exist', k;
-    ELSIF v_md5 <> v_expected ->> k AND NOT (k = 'public.idem_begin(uuid,text,text)' AND v_md5 = v_idem_begin_086) THEN
+    ELSIF v_md5 <> v_expected ->> k AND NOT (v_also_ok ? k AND v_also_ok -> k ? v_md5) THEN
       RAISE EXCEPTION '086 preflight: % is not the 085 body (md5 %); nothing changed', k, v_md5;
     ELSIF NOT v_secdef OR v_owner <> 'postgres' THEN
       RAISE EXCEPTION '086 preflight: % must be SECURITY DEFINER owned by postgres (secdef %, owner %)', k, v_secdef, v_owner;
@@ -118,6 +141,13 @@ BEGIN
 
   SELECT string_agg(attname, ',' ORDER BY attname) INTO v_cols
     FROM pg_attribute WHERE attrelid = 'public.idempotency_keys'::regclass AND attnum > 0 AND NOT attisdropped;
+  SELECT string_agg(a.attname, ',' ORDER BY k.ord) INTO v_pk
+    FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY k(attnum, ord)
+    JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+   WHERE c.conrelid = 'public.idempotency_keys'::regclass AND c.contype = 'p';
+  IF v_pk NOT IN ('key', 'org_id,key') THEN
+    RAISE EXCEPTION '086 preflight: idempotency_keys has an unexpected primary key (%); nothing changed', v_pk;
+  END IF;
   IF v_cols NOT IN ('actor_id,created_at,key,org_id,request_hash,response,rpc',
                     'actor_id,created_at,decided_at,key,org_id,outcome_code,outcome_message,request_hash,response,response_purged_at,rpc,state') THEN
     RAISE EXCEPTION '086 preflight: idempotency_keys has unexpected columns (%); nothing changed', v_cols;
@@ -167,6 +197,29 @@ ALTER TABLE public.idempotency_keys
 
 CREATE INDEX IF NOT EXISTS idempotency_keys_decided_at_idx ON public.idempotency_keys (decided_at);
 
+-- 1b: the ledger identity is per organisation. A row whose organisation was
+-- never recorded (pre-074, bootstrap paths) goes to the reserved
+-- '!unattributed' namespace: it keeps refusing its key in every
+-- organisation, exactly as 074 refused it (NULL org IS DISTINCT FROM any
+-- caller's), and replays only for a caller with no organisation either.
+UPDATE public.idempotency_keys SET org_id = '!unattributed' WHERE org_id IS NULL;
+ALTER TABLE public.idempotency_keys ALTER COLUMN org_id SET NOT NULL;
+DO $pk$
+BEGIN
+  IF (SELECT string_agg(a.attname, ',' ORDER BY k.ord)
+        FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY k(attnum, ord)
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+       WHERE c.conrelid = 'public.idempotency_keys'::regclass AND c.contype = 'p') IS DISTINCT FROM 'org_id,key' THEN
+    ALTER TABLE public.idempotency_keys DROP CONSTRAINT idempotency_keys_pkey;
+    ALTER TABLE public.idempotency_keys ADD CONSTRAINT idempotency_keys_pkey PRIMARY KEY (org_id, key);
+  END IF;
+END
+$pk$;
+-- lookups of a key in the unattributed namespace, and retention by key
+CREATE INDEX IF NOT EXISTS idempotency_keys_key_idx ON public.idempotency_keys (key);
+COMMENT ON COLUMN public.idempotency_keys.org_id IS
+  '086: the operation''s organisation (from the session). The ledger identity is (org_id, key): a key names an operation of ONE organisation. ''!unattributed'' = organisation never recorded (pre-074): such a key is refused in every organisation.';
+
 COMMENT ON COLUMN public.idempotency_keys.state IS
   '086: committed (idem_begin row, also every pre-086 row) | rejected (definitive refusal recorded by op_execute; request_hash R:<hash>) | abandoned (fenced by op_status; request_hash A:). Rejected/abandoned keys never execute, also through the legacy direct path.';
 COMMENT ON COLUMN public.idempotency_keys.decided_at IS
@@ -174,7 +227,8 @@ COMMENT ON COLUMN public.idempotency_keys.decided_at IS
 
 -- ------------------------------------------------------------
 -- 2/8 idem_begin: UUIDv7 operations only through op_execute. The 085 body
---     with exactly one added block (after the key check, before the lock).
+--     with the UUIDv7 guard added (after the key check) and the lookup / lock
+--     made per organisation (org_id, key) — generated from the 085 body.
 -- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.idem_begin(p_key uuid, p_rpc text, p_request_hash text)
  RETURNS jsonb
@@ -182,6 +236,16 @@ CREATE OR REPLACE FUNCTION public.idem_begin(p_key uuid, p_rpc text, p_request_h
  SECURITY DEFINER
  SET search_path = public, pg_temp
 AS $function${{IDEM_BEGIN_086_BODY}}$function$;
+
+-- 2b: idem_finish stores the reply on the CALLER'S organisation's row only
+-- (the caller resolved exactly as idem_begin resolves it).
+{{IDEM_FINISH_086_DEF}}
+
+-- 2c: pay_supplier_lump_sum (financial-safety correction): the supplier's
+-- received purchase orders are locked (oldest first) BEFORE the balance is
+-- computed, and a payment that cannot be applied in full is refused — never
+-- silently reduced. Every other line is the 085 body.
+{{LUMP_SUM_086_DEF}}
 
 -- ------------------------------------------------------------
 -- 3/8 typed argument binding, key identity, refusal classification
@@ -538,11 +602,17 @@ BEGIN
   --    for the lock (a lookup or replay then never sees a false in_flight).
   --    Otherwise take the SAME advisory lock idem_begin takes, at the OUTER
   --    level (a lock first taken inside the savepoint below would be
-  --    released when the savepoint rolls back), and read again.
-  SELECT * INTO v_row FROM public.idempotency_keys WHERE key = p_key;
+  --    released when the savepoint rolls back), and read again. The ledger
+  --    is per organisation: only the CALLER'S organisation's row (org_id,
+  --    key) is ever read or written; a key whose organisation was never
+  --    recorded is refused in every organisation.
+  IF EXISTS (SELECT 1 FROM public.idempotency_keys WHERE org_id = '!unattributed' AND key = p_key) THEN
+    RETURN jsonb_build_object('outcome', 'mismatch');
+  END IF;
+  SELECT * INTO v_row FROM public.idempotency_keys WHERE org_id = v_org AND key = p_key;
   IF NOT FOUND THEN
-    PERFORM pg_advisory_xact_lock(hashtext('idem:' || p_key::text));
-    SELECT * INTO v_row FROM public.idempotency_keys WHERE key = p_key;
+    PERFORM pg_advisory_xact_lock(hashtext('idem:' || v_org || ':' || p_key::text));
+    SELECT * INTO v_row FROM public.idempotency_keys WHERE org_id = v_org AND key = p_key;
   END IF;
 
   -- 4. An existing decision is answered, never re-executed.
@@ -638,8 +708,13 @@ BEGIN
   -- ledger BEFORE the lock, so a concurrent lookup, fence or replay holding
   -- the lock never makes a decided key look "in flight". Another
   -- organization's (or another RPC's) decided key: one fixed answer (no
-  -- state, actor, time or in-flight signal).
-  SELECT * INTO v_row FROM public.idempotency_keys WHERE key = p_key;
+  -- state, actor, time or in-flight signal). The ledger is per organisation:
+  -- only the caller's organisation's row (org_id, key) exists for it —
+  -- another organisation's use of the same key is invisible here.
+  IF EXISTS (SELECT 1 FROM public.idempotency_keys WHERE org_id = '!unattributed' AND key = p_key) THEN
+    RETURN jsonb_build_object('status', 'unavailable');
+  END IF;
+  SELECT * INTO v_row FROM public.idempotency_keys WHERE org_id = v_org AND key = p_key;
   IF FOUND THEN
     IF v_row.org_id IS DISTINCT FROM v_org OR v_row.rpc <> p_rpc THEN
       RETURN jsonb_build_object('status', 'unavailable');
@@ -656,12 +731,12 @@ BEGIN
   -- An execution holding the key's lock has neither committed nor rolled
   -- back: say so, never guess. Lookups share the lock (they never see each
   -- other as in flight); a fence needs it exclusively.
-  IF NOT (CASE WHEN v_fence THEN pg_try_advisory_xact_lock(hashtext('idem:' || p_key::text))
-               ELSE pg_try_advisory_xact_lock_shared(hashtext('idem:' || p_key::text)) END) THEN
+  IF NOT (CASE WHEN v_fence THEN pg_try_advisory_xact_lock(hashtext('idem:' || v_org || ':' || p_key::text))
+               ELSE pg_try_advisory_xact_lock_shared(hashtext('idem:' || v_org || ':' || p_key::text)) END) THEN
     RETURN jsonb_build_object('status', 'in_flight');
   END IF;
 
-  SELECT * INTO v_row FROM public.idempotency_keys WHERE key = p_key;   -- re-read under the lock
+  SELECT * INTO v_row FROM public.idempotency_keys WHERE org_id = v_org AND key = p_key;   -- re-read under the lock
   IF FOUND THEN
     IF v_row.org_id IS DISTINCT FROM v_org OR v_row.rpc <> p_rpc THEN
       RETURN jsonb_build_object('status', 'unavailable');
@@ -691,8 +766,10 @@ BEGIN
     RETURN jsonb_build_object('status', 'not_found', 'executable', false, 'fenced', false, 'reason', 'expired');
   END IF;
 
-  -- Fence authority. The server cannot know who minted a never-delivered
-  -- key: the caller may fence their OWN operation; ADMIN / sync:resolve may
+  -- Fence authority. A fence decides the key in the CALLER'S organisation
+  -- only (per-organisation ledger): it can never stop another
+  -- organisation's operation. The server cannot know who minted a
+  -- never-delivered key: the caller may fence their OWN operation; ADMIN / sync:resolve may
   -- fence one of a user of their organisation; and, for a legacy entry with
   -- no recorded actor, only when its arguments name rows of their own
   -- organisation (a consistency check on what the till sent — it does not
@@ -813,13 +890,13 @@ COMMENT ON FUNCTION public.op_status(uuid, text, boolean, text, jsonb) IS
 DO $post$
 DECLARE
   v_expected CONSTANT jsonb := '{{EXPECTED_MD5}}'::jsonb;
-  v_idem_begin_086 CONSTANT text := '{{IDEM_BEGIN_086_MD5}}';
+  v_new      CONSTANT jsonb := '{{NEW_086_MD5}}'::jsonb;   -- bodies 086 installs
   k text; v_md5 text; n integer; v_bad text;
 BEGIN
   FOR k IN SELECT jsonb_object_keys(v_expected) LOOP
     SELECT md5(prosrc) INTO v_md5 FROM pg_proc WHERE oid = to_regprocedure(k);
-    IF k = 'public.idem_begin(uuid,text,text)' THEN
-      IF v_md5 IS DISTINCT FROM v_idem_begin_086 THEN RAISE EXCEPTION '086 post-check: idem_begin is not the 086 body'; END IF;
+    IF v_new ? k THEN
+      IF v_md5 IS DISTINCT FROM v_new ->> k THEN RAISE EXCEPTION '086 post-check: % is not the 086 body', k; END IF;
     ELSIF v_md5 IS DISTINCT FROM v_expected ->> k THEN
       RAISE EXCEPTION '086 post-check: % body changed', k;
     END IF;
@@ -829,6 +906,13 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'idempotency_keys_state_chk') THEN
     RAISE EXCEPTION '086 post-check: state constraint missing';
   END IF;
+  IF (SELECT string_agg(a.attname, ',' ORDER BY k2.ord)
+        FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY k2(attnum, ord)
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k2.attnum
+       WHERE c.conrelid = 'public.idempotency_keys'::regclass AND c.contype = 'p') IS DISTINCT FROM 'org_id,key'
+     OR NOT (SELECT attnotnull FROM pg_attribute WHERE attrelid = 'public.idempotency_keys'::regclass AND attname = 'org_id') THEN
+    RAISE EXCEPTION '086 post-check: the ledger identity is not (org_id, key) with org_id NOT NULL';
+  END IF;
   -- Exact EXECUTE matrix: authenticated on op_execute/op_status, nobody
   -- (but the owner) on every other op_* function.
   SELECT string_agg(p.oid::regprocedure::text || ' -> ' || coalesce(nullif(a.grantee::regrole::text, '-'), 'PUBLIC'), '; ') INTO v_bad
@@ -837,6 +921,12 @@ BEGIN
      AND a.grantee <> p.proowner
      AND NOT (p.proname IN ('op_execute', 'op_status') AND a.grantee = 'authenticated'::regrole);
   IF v_bad IS NOT NULL THEN RAISE EXCEPTION '086 post-check: unexpected EXECUTE grants: %', v_bad; END IF;
+  IF has_function_privilege('authenticated', 'public.idem_begin(uuid,text,text)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.idem_begin(uuid,text,text)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.idem_finish(uuid,jsonb)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.idem_finish(uuid,jsonb)', 'EXECUTE') THEN
+    RAISE EXCEPTION '086 post-check: idem_begin / idem_finish must not be callable by API roles';
+  END IF;
   IF NOT has_function_privilege('authenticated', 'public.op_execute(uuid,text,jsonb,text)', 'EXECUTE')
      OR NOT has_function_privilege('authenticated', 'public.op_status(uuid,text,boolean,text,jsonb)', 'EXECUTE')
      OR has_function_privilege('authenticated', 'public.prune_idempotency_keys()', 'EXECUTE')

@@ -4,11 +4,17 @@ dispatch (one CASE branch per RPC, typed binding) and the explicit
 search_path hardening list. Refuses to emit an RPC whose own v_idem_hash is
 not md5(jsonb_build_object(<all params except p_created_at and the key>)).
 
-usage: python3 -I gen086.py catalog.json harden.txt template.sql out.sql report.txt
+usage: python3 -I gen086.py catalog.json harden.txt template.sql out.sql report.txt \
+         idem_begin_085.json out.rollback.sql idem_finish_085.json pay_supplier_lump_sum_085.json
+
+Financial-safety corrections (before deployment): the ledger identity is per
+organisation (org_id, key) — idem_begin / idem_finish are re-created from
+their 085 bodies with ASSERTED, exact edits — and pay_supplier_lump_sum is
+re-created from its 085 body with the lock-first / no-shortfall edits.
 """
 import json, re, sys
 
-cat_path, harden_path, tpl_path, out_path, rep_path, idem_path, rollback_path = sys.argv[1:8]
+cat_path, harden_path, tpl_path, out_path, rep_path, idem_path, rollback_path, finish_path, lump_path = sys.argv[1:10]
 import hashlib
 idem = json.load(open(idem_path))
 GUARD = """  -- 086: a UUIDv7 key (minted only by 086 clients) runs only through
@@ -21,11 +27,115 @@ GUARD = """  -- 086: a UUIDv7 key (minted only by 086 clients) runs only through
   END IF;
 
 """
-ANCHOR = "  -- Concurrent duplicates serialise here until the first transaction ends.\n"
 src085 = idem["prosrc"]
-assert hashlib.md5(src085.encode()).hexdigest() == idem["md5"] and src085.count(ANCHOR) == 1
-src086 = src085.replace(ANCHOR, GUARD + ANCHOR)
+assert hashlib.md5(src085.encode()).hexdigest() == idem["md5"]
+
+def edit(src: str, old: str, new: str) -> str:
+    assert src.count(old) == 1, f"anchor not found exactly once: {old[:70]!r}"
+    return src.replace(old, new)
+
+# idem_begin: per-organisation ledger identity (lock and lookup by (org, key))
+OLD_LOCK_AND_CALLER = """  -- Concurrent duplicates serialise here until the first transaction ends.
+  PERFORM pg_advisory_xact_lock(hashtext('idem:' || p_key::text));
+
+  -- 074: the caller, resolved exactly as 062 resolved actor_id.
+  SELECT u.id, u.org_id INTO v_caller_id, v_caller_org
+    FROM public.users u WHERE u.auth_id = auth.uid() LIMIT 1;
+
+  SELECT * INTO v FROM public.idempotency_keys WHERE key = p_key;
+"""
+NEW_LOCK_AND_CALLER = """  -- 074: the caller, resolved exactly as 062 resolved actor_id.
+  SELECT u.id, u.org_id INTO v_caller_id, v_caller_org
+    FROM public.users u WHERE u.auth_id = auth.uid() LIMIT 1;
+  -- 086: the ledger is per organisation (org_id, key); a caller with no
+  -- organisation (bootstrap) uses the reserved unattributed namespace.
+  v_caller_org := coalesce(v_caller_org, '!unattributed');
+
+  -- Concurrent duplicates serialise here until the first transaction ends.
+  PERFORM pg_advisory_xact_lock(hashtext('idem:' || v_caller_org || ':' || p_key::text));
+
+  -- 086: a key whose organisation was never recorded (pre-074) stays
+  -- refused in every organisation, as 074 refused it.
+  IF v_caller_org <> '!unattributed'
+     AND EXISTS (SELECT 1 FROM public.idempotency_keys WHERE org_id = '!unattributed' AND key = p_key) THEN
+    RAISE EXCEPTION 'IDEMPOTENCY_MISMATCH: key % was used for a different request', p_key
+      USING ERRCODE = '23505';
+  END IF;
+
+  SELECT * INTO v FROM public.idempotency_keys WHERE org_id = v_caller_org AND key = p_key;
+"""
+GUARD_ANCHOR = "  -- 074: the caller, resolved exactly as 062 resolved actor_id.\n"
+src_org = edit(src085, OLD_LOCK_AND_CALLER, NEW_LOCK_AND_CALLER)          # 086 minus the v7 guard = the rollback body
+assert src_org.count(GUARD_ANCHOR) == 1
+src086 = src_org.replace(GUARD_ANCHOR, GUARD + GUARD_ANCHOR)
 md5_086 = hashlib.md5(src086.encode()).hexdigest()
+md5_rollback = hashlib.md5(src_org.encode()).hexdigest()
+
+def header_of(defn: str) -> str:
+    i = defn.index("AS $function$")
+    return defn[:i].replace("SET search_path TO 'public'", "SET search_path = public, pg_temp")
+
+# idem_finish: the caller's organisation's row only
+finish = json.load(open(finish_path))
+assert hashlib.md5(finish["prosrc"].encode()).hexdigest() == finish["md5"]
+finish_src086 = edit(finish["prosrc"], """BEGIN
+  UPDATE public.idempotency_keys SET response = p_response WHERE key = p_key;
+END;
+""", """DECLARE
+  v_org text;
+  v_n integer;
+BEGIN
+  -- 086: the ledger is per organisation (org_id, key): store the reply on
+  -- the CALLER'S organisation's row only (resolved as idem_begin resolves it).
+  SELECT u.org_id INTO v_org FROM public.users u WHERE u.auth_id = auth.uid() LIMIT 1;
+  UPDATE public.idempotency_keys SET response = p_response
+   WHERE org_id = coalesce(v_org, '!unattributed') AND key = p_key;
+  -- fail closed: the reply must land on the row idem_begin wrote (same
+  -- caller, same organisation); never lose it silently
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'IDEMPOTENCY_FINISH_ROW_MISSING: key %', p_key USING ERRCODE = 'XX000';
+  END IF;
+END;
+""")
+finish_def086 = header_of(finish["def"]) + "AS $function$" + finish_src086 + "$function$;"
+md5_finish086 = hashlib.md5(finish_src086.encode()).hexdigest()
+
+# pay_supplier_lump_sum: lock first, then the balance; never a silent shortfall
+lump = json.load(open(lump_path))
+assert hashlib.md5(lump["prosrc"].encode()).hexdigest() == lump["md5"]
+lump_src086 = edit(lump["prosrc"], """  -- Total outstanding for this supplier in this shop (received, unpaid balance).
+  SELECT COALESCE(sum(""", """  -- 086: lock this supplier's received purchase orders in this shop FIRST
+  -- (in the allocation order below: oldest first), then compute the balance.
+  -- A concurrent payment waits here and then sees the paid totals. (A PO
+  -- received after this lock is counted but not locked; if it is paid
+  -- concurrently, the guard after the loop refuses — never a shortfall.)
+  PERFORM 1 FROM purchase_orders
+   WHERE supplier_id = p_supplier_id AND shop_id = p_shop_id AND status = 'RECEIVED'
+   ORDER BY created_at ASC, id ASC
+   FOR UPDATE;
+
+  -- Total outstanding for this supplier in this shop (received, unpaid balance).
+  SELECT COALESCE(sum(""")
+lump_src086 = edit(lump_src086, """  END LOOP;
+
+  v_idem_result := jsonb_build_object(""", """  END LOOP;
+
+  -- 086: never record less than was entered (defence in depth: the balance
+  -- was checked under the lock above). The whole payment rolls back.
+  IF v_remaining > 0 THEN
+    RAISE EXCEPTION 'Payment amount exceeds total outstanding balance';
+  END IF;
+
+  v_idem_result := jsonb_build_object(""")
+lump_def086 = header_of(lump["def"]) + "AS $function$" + lump_src086 + "$function$;"
+md5_lump086 = hashlib.md5(lump_src086.encode()).hexdigest()
+
+SIG_BEGIN = "public.idem_begin(uuid,text,text)"
+SIG_FINISH = "public.idem_finish(uuid,jsonb)"
+SIG_LUMP = "public.pay_supplier_lump_sum(text,text,integer,text,text,text,uuid)"
+also_ok = {SIG_BEGIN: [md5_086, md5_rollback], SIG_FINISH: [md5_finish086], SIG_LUMP: [md5_lump086]}
+new_086 = {SIG_BEGIN: md5_086, SIG_FINISH: md5_finish086, SIG_LUMP: md5_lump086}
 cat = json.load(open(cat_path))
 EXCLUDE = {"create_app_user": "links auth accounts (082 marker) and reads auth.users; stays direct-only"}
 SKIP_HASH = {"p_created_at", "p_idempotency_key"}
@@ -101,8 +211,12 @@ harden_array = ",\n    ".join(f"'{h}'" for h in harden)
 
 tpl = open(tpl_path).read()
 md5_json = json.dumps(expected_md5, sort_keys=True, separators=(",", ":"))
+assert expected_md5[SIG_FINISH] == finish["md5"] and expected_md5[SIG_LUMP] == lump["md5"]
 out = (tpl.replace("{{EXPECTED_MD5}}", md5_json).replace("{{DISPATCH}}", dispatch)
-          .replace("{{IDEM_BEGIN_086_BODY}}", src086).replace("{{IDEM_BEGIN_086_MD5}}", md5_086)
+          .replace("{{IDEM_BEGIN_086_BODY}}", src086)
+          .replace("{{IDEM_FINISH_086_DEF}}", finish_def086).replace("{{LUMP_SUM_086_DEF}}", lump_def086)
+          .replace("{{ALSO_OK_MD5}}", json.dumps(also_ok, sort_keys=True, separators=(",", ":")))
+          .replace("{{NEW_086_MD5}}", json.dumps(new_086, sort_keys=True, separators=(",", ":")))
           .replace("{{HARDEN_ALTERS}}", harden_alters).replace("{{HARDEN_ARRAY}}", "\n    " + harden_array))
 assert "{{" not in out
 assert md5_json.count(idem["md5"]) == 1
@@ -112,8 +226,11 @@ open(rollback_path, "w").write(
     "-- GENERATED together with 086 (gen086.py). Owner-approved rollbacks only; never applied by\n"
     "-- deploy/lucashome/apply-migrations.sh (this directory is not supabase/migrations).\n"
     "--   psql -U supabase_admin -d postgres -v ON_ERROR_STOP=1 --single-transaction -f 086_operation_outcomes.rollback.sql\n"
-    "-- Drops the executor, the status lookup and every op_* helper, and restores the 085 idem_begin body\n"
-    "-- (search_path stays hardened). KEEPS the idempotency_keys columns, constraint and index, every\n"
+    "-- Drops the executor, the status lookup and every op_* helper, and restores idem_begin WITHOUT the\n"
+    "-- UUIDv7 guard (the 085 behaviour on the per-organisation ledger: (org_id, key) lookups and locks;\n"
+    "-- the 085 key-only body is NOT restored — it would read another organisation's row once a key is used\n"
+    "-- in two organisations). KEEPS the per-organisation identity, idem_finish (per organisation), the\n"
+    "-- corrected pay_supplier_lump_sum, the idempotency_keys columns, constraint and index, every\n"
     "-- rejected/abandoned tombstone (their R:/A: hashes keep them refused on the legacy path), the 086\n"
     "-- prune_idempotency_keys (inert without the executor) and the search_path hardening.\n"
     "-- Never restore 062's prune body. Re-apply 086 to recover forward.\n"
@@ -123,10 +240,17 @@ open(rollback_path, "w").write(
     "    EXECUTE format('DROP FUNCTION %s', f);\n  END LOOP;\nEND $$;\n"
     "CREATE OR REPLACE FUNCTION public.idem_begin(p_key uuid, p_rpc text, p_request_hash text)\n"
     " RETURNS jsonb\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path = public, pg_temp\n"
-    f"AS $function${src085}$function$;\n"
+    f"AS $function${src_org}$function$;\n"
     "DO $$\nBEGIN\n"
-    f"  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.idem_begin(uuid,text,text)'::regprocedure) <> '{idem['md5']}' THEN\n"
-    "    RAISE EXCEPTION 'rollback post-check: idem_begin is not the 085 body';\n  END IF;\n"
+    f"  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.idem_begin(uuid,text,text)'::regprocedure) <> '{md5_rollback}' THEN\n"
+    "    RAISE EXCEPTION 'rollback post-check: idem_begin is not the per-organisation body without the UUIDv7 guard';\n  END IF;\n"
+    f"  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.idem_finish(uuid,jsonb)'::regprocedure) <> '{md5_finish086}'\n"
+    f"     OR (SELECT md5(prosrc) FROM pg_proc WHERE oid = 'public.pay_supplier_lump_sum(text,text,integer,text,text,text,uuid)'::regprocedure) <> '{md5_lump086}' THEN\n"
+    "    RAISE EXCEPTION 'rollback post-check: idem_finish / pay_supplier_lump_sum must stay the corrected 086 bodies';\n  END IF;\n"
+    "  IF (SELECT string_agg(a.attname, ',' ORDER BY k.ord) FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY k(attnum, ord)\n"
+    "        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum\n"
+    "       WHERE c.conrelid = 'public.idempotency_keys'::regclass AND c.contype = 'p') IS DISTINCT FROM 'org_id,key' THEN\n"
+    "    RAISE EXCEPTION 'rollback post-check: the per-organisation ledger identity must be kept';\n  END IF;\n"
     "  IF EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname LIKE 'op\\_%') THEN\n"
     "    RAISE EXCEPTION 'rollback post-check: op_* functions remain';\n  END IF;\n"
     "  IF EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proconfig = '{search_path=public}') THEN\n"
@@ -135,6 +259,8 @@ open(rollback_path, "w").write(
     "    RAISE EXCEPTION 'rollback post-check: prune_idempotency_keys is not the inert 086 body (never restore 062''s)';\n  END IF;\n"
     "END $$;\n"
     "NOTIFY pgrst, 'reload schema';\nCOMMIT;\n")
-report.append(f"allow-listed: {len(branches)}; hardened: {len(harden)}; md5-guarded: {len(expected_md5)}; idem_begin 085 {idem['md5']} -> 086 {md5_086}")
+report.append(f"allow-listed: {len(branches)}; hardened: {len(harden)}; md5-guarded: {len(expected_md5)}; "
+              f"idem_begin 085 {idem['md5']} -> 086 {md5_086} (rollback {md5_rollback}); "
+              f"idem_finish {finish['md5']} -> {md5_finish086}; pay_supplier_lump_sum {lump['md5']} -> {md5_lump086}")
 open(rep_path, "w").write("\n".join(report) + "\n")
 print(report[-1])

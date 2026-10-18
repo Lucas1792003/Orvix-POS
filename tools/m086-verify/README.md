@@ -75,5 +75,6 @@ generator emits:
 python3 -I tools/m086-verify/generator/gen086.py \
   tools/m086-verify/generator/inputs/catalog.json tools/m086-verify/generator/inputs/harden.txt \
   tools/m086-verify/generator/template.sql /tmp/086.sql /tmp/report.txt \
-  tools/m086-verify/generator/inputs/idem_begin_085.json /tmp/086.rollback.sql
+  tools/m086-verify/generator/inputs/idem_begin_085.json /tmp/086.rollback.sql \
+  tools/m086-verify/generator/inputs/idem_finish_085.json tools/m086-verify/generator/inputs/pay_supplier_lump_sum_085.json
 ```

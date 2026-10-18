@@ -6,7 +6,7 @@
 #   KEEP=1 ...                                 leave the stack up (debugging)
 #   E2E_GREP="M6" PARTS=e2e ...                one Chromium test
 #
-# Parts, in order: generator db recovery legacy2a legacy2b rollback client e2e audit
+# Parts, in order: generator db sql recovery legacy2a legacy2b rollback client e2e audit
 # (generator must run while the stack is still pristine 085; `db` applies 086, which
 #  recovery / rollback / client / e2e expect — select them together with `db`;
 #  audit builds its own 086 stack).
@@ -17,7 +17,7 @@ umask 077                                          # results (state.json holds a
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 TAG="${1:-$(date -u +%Y%m%dT%H%M%SZ)}"
-PARTS="${PARTS:-generator db recovery legacy2a legacy2b rollback client e2e audit}"
+PARTS="${PARTS:-generator db sql recovery legacy2a legacy2b rollback client e2e audit}"
 OUT="$HERE/results/$TAG"; mkdir -p "$OUT"
 LEGACY_COMMIT="${LEGACY_COMMIT:-ae51e69}"         # the Batch 2A client (compatibility parts)
 redact() { sed -E 's/eyJ[A-Za-z0-9_.-]+/<jwt>/g'; }
@@ -55,7 +55,10 @@ fi
 unset ELECTRON_RUN_AS_NODE
 export E2E_SUPABASE_URL="${PHF_ISO_URL:-}" E2E_ANON_KEY="${PHF_ISO_ANON_KEY:-}" E2E_SERVICE_KEY="${PHF_ISO_SERVICE_KEY:-}"
 export B2B_JWT_SECRET="${PHF_ISO_JWT_SECRET:-}" E2E_DB_CONTAINER=phf-iso-db E2E_LOOPBACK_ONLY=1 M086_LIVE=1 B2B_P3=1
-export M086_MIGRATION="$ROOT/supabase/migrations/086_operation_outcomes.sql"
+# M086_MIGRATION_UNDER_TEST: run the live parts against ANOTHER 086 file (e.g. an
+# earlier version, to reproduce a defect); the generator part always checks the committed one.
+export M086_MIGRATION="${M086_MIGRATION_UNDER_TEST:-$ROOT/supabase/migrations/086_operation_outcomes.sql}"
+M086_COMMITTED="$ROOT/supabase/migrations/086_operation_outcomes.sql"
 export M086_ROLLBACK="$ROOT/supabase/rollbacks/086_operation_outcomes.rollback.sql"
 export P086_STATE="$OUT/state.json"   # QA tenant state incl. a disposable password: local results only, git-ignored
 
@@ -80,15 +83,17 @@ for part in $PARTS; do
     generator)
       say "generator: extract the 085 inputs, regenerate 086 + rollback, compare with the committed files"
       python3 -I "$HERE/generator/extract-inputs.py" phf-iso-db "$OUT/inputs" > "$OUT/generator.log" 2>&1
-      for f in catalog.json harden.txt idem_begin_085.json; do
+      for f in catalog.json harden.txt idem_begin_085.json idem_finish_085.json pay_supplier_lump_sum_085.json; do
         python3 -I "$HERE/generator/same-input.py" "$HERE/generator/inputs/$f" "$OUT/inputs/$f" >> "$OUT/generator.log" 2>&1 && echo "  input $f: identical" || { echo "  input $f: DIFFERS"; fail "generator input $f"; }
       done
       python3 -I "$HERE/generator/gen086.py" "$HERE/generator/inputs/catalog.json" "$HERE/generator/inputs/harden.txt" "$HERE/generator/template.sql" \
-        "$OUT/086.sql" "$OUT/gen-report.txt" "$HERE/generator/inputs/idem_begin_085.json" "$OUT/086.rollback.sql" >> "$OUT/generator.log" 2>&1
-      { cmp -s "$OUT/086.sql" "$M086_MIGRATION" && echo "  migration: byte-identical" || { echo "  migration: DIFFERS"; fail "generated migration"; }; } | tee -a "$OUT/generator.log"
+        "$OUT/086.sql" "$OUT/gen-report.txt" "$HERE/generator/inputs/idem_begin_085.json" "$OUT/086.rollback.sql" \
+        "$HERE/generator/inputs/idem_finish_085.json" "$HERE/generator/inputs/pay_supplier_lump_sum_085.json" >> "$OUT/generator.log" 2>&1
+      { cmp -s "$OUT/086.sql" "$M086_COMMITTED" && echo "  migration: byte-identical" || { echo "  migration: DIFFERS"; fail "generated migration"; }; } | tee -a "$OUT/generator.log"
       { cmp -s "$OUT/086.rollback.sql" "$M086_ROLLBACK" && echo "  rollback: byte-identical" || { echo "  rollback: DIFFERS"; fail "generated rollback"; }; } | tee -a "$OUT/generator.log"
       grep -q "DIFFERS" "$OUT/generator.log" && FAILED=1 ;;
     db) vt db src/live/m086-db.live.test.ts ;;
+    sql) vt sql src/live/m086-sql.live.test.ts ;;
     recovery) vt recovery src/live/m086-recovery.live.test.ts ;;
     legacy2a) legacy_app; ( cd "$OUT/legacy-app" && B2B_EVIDENCE_K="$OUT/legacy2a.json" npx vitest run src/live/legacy-2a.live.test.ts 2>&1 | redact ) > "$OUT/legacy2a.log"
       echo "legacy2a ($LEGACY_COMMIT client vs 086): $(grep -E '^ +Tests ' "$OUT/legacy2a.log")"; vt_ok "$OUT/legacy2a.log" || fail legacy2a ;;

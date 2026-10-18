@@ -55,4 +55,13 @@ idem = json.loads(q("""
 SELECT json_build_object('prosrc', p.prosrc, 'md5', md5(p.prosrc), 'cfg', p.proconfig, 'owner', pg_get_userbyid(p.proowner))
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'idem_begin'"""))
 json.dump(idem, open(os.path.join(out, "idem_begin_085.json"), "w"))
-print(f"extracted: {len(catalog)} catalog functions, {len(hard)} hardening entries, idem_begin md5 {idem['md5']}")
+
+# The 085 bodies 086 replaces (financial-safety corrections): the full
+# definition (header + body) so the generator can re-create them verbatim.
+for fn, sig in (("idem_finish", "public.idem_finish(uuid,jsonb)"),
+                ("pay_supplier_lump_sum", "public.pay_supplier_lump_sum(text,text,integer,text,text,text,uuid)")):
+    d = json.loads(q(f"""
+SELECT json_build_object('prosrc', p.prosrc, 'md5', md5(p.prosrc), 'def', pg_get_functiondef(p.oid), 'owner', pg_get_userbyid(p.proowner))
+FROM pg_proc p WHERE p.oid = to_regprocedure('{sig}')"""))
+    json.dump(d, open(os.path.join(out, f"{fn}_085.json"), "w"))
+print(f"extracted: {len(catalog)} catalog functions, {len(hard)} hardening entries, idem_begin md5 {idem['md5']}, idem_finish + pay_supplier_lump_sum 085 definitions")

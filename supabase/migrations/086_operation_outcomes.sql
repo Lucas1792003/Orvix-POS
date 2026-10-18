@@ -19,8 +19,8 @@
 --       searched FIRST for tables: a SQL session with TEMP privilege can
 --       shadow `users` and run an ADMIN-only RPC as a cashier.
 --
--- WHAT IT DOES (additive; the 30 idempotent RPC bodies are NOT changed;
---   idem_finish is NOT changed)
+-- WHAT IT DOES (29 of the 30 idempotent RPC bodies are NOT changed;
+--   pay_supplier_lump_sum and idem_finish are -- see 1b and 2b)
 --   1. idempotency_keys: state (committed|rejected|abandoned, default
 --      committed), outcome_code, outcome_message, decided_at, response_purged_at,
 --      a state/prefix CHECK and an index on decided_at. Existing rows keep
@@ -28,7 +28,8 @@
 --      A rejected row stores 'R:'||hash, an abandoned (fenced) row 'A:': the
 --      idem_begin hash comparison is verbatim, so a legacy call with such a
 --      key always gets IDEMPOTENCY_MISMATCH (also after a rollback).
---   2. idem_begin: ONE added guard. A key that is an RFC 9562 UUIDv7 (minted
+--   2. idem_begin: the UUIDv7 guard (and the per-organisation ledger
+--      identity, 1b). A key that is an RFC 9562 UUIDv7 (minted
 --      only by 086 clients) is accepted only when op_execute is running
 --      that very key (transaction-local setting orvix.op_execute_key, which
 --      no PostgREST request can set). On an 086 server a UUIDv7 operation
@@ -75,16 +76,36 @@
 --     postgres; idempotency_keys is owned by postgres; the ledger has
 --     exactly the 085 or the 086 columns; every hardened function exists
 --     with search_path=public or public, pg_temp.
---   * after: the 31 untouched bodies unchanged, idem_begin = the 086 body;
+--   * after: the 29 untouched bodies unchanged; idem_begin, idem_finish and
+--     pay_supplier_lump_sum = the 086 bodies; ledger identity (org_id, key);
 --     ledger columns/constraint; every op_* function owned by postgres with
 --     search_path pg_catalog, pg_temp; EXECUTE exactly authenticated on
 --     op_execute/op_status and nobody else on any op_* helper; no public
 --     function left with search_path=public.
 --
--- ROLLBACK (doc "Rollback"): functions only + restore the 085 idem_begin
---   body (search_path kept hardened). KEEP the columns, constraint,
+--   1b. FINANCIAL-SAFETY CORRECTIONS (before any deployment):
+--      * the ledger identity is PER ORGANISATION: primary key (org_id, key),
+--        the organisation always from the session (never from the caller).
+--        A key names an operation of the caller's own organisation only:
+--        another organisation can neither claim (fence) it nor learn it
+--        exists; the same key in two organisations is two operations. Rows
+--        whose organisation was never recorded (pre-074 / bootstrap) move to
+--        the reserved '!unattributed' namespace and keep refusing the key in
+--        every organisation (as 074 refused them). idem_begin, idem_finish,
+--        op_execute and op_status look up (org_id, key); the advisory lock is
+--        per (org_id, key).
+--      * pay_supplier_lump_sum locks the supplier's received purchase orders
+--        (oldest first) BEFORE computing the balance and refuses — never
+--        silently reduces — a payment it cannot apply in full.
+-- ROLLBACK (doc "Rollback"): functions only + idem_begin WITHOUT the UUIDv7
+--   guard on the per-organisation ledger (NOT the 085 key-only body: it would
+--   read another organisation's row). KEEP the per-organisation identity,
+--   idem_finish and pay_supplier_lump_sum (086), the columns, constraint,
 --   tombstones, the prune (inert without the executor) and the hardened
---   search paths. Never restore 062's prune body.
+--   search paths. Never restore 062's prune body. NEVER re-run any migration
+--   062..085 once 086 is applied (their key-only idem_begin / idem_finish
+--   would mix organisations' rows of one key; 062 would hand one
+--   organisation's stored reply to another).
 -- FORWARD RECOVERY: idempotent; re-run.
 -- ============================================================
 
@@ -96,7 +117,9 @@ SET lock_timeout = '3s';
 DO $guard$
 DECLARE
   v_expected CONSTANT jsonb := '{"public.adjust_stock(text,text,text,integer,text,text,integer,timestamp with time zone,text,uuid)":"6701ab0256abed02e34f7e20ece76c2f","public.approve_purchase_order(text,uuid)":"1730ef49f146b31afbf3eabe01adbdf7","public.approve_refund_request(text,uuid)":"acc3e5b7bfcd68a435e0f4170a508deb","public.approve_stock_transfer(text,uuid)":"5d031d2f765c888cb4c5d6fabc4329a7","public.approve_void_request(text,uuid)":"9589bac39f64059d2fb95a2b7209eeae","public.cancel_purchase_order(text,text,uuid)":"829aec95c5c3cd93e78d266b434b507e","public.cancel_stock_transfer(text,text,uuid)":"430e2f79bc6e2bade999447cd204a36a","public.close_shift(text,integer,text,timestamp with time zone,text,uuid)":"9536c7f1f2bac9e0355458bd5ad06c79","public.complete_sale(text,text,text,integer,numeric,jsonb,timestamp with time zone,uuid)":"f9844590bece7166caaf1d55f638dce3","public.create_app_user(text,text,text,text,text,uuid,text[],text[],uuid)":"06d80afb8e87681f03fb3edfd3ab88bc","public.create_purchase_order(text,text,text,jsonb,uuid)":"8c43ffe84e6130072fa6c31c9475931d","public.create_refund_void_request(text,text,text,jsonb,timestamp with time zone,text,uuid)":"56ea96382d12171c9ba603fbc6fcc61e","public.create_stock_transfer(text,text,text,jsonb,uuid)":"64564f4082b58e663ba63bfe0e544674","public.create_supplier(text,text,text,text,text,text,text,uuid)":"0b2ca7e054fababe0889ab10d74774e5","public.deactivate_app_user(text,boolean,uuid)":"b335ccb5cfaad622090cfa203b6e0be4","public.delete_product(text,uuid)":"7fdbbe18860b8fcd9b5fa87d4896505d","public.dispatch_stock_transfer(text,timestamp with time zone,text,uuid)":"2e4c2edc75c391664b30415357cebf51","public.idem_begin(uuid,text,text)":"afca065fea226a0c7a5b9bb56b540a9d","public.idem_finish(uuid,jsonb)":"d832e312446dfaf2509cc0b0ccadcf28","public.log_audit_event(text,text,text,text,text,uuid)":"73b9154015ee61786243d70822c25618","public.log_receipt_reprint(text,uuid)":"11171c26d4e02db6244285b986b2536e","public.open_shift(text,integer,timestamp with time zone,text,uuid)":"97ccc663fec1150c90bda6263a46b33c","public.pay_supplier_lump_sum(text,text,integer,text,text,text,uuid)":"7fe2929d412ca10d2a47ec76b956e76d","public.receive_purchase_order(text,jsonb,timestamp with time zone,text,uuid)":"d6e5ec1921f4e4d9e0b32c7ae48c589e","public.receive_stock_transfer(text,jsonb,timestamp with time zone,text,uuid)":"7bf2a3e120271787a1f2c5c21053b40b","public.record_supplier_payment(text,integer,text,text,text,timestamp with time zone,text,uuid)":"4ed0ce8e6a9c8516d73e23ef13c808eb","public.reject_refund_void_request(text,text,uuid)":"82e030f931169de811727d1e8e370967","public.reject_stock_transfer(text,text,uuid)":"b165a65897c5870cdeb5defbdd3fc2d4","public.replace_manager(text,text,uuid)":"27b10ab2731ac2fbfc52bb8b0239c379","public.update_app_user(text,text,text,text,text[],text[],uuid)":"b92eb4a6c46e6bf69316d4b6d86da4c0","public.update_supplier(text,text,text,text,text,text,text,text,boolean,uuid)":"cb422e77100c7199e1311bcd5f1b82d1","public.void_supplier_payment(text,text,uuid)":"f10dd8642eabcd9ec389e3c88678a875"}'::jsonb;
-  v_idem_begin_086 CONSTANT text := '58a55436635b9ed1e8db09192c6b6e2b';
+  -- bodies 086 itself installs (re-apply) or its rollback leaves (re-apply after a rollback)
+  v_also_ok  CONSTANT jsonb := '{"public.idem_begin(uuid,text,text)":["c9f577ed5608de19b25c00c649deaf50","1fc0d1d2ae39fc56c86d9b20a417ea7f"],"public.idem_finish(uuid,jsonb)":["dd11818faf8853eadab1d3332fd5d7e6"],"public.pay_supplier_lump_sum(text,text,integer,text,text,text,uuid)":["cf4142b64ef02ff5414c64bf8eb827b3"]}'::jsonb;
+  v_pk text;
   v_harden   CONSTANT text[] := ARRAY[
     'public.adjust_stock(text,text,text,integer,text,text,integer,timestamp with time zone,text,uuid)',
     'public.app_can_for_shop(text,text)',
@@ -173,7 +196,7 @@ BEGIN
       FROM pg_proc WHERE oid = to_regprocedure(k);
     IF v_md5 IS NULL THEN
       RAISE EXCEPTION '086 preflight: % does not exist', k;
-    ELSIF v_md5 <> v_expected ->> k AND NOT (k = 'public.idem_begin(uuid,text,text)' AND v_md5 = v_idem_begin_086) THEN
+    ELSIF v_md5 <> v_expected ->> k AND NOT (v_also_ok ? k AND v_also_ok -> k ? v_md5) THEN
       RAISE EXCEPTION '086 preflight: % is not the 085 body (md5 %); nothing changed', k, v_md5;
     ELSIF NOT v_secdef OR v_owner <> 'postgres' THEN
       RAISE EXCEPTION '086 preflight: % must be SECURITY DEFINER owned by postgres (secdef %, owner %)', k, v_secdef, v_owner;
@@ -186,6 +209,13 @@ BEGIN
 
   SELECT string_agg(attname, ',' ORDER BY attname) INTO v_cols
     FROM pg_attribute WHERE attrelid = 'public.idempotency_keys'::regclass AND attnum > 0 AND NOT attisdropped;
+  SELECT string_agg(a.attname, ',' ORDER BY k.ord) INTO v_pk
+    FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY k(attnum, ord)
+    JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+   WHERE c.conrelid = 'public.idempotency_keys'::regclass AND c.contype = 'p';
+  IF v_pk NOT IN ('key', 'org_id,key') THEN
+    RAISE EXCEPTION '086 preflight: idempotency_keys has an unexpected primary key (%); nothing changed', v_pk;
+  END IF;
   IF v_cols NOT IN ('actor_id,created_at,key,org_id,request_hash,response,rpc',
                     'actor_id,created_at,decided_at,key,org_id,outcome_code,outcome_message,request_hash,response,response_purged_at,rpc,state') THEN
     RAISE EXCEPTION '086 preflight: idempotency_keys has unexpected columns (%); nothing changed', v_cols;
@@ -235,6 +265,29 @@ ALTER TABLE public.idempotency_keys
 
 CREATE INDEX IF NOT EXISTS idempotency_keys_decided_at_idx ON public.idempotency_keys (decided_at);
 
+-- 1b: the ledger identity is per organisation. A row whose organisation was
+-- never recorded (pre-074, bootstrap paths) goes to the reserved
+-- '!unattributed' namespace: it keeps refusing its key in every
+-- organisation, exactly as 074 refused it (NULL org IS DISTINCT FROM any
+-- caller's), and replays only for a caller with no organisation either.
+UPDATE public.idempotency_keys SET org_id = '!unattributed' WHERE org_id IS NULL;
+ALTER TABLE public.idempotency_keys ALTER COLUMN org_id SET NOT NULL;
+DO $pk$
+BEGIN
+  IF (SELECT string_agg(a.attname, ',' ORDER BY k.ord)
+        FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY k(attnum, ord)
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+       WHERE c.conrelid = 'public.idempotency_keys'::regclass AND c.contype = 'p') IS DISTINCT FROM 'org_id,key' THEN
+    ALTER TABLE public.idempotency_keys DROP CONSTRAINT idempotency_keys_pkey;
+    ALTER TABLE public.idempotency_keys ADD CONSTRAINT idempotency_keys_pkey PRIMARY KEY (org_id, key);
+  END IF;
+END
+$pk$;
+-- lookups of a key in the unattributed namespace, and retention by key
+CREATE INDEX IF NOT EXISTS idempotency_keys_key_idx ON public.idempotency_keys (key);
+COMMENT ON COLUMN public.idempotency_keys.org_id IS
+  '086: the operation''s organisation (from the session). The ledger identity is (org_id, key): a key names an operation of ONE organisation. ''!unattributed'' = organisation never recorded (pre-074): such a key is refused in every organisation.';
+
 COMMENT ON COLUMN public.idempotency_keys.state IS
   '086: committed (idem_begin row, also every pre-086 row) | rejected (definitive refusal recorded by op_execute; request_hash R:<hash>) | abandoned (fenced by op_status; request_hash A:). Rejected/abandoned keys never execute, also through the legacy direct path.';
 COMMENT ON COLUMN public.idempotency_keys.decided_at IS
@@ -242,7 +295,8 @@ COMMENT ON COLUMN public.idempotency_keys.decided_at IS
 
 -- ------------------------------------------------------------
 -- 2/8 idem_begin: UUIDv7 operations only through op_execute. The 085 body
---     with exactly one added block (after the key check, before the lock).
+--     with the UUIDv7 guard added (after the key check) and the lookup / lock
+--     made per organisation (org_id, key) — generated from the 085 body.
 -- ------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.idem_begin(p_key uuid, p_rpc text, p_request_hash text)
  RETURNS jsonb
@@ -268,14 +322,25 @@ BEGIN
     RAISE EXCEPTION 'OP_EXECUTOR_REQUIRED: this operation must be sent through op_execute' USING ERRCODE = '22023';
   END IF;
 
-  -- Concurrent duplicates serialise here until the first transaction ends.
-  PERFORM pg_advisory_xact_lock(hashtext('idem:' || p_key::text));
-
   -- 074: the caller, resolved exactly as 062 resolved actor_id.
   SELECT u.id, u.org_id INTO v_caller_id, v_caller_org
     FROM public.users u WHERE u.auth_id = auth.uid() LIMIT 1;
+  -- 086: the ledger is per organisation (org_id, key); a caller with no
+  -- organisation (bootstrap) uses the reserved unattributed namespace.
+  v_caller_org := coalesce(v_caller_org, '!unattributed');
 
-  SELECT * INTO v FROM public.idempotency_keys WHERE key = p_key;
+  -- Concurrent duplicates serialise here until the first transaction ends.
+  PERFORM pg_advisory_xact_lock(hashtext('idem:' || v_caller_org || ':' || p_key::text));
+
+  -- 086: a key whose organisation was never recorded (pre-074) stays
+  -- refused in every organisation, as 074 refused it.
+  IF v_caller_org <> '!unattributed'
+     AND EXISTS (SELECT 1 FROM public.idempotency_keys WHERE org_id = '!unattributed' AND key = p_key) THEN
+    RAISE EXCEPTION 'IDEMPOTENCY_MISMATCH: key % was used for a different request', p_key
+      USING ERRCODE = '23505';
+  END IF;
+
+  SELECT * INTO v FROM public.idempotency_keys WHERE org_id = v_caller_org AND key = p_key;
   IF FOUND THEN
     IF v.rpc <> p_rpc OR v.request_hash <> p_request_hash THEN
       RAISE EXCEPTION 'IDEMPOTENCY_MISMATCH: key % was used for a different request', p_key
@@ -293,6 +358,211 @@ BEGIN
   INSERT INTO public.idempotency_keys (key, rpc, actor_id, org_id, request_hash)
   VALUES (p_key, p_rpc, v_caller_id, v_caller_org, p_request_hash);
   RETURN NULL;  -- execute
+END;
+$function$;
+
+-- 2b: idem_finish stores the reply on the CALLER'S organisation's row only
+-- (the caller resolved exactly as idem_begin resolves it).
+CREATE OR REPLACE FUNCTION public.idem_finish(p_key uuid, p_response jsonb)
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path = public, pg_temp
+AS $function$
+DECLARE
+  v_org text;
+  v_n integer;
+BEGIN
+  -- 086: the ledger is per organisation (org_id, key): store the reply on
+  -- the CALLER'S organisation's row only (resolved as idem_begin resolves it).
+  SELECT u.org_id INTO v_org FROM public.users u WHERE u.auth_id = auth.uid() LIMIT 1;
+  UPDATE public.idempotency_keys SET response = p_response
+   WHERE org_id = coalesce(v_org, '!unattributed') AND key = p_key;
+  -- fail closed: the reply must land on the row idem_begin wrote (same
+  -- caller, same organisation); never lose it silently
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'IDEMPOTENCY_FINISH_ROW_MISSING: key %', p_key USING ERRCODE = 'XX000';
+  END IF;
+END;
+$function$;
+
+-- 2c: pay_supplier_lump_sum (financial-safety correction): the supplier's
+-- received purchase orders are locked (oldest first) BEFORE the balance is
+-- computed, and a payment that cannot be applied in full is refused — never
+-- silently reduced. Every other line is the 085 body.
+CREATE OR REPLACE FUNCTION public.pay_supplier_lump_sum(p_supplier_id text, p_shop_id text, p_amount_mmk integer, p_payment_method text, p_reference_no text DEFAULT NULL::text, p_notes text DEFAULT NULL::text, p_idempotency_key uuid DEFAULT NULL::uuid)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path = public, pg_temp
+AS $function$
+DECLARE
+  -- Phase D (063): idempotency bookkeeping.
+  v_idem_hash   text;
+  v_idem_replay jsonb;
+  v_idem_result jsonb;
+  v_user        users;
+  v_now         timestamptz := now();
+  v_method      text := upper(COALESCE(NULLIF(btrim(p_payment_method), ''), ''));
+  v_remaining   integer;
+  v_outstanding integer;
+  v_po          purchase_orders;
+  v_bal         integer;
+  v_apply       integer;
+  v_new_paid    integer;
+  v_new_status  text;
+  v_pay_id      text;
+  v_audit_id    text;
+  v_pays_out    jsonb := '[]'::jsonb;
+  v_pos_out     jsonb := '[]'::jsonb;
+  v_audits_out  jsonb := '[]'::jsonb;
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Not authenticated'; END IF;
+  v_user := current_app_user();
+  IF v_user.id IS NULL THEN RAISE EXCEPTION 'Not authenticated'; END IF;
+
+  -- Phase G (070): organization isolation guard. Every shop / entity this
+  -- call targets must belong to the caller's organization; a row of another
+  -- organization is reported as not found (068 app_require_org). Placed
+  -- before the idempotency gate so a rejected call leaves no key row.
+  PERFORM public.app_require_org('supplier', p_supplier_id);
+  PERFORM public.app_require_org('shop', p_shop_id);
+
+  -- Phase D (063): idempotency gate. A NULL key raises IDEMPOTENCY_KEY_REQUIRED;
+  -- a replay of a committed request returns the stored response without
+  -- side effects; the same key with a different payload raises
+  -- IDEMPOTENCY_MISMATCH. Hash covers every business argument except the
+  -- client timestamp (p_created_at) and the key itself.
+  v_idem_hash := md5(jsonb_build_object(
+    'p_supplier_id', p_supplier_id,
+    'p_shop_id', p_shop_id,
+    'p_amount_mmk', p_amount_mmk,
+    'p_payment_method', p_payment_method,
+    'p_reference_no', p_reference_no,
+    'p_notes', p_notes
+  )::text);
+  v_idem_replay := public.idem_begin(p_idempotency_key, 'pay_supplier_lump_sum', v_idem_hash);
+  IF v_idem_replay IS NOT NULL THEN
+    RETURN v_idem_replay;
+  END IF;
+
+  IF p_supplier_id IS NULL OR btrim(p_supplier_id) = '' THEN RAISE EXCEPTION 'Supplier is required'; END IF;
+  IF p_shop_id IS NULL OR btrim(p_shop_id) = '' THEN RAISE EXCEPTION 'Shop is required'; END IF;
+  IF p_amount_mmk IS NULL OR p_amount_mmk <= 0 THEN
+    RAISE EXCEPTION 'Payment amount must be greater than zero';
+  END IF;
+  IF v_method NOT IN ('CASH', 'BANK', 'MOBILE', 'OTHER') THEN
+    RAISE EXCEPTION 'Unsupported supplier payment method: %', p_payment_method;
+  END IF;
+  IF NOT app_can_for_shop('supplier:payment_create', p_shop_id) THEN
+    RAISE EXCEPTION 'You are not permitted to record supplier payments for this shop';
+  END IF;
+
+  -- 086: lock this supplier's received purchase orders in this shop FIRST
+  -- (in the allocation order below: oldest first), then compute the balance.
+  -- A concurrent payment waits here and then sees the paid totals. (A PO
+  -- received after this lock is counted but not locked; if it is paid
+  -- concurrently, the guard after the loop refuses — never a shortfall.)
+  PERFORM 1 FROM purchase_orders
+   WHERE supplier_id = p_supplier_id AND shop_id = p_shop_id AND status = 'RECEIVED'
+   ORDER BY created_at ASC, id ASC
+   FOR UPDATE;
+
+  -- Total outstanding for this supplier in this shop (received, unpaid balance).
+  SELECT COALESCE(sum(total_mmk - COALESCE(paid_mmk, 0)), 0)
+    INTO v_outstanding
+    FROM purchase_orders
+   WHERE supplier_id = p_supplier_id AND shop_id = p_shop_id
+     AND status = 'RECEIVED' AND total_mmk - COALESCE(paid_mmk, 0) > 0;
+
+  IF v_outstanding <= 0 THEN
+    RAISE EXCEPTION 'This supplier has no outstanding balance in this shop';
+  END IF;
+  IF p_amount_mmk > v_outstanding THEN
+    RAISE EXCEPTION 'Payment amount exceeds total outstanding balance';
+  END IF;
+
+  v_remaining := p_amount_mmk;
+
+  FOR v_po IN
+    SELECT * FROM purchase_orders
+     WHERE supplier_id = p_supplier_id AND shop_id = p_shop_id
+       AND status = 'RECEIVED' AND total_mmk - COALESCE(paid_mmk, 0) > 0
+     ORDER BY created_at ASC, id ASC
+     FOR UPDATE
+  LOOP
+    EXIT WHEN v_remaining <= 0;
+    v_bal := v_po.total_mmk - COALESCE(v_po.paid_mmk, 0);
+    v_apply := LEAST(v_remaining, v_bal);
+    IF v_apply <= 0 THEN CONTINUE; END IF;
+
+    v_pay_id := 'suppay-' || replace(gen_random_uuid()::text, '-', '');
+    INSERT INTO supplier_payments (
+      id, supplier_id, purchase_order_id, shop_id, amount_mmk,
+      payment_method, reference_no, notes, paid_at, created_by, created_at
+    )
+    VALUES (
+      v_pay_id, v_po.supplier_id, v_po.id, v_po.shop_id, v_apply,
+      v_method, NULLIF(btrim(p_reference_no), ''), NULLIF(btrim(p_notes), ''),
+      v_now, v_user.id, v_now
+    );
+
+    v_new_paid := COALESCE(v_po.paid_mmk, 0) + v_apply;
+    v_new_status := CASE
+      WHEN v_new_paid >= v_po.total_mmk THEN 'PAID'
+      WHEN v_new_paid > 0 THEN 'PARTIAL'
+      ELSE 'UNPAID'
+    END;
+    UPDATE purchase_orders
+       SET paid_mmk = v_new_paid, payment_status = v_new_status
+     WHERE id = v_po.id
+     RETURNING * INTO v_po;
+
+    v_remaining := v_remaining - v_apply;
+
+    v_pays_out := v_pays_out || jsonb_build_array(jsonb_build_object(
+      'id', v_pay_id, 'supplierId', v_po.supplier_id, 'purchaseOrderId', v_po.id,
+      'shopId', v_po.shop_id, 'amountMmk', v_apply, 'paymentMethod', v_method,
+      'referenceNo', NULLIF(btrim(p_reference_no), ''), 'notes', NULLIF(btrim(p_notes), ''),
+      'paidAt', v_now, 'createdBy', v_user.id, 'createdAt', v_now,
+      'voidedAt', NULL, 'voidedBy', NULL, 'voidReason', NULL
+    ));
+    v_pos_out := v_pos_out || jsonb_build_array(jsonb_build_object(
+      'id', v_po.id, 'orderNo', v_po.order_no, 'shopId', v_po.shop_id, 'supplierId', v_po.supplier_id,
+      'status', v_po.status, 'subtotalMmk', v_po.subtotal_mmk, 'taxMmk', v_po.tax_mmk,
+      'totalMmk', v_po.total_mmk, 'paidMmk', v_po.paid_mmk, 'paymentStatus', v_po.payment_status,
+      'supplierInvoiceNo', v_po.supplier_invoice_no, 'deliveryNoteNo', v_po.delivery_note_no,
+      'notes', v_po.notes, 'createdBy', v_po.created_by, 'createdAt', v_po.created_at,
+      'approvedBy', v_po.approved_by, 'approvedAt', v_po.approved_at,
+      'receivedBy', v_po.received_by, 'receivedAt', v_po.received_at
+    ));
+
+    v_audit_id := 'audit-' || replace(gen_random_uuid()::text, '-', '');
+    INSERT INTO audit_logs (id, shop_id, actor_id, action_type, message, entity_type, entity_id, created_at)
+    VALUES (v_audit_id, v_po.shop_id, v_user.id, 'SUPPLIER_PAYMENT_RECORDED',
+      'Supplier payment (lump-sum) for ' || v_po.order_no || ': MMK ' || v_apply,
+      'SupplierPayment', v_pay_id, v_now);
+    v_audits_out := v_audits_out || jsonb_build_array(jsonb_build_object(
+      'id', v_audit_id, 'shopId', v_po.shop_id, 'actorId', v_user.id,
+      'actionType', 'SUPPLIER_PAYMENT_RECORDED',
+      'message', 'Supplier payment (lump-sum) for ' || v_po.order_no || ': MMK ' || v_apply,
+      'entityType', 'SupplierPayment', 'entityId', v_pay_id, 'createdAt', v_now));
+  END LOOP;
+
+  -- 086: never record less than was entered (defence in depth: the balance
+  -- was checked under the lock above). The whole payment rolls back.
+  IF v_remaining > 0 THEN
+    RAISE EXCEPTION 'Payment amount exceeds total outstanding balance';
+  END IF;
+
+  v_idem_result := jsonb_build_object(
+    'supplierPayments', v_pays_out,
+    'purchaseOrders', v_pos_out,
+    'auditLogs', v_audits_out
+  );
+  PERFORM public.idem_finish(p_idempotency_key, v_idem_result);
+  RETURN v_idem_result;
 END;
 $function$;
 
@@ -1064,11 +1334,17 @@ BEGIN
   --    for the lock (a lookup or replay then never sees a false in_flight).
   --    Otherwise take the SAME advisory lock idem_begin takes, at the OUTER
   --    level (a lock first taken inside the savepoint below would be
-  --    released when the savepoint rolls back), and read again.
-  SELECT * INTO v_row FROM public.idempotency_keys WHERE key = p_key;
+  --    released when the savepoint rolls back), and read again. The ledger
+  --    is per organisation: only the CALLER'S organisation's row (org_id,
+  --    key) is ever read or written; a key whose organisation was never
+  --    recorded is refused in every organisation.
+  IF EXISTS (SELECT 1 FROM public.idempotency_keys WHERE org_id = '!unattributed' AND key = p_key) THEN
+    RETURN jsonb_build_object('outcome', 'mismatch');
+  END IF;
+  SELECT * INTO v_row FROM public.idempotency_keys WHERE org_id = v_org AND key = p_key;
   IF NOT FOUND THEN
-    PERFORM pg_advisory_xact_lock(hashtext('idem:' || p_key::text));
-    SELECT * INTO v_row FROM public.idempotency_keys WHERE key = p_key;
+    PERFORM pg_advisory_xact_lock(hashtext('idem:' || v_org || ':' || p_key::text));
+    SELECT * INTO v_row FROM public.idempotency_keys WHERE org_id = v_org AND key = p_key;
   END IF;
 
   -- 4. An existing decision is answered, never re-executed.
@@ -1164,8 +1440,13 @@ BEGIN
   -- ledger BEFORE the lock, so a concurrent lookup, fence or replay holding
   -- the lock never makes a decided key look "in flight". Another
   -- organization's (or another RPC's) decided key: one fixed answer (no
-  -- state, actor, time or in-flight signal).
-  SELECT * INTO v_row FROM public.idempotency_keys WHERE key = p_key;
+  -- state, actor, time or in-flight signal). The ledger is per organisation:
+  -- only the caller's organisation's row (org_id, key) exists for it —
+  -- another organisation's use of the same key is invisible here.
+  IF EXISTS (SELECT 1 FROM public.idempotency_keys WHERE org_id = '!unattributed' AND key = p_key) THEN
+    RETURN jsonb_build_object('status', 'unavailable');
+  END IF;
+  SELECT * INTO v_row FROM public.idempotency_keys WHERE org_id = v_org AND key = p_key;
   IF FOUND THEN
     IF v_row.org_id IS DISTINCT FROM v_org OR v_row.rpc <> p_rpc THEN
       RETURN jsonb_build_object('status', 'unavailable');
@@ -1182,12 +1463,12 @@ BEGIN
   -- An execution holding the key's lock has neither committed nor rolled
   -- back: say so, never guess. Lookups share the lock (they never see each
   -- other as in flight); a fence needs it exclusively.
-  IF NOT (CASE WHEN v_fence THEN pg_try_advisory_xact_lock(hashtext('idem:' || p_key::text))
-               ELSE pg_try_advisory_xact_lock_shared(hashtext('idem:' || p_key::text)) END) THEN
+  IF NOT (CASE WHEN v_fence THEN pg_try_advisory_xact_lock(hashtext('idem:' || v_org || ':' || p_key::text))
+               ELSE pg_try_advisory_xact_lock_shared(hashtext('idem:' || v_org || ':' || p_key::text)) END) THEN
     RETURN jsonb_build_object('status', 'in_flight');
   END IF;
 
-  SELECT * INTO v_row FROM public.idempotency_keys WHERE key = p_key;   -- re-read under the lock
+  SELECT * INTO v_row FROM public.idempotency_keys WHERE org_id = v_org AND key = p_key;   -- re-read under the lock
   IF FOUND THEN
     IF v_row.org_id IS DISTINCT FROM v_org OR v_row.rpc <> p_rpc THEN
       RETURN jsonb_build_object('status', 'unavailable');
@@ -1217,8 +1498,10 @@ BEGIN
     RETURN jsonb_build_object('status', 'not_found', 'executable', false, 'fenced', false, 'reason', 'expired');
   END IF;
 
-  -- Fence authority. The server cannot know who minted a never-delivered
-  -- key: the caller may fence their OWN operation; ADMIN / sync:resolve may
+  -- Fence authority. A fence decides the key in the CALLER'S organisation
+  -- only (per-organisation ledger): it can never stop another
+  -- organisation's operation. The server cannot know who minted a
+  -- never-delivered key: the caller may fence their OWN operation; ADMIN / sync:resolve may
   -- fence one of a user of their organisation; and, for a legacy entry with
   -- no recorded actor, only when its arguments name rows of their own
   -- organisation (a consistency check on what the till sent — it does not
@@ -1406,13 +1689,13 @@ ALTER FUNCTION public.void_supplier_payment(text,text,uuid) SET search_path = pu
 DO $post$
 DECLARE
   v_expected CONSTANT jsonb := '{"public.adjust_stock(text,text,text,integer,text,text,integer,timestamp with time zone,text,uuid)":"6701ab0256abed02e34f7e20ece76c2f","public.approve_purchase_order(text,uuid)":"1730ef49f146b31afbf3eabe01adbdf7","public.approve_refund_request(text,uuid)":"acc3e5b7bfcd68a435e0f4170a508deb","public.approve_stock_transfer(text,uuid)":"5d031d2f765c888cb4c5d6fabc4329a7","public.approve_void_request(text,uuid)":"9589bac39f64059d2fb95a2b7209eeae","public.cancel_purchase_order(text,text,uuid)":"829aec95c5c3cd93e78d266b434b507e","public.cancel_stock_transfer(text,text,uuid)":"430e2f79bc6e2bade999447cd204a36a","public.close_shift(text,integer,text,timestamp with time zone,text,uuid)":"9536c7f1f2bac9e0355458bd5ad06c79","public.complete_sale(text,text,text,integer,numeric,jsonb,timestamp with time zone,uuid)":"f9844590bece7166caaf1d55f638dce3","public.create_app_user(text,text,text,text,text,uuid,text[],text[],uuid)":"06d80afb8e87681f03fb3edfd3ab88bc","public.create_purchase_order(text,text,text,jsonb,uuid)":"8c43ffe84e6130072fa6c31c9475931d","public.create_refund_void_request(text,text,text,jsonb,timestamp with time zone,text,uuid)":"56ea96382d12171c9ba603fbc6fcc61e","public.create_stock_transfer(text,text,text,jsonb,uuid)":"64564f4082b58e663ba63bfe0e544674","public.create_supplier(text,text,text,text,text,text,text,uuid)":"0b2ca7e054fababe0889ab10d74774e5","public.deactivate_app_user(text,boolean,uuid)":"b335ccb5cfaad622090cfa203b6e0be4","public.delete_product(text,uuid)":"7fdbbe18860b8fcd9b5fa87d4896505d","public.dispatch_stock_transfer(text,timestamp with time zone,text,uuid)":"2e4c2edc75c391664b30415357cebf51","public.idem_begin(uuid,text,text)":"afca065fea226a0c7a5b9bb56b540a9d","public.idem_finish(uuid,jsonb)":"d832e312446dfaf2509cc0b0ccadcf28","public.log_audit_event(text,text,text,text,text,uuid)":"73b9154015ee61786243d70822c25618","public.log_receipt_reprint(text,uuid)":"11171c26d4e02db6244285b986b2536e","public.open_shift(text,integer,timestamp with time zone,text,uuid)":"97ccc663fec1150c90bda6263a46b33c","public.pay_supplier_lump_sum(text,text,integer,text,text,text,uuid)":"7fe2929d412ca10d2a47ec76b956e76d","public.receive_purchase_order(text,jsonb,timestamp with time zone,text,uuid)":"d6e5ec1921f4e4d9e0b32c7ae48c589e","public.receive_stock_transfer(text,jsonb,timestamp with time zone,text,uuid)":"7bf2a3e120271787a1f2c5c21053b40b","public.record_supplier_payment(text,integer,text,text,text,timestamp with time zone,text,uuid)":"4ed0ce8e6a9c8516d73e23ef13c808eb","public.reject_refund_void_request(text,text,uuid)":"82e030f931169de811727d1e8e370967","public.reject_stock_transfer(text,text,uuid)":"b165a65897c5870cdeb5defbdd3fc2d4","public.replace_manager(text,text,uuid)":"27b10ab2731ac2fbfc52bb8b0239c379","public.update_app_user(text,text,text,text,text[],text[],uuid)":"b92eb4a6c46e6bf69316d4b6d86da4c0","public.update_supplier(text,text,text,text,text,text,text,text,boolean,uuid)":"cb422e77100c7199e1311bcd5f1b82d1","public.void_supplier_payment(text,text,uuid)":"f10dd8642eabcd9ec389e3c88678a875"}'::jsonb;
-  v_idem_begin_086 CONSTANT text := '58a55436635b9ed1e8db09192c6b6e2b';
+  v_new      CONSTANT jsonb := '{"public.idem_begin(uuid,text,text)":"c9f577ed5608de19b25c00c649deaf50","public.idem_finish(uuid,jsonb)":"dd11818faf8853eadab1d3332fd5d7e6","public.pay_supplier_lump_sum(text,text,integer,text,text,text,uuid)":"cf4142b64ef02ff5414c64bf8eb827b3"}'::jsonb;   -- bodies 086 installs
   k text; v_md5 text; n integer; v_bad text;
 BEGIN
   FOR k IN SELECT jsonb_object_keys(v_expected) LOOP
     SELECT md5(prosrc) INTO v_md5 FROM pg_proc WHERE oid = to_regprocedure(k);
-    IF k = 'public.idem_begin(uuid,text,text)' THEN
-      IF v_md5 IS DISTINCT FROM v_idem_begin_086 THEN RAISE EXCEPTION '086 post-check: idem_begin is not the 086 body'; END IF;
+    IF v_new ? k THEN
+      IF v_md5 IS DISTINCT FROM v_new ->> k THEN RAISE EXCEPTION '086 post-check: % is not the 086 body', k; END IF;
     ELSIF v_md5 IS DISTINCT FROM v_expected ->> k THEN
       RAISE EXCEPTION '086 post-check: % body changed', k;
     END IF;
@@ -1422,6 +1705,13 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'idempotency_keys_state_chk') THEN
     RAISE EXCEPTION '086 post-check: state constraint missing';
   END IF;
+  IF (SELECT string_agg(a.attname, ',' ORDER BY k2.ord)
+        FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY k2(attnum, ord)
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k2.attnum
+       WHERE c.conrelid = 'public.idempotency_keys'::regclass AND c.contype = 'p') IS DISTINCT FROM 'org_id,key'
+     OR NOT (SELECT attnotnull FROM pg_attribute WHERE attrelid = 'public.idempotency_keys'::regclass AND attname = 'org_id') THEN
+    RAISE EXCEPTION '086 post-check: the ledger identity is not (org_id, key) with org_id NOT NULL';
+  END IF;
   -- Exact EXECUTE matrix: authenticated on op_execute/op_status, nobody
   -- (but the owner) on every other op_* function.
   SELECT string_agg(p.oid::regprocedure::text || ' -> ' || coalesce(nullif(a.grantee::regrole::text, '-'), 'PUBLIC'), '; ') INTO v_bad
@@ -1430,6 +1720,12 @@ BEGIN
      AND a.grantee <> p.proowner
      AND NOT (p.proname IN ('op_execute', 'op_status') AND a.grantee = 'authenticated'::regrole);
   IF v_bad IS NOT NULL THEN RAISE EXCEPTION '086 post-check: unexpected EXECUTE grants: %', v_bad; END IF;
+  IF has_function_privilege('authenticated', 'public.idem_begin(uuid,text,text)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.idem_begin(uuid,text,text)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.idem_finish(uuid,jsonb)', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.idem_finish(uuid,jsonb)', 'EXECUTE') THEN
+    RAISE EXCEPTION '086 post-check: idem_begin / idem_finish must not be callable by API roles';
+  END IF;
   IF NOT has_function_privilege('authenticated', 'public.op_execute(uuid,text,jsonb,text)', 'EXECUTE')
      OR NOT has_function_privilege('authenticated', 'public.op_status(uuid,text,boolean,text,jsonb)', 'EXECUTE')
      OR has_function_privilege('authenticated', 'public.prune_idempotency_keys()', 'EXECUTE')

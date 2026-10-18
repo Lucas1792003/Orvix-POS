@@ -1,4 +1,12 @@
-# Migration 086 — SQL change proposals (NOT implemented)
+# Migration 086 — SQL change proposals
+
+> **Status (after `19fe67a`): §1 and §2 are IMPLEMENTED in the unreleased 086**
+> (regenerated: `tools/m086-verify/generator/`; reproduced on the earlier 086
+> and verified fixed by `src/live/m086-sql.live.test.ts`; see
+> `migration-086.md` "Financial-safety corrections"). §3 and §4 remain
+> proposals (NOT implemented). Because §1/§2 are folded into 086 itself, the
+> "re-apply 086" forward recovery stays valid: 086's preflight accepts its own
+> corrected bodies and the rollback's `idem_begin`.
 
 > **Where these land matters (review-snapshot-10 D-H2).** The documented
 > forward recovery after a rollback is "re-apply 086". 086's preflight pins
@@ -23,8 +31,9 @@
 > migration on top of the original 086.
 
 Status: **proposals for owner review only.** Nothing here is applied, committed
-as a migration, or run against any server. Migration 086, its rollback and
-`apply-migrations.sh` are unchanged. Each proposal names its minimal diff, its
+as a migration, or run against any server. (§1/§2 have since been folded into
+the unreleased 086 — see the status banner; `apply-migrations.sh` is
+unchanged.) Each proposal names its minimal diff, its
 risks, and the disposable test that would prove it (`tools/m086-verify`).
 
 ---

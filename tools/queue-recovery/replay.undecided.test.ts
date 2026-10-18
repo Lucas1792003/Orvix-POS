@@ -150,6 +150,19 @@ describe("recovery tool: an online attempt being SENT when exported is classifie
     expect(s.executed).toBe(0);
   });
 
+  it("the ledger check (service key) is scoped to the export's own organisation — another organisation's use of the same key never makes a fresh run look 'already applied'", async () => {
+    const s = new Server();
+    const urls: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => { urls.push(String(input)); return s.fetch(input, init); };
+    const V4 = "22222222-2222-4222-8222-222222222222";
+    await replayExport(exportOf({ status: "pending", staged: true, idempotencyKey: V4,
+      payload: { p_shop_id: "shop-1", p_shift_id: "shift-1", p_items: [{ product_id: "p1", qty: 1 }], p_idempotency_key: V4 } }),
+    { target: ORIGIN, anonKey: "anon", accessToken: "t", ledgerToken: "svc", fetchImpl });
+    const ledger = urls.filter((u) => u.includes("/rest/v1/idempotency_keys"));
+    expect(ledger.length).toBeGreaterThan(0);
+    expect(ledger.every((u) => u.includes("org_id=eq.o"))).toBe(true);
+  });
+
   it("set aside while being sent (no in-doubt flag): a skipped entry that is NOT decided keeps the recovery from succeeding", async () => {
     const s = new Server();
     const r = await run(s, exportOf({ status: "archived", statusBeforeArchive: "syncing", staged: true, writeAhead: true }));

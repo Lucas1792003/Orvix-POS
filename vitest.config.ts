@@ -2,13 +2,16 @@
 // config is merged in so plugins/base stay identical to the real build.
 // `setupFiles` installs the hosted-backend guard and pins the backend env
 // for every test file — see src/test/setup.ts.
-import { defineConfig, mergeConfig } from "vitest/config";
+import { configDefaults, defineConfig, mergeConfig } from "vitest/config";
 import viteConfig from "./vite.config";
 
 export default defineConfig((env) =>
   mergeConfig(viteConfig(env), {
     test: {
       setupFiles: ["./src/test/setup.ts"],
+      // tools/m086-verify/results/<run>/legacy-app: a full checkout of an older
+      // build, run only by tools/m086-verify/run.sh inside that checkout.
+      exclude: [...configDefaults.exclude, "tools/m086-verify/results/**"],
     },
   }),
 );

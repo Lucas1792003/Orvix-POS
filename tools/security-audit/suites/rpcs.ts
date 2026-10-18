@@ -5,7 +5,7 @@
 // cannot drive an effect in B, and a replay returns the original only to the
 // same org.
 import type { World } from "./seed";
-import { capture, check, gap, rpc, sql, q, uuid, MAX_MIG } from "./lib";
+import { applied, capture, check, gap, rpc, sql, q, uuid } from "./lib";
 
 const B_DIGEST_TABLES = [
   "shops", "users", "products", "product_units", "inventory", "inventory_movements", "shifts", "sales", "sale_items",
@@ -102,15 +102,27 @@ export async function rpcsSuite(w: World) {
     p_items: [{ product_id: w.A.products[0], qty: 1 }], p_idempotency_key: aKey });
   check("rpcs", "idempotency: A replays its own key -> original result (same org)", replay.status < 300 && replay.json?.sale?.id === w.A.sales[0], ["rpc:idempotency-074"],
     `status ${replay.status} sale ${replay.json?.sale?.id ?? "?"}`);
-  // 2. B tries to reuse A's key for a sale in B -> refused by the 074 org binding, no effect
-  const beforeK = bDigest();
+  // 2. B reuses A's key for a sale in B. 074..085: refused (one global key,
+  //    bound to A's org). 086+ (per-organisation ledger identity, org_id+key):
+  //    A's key does not exist in B — it is B's OWN independent operation in B
+  //    (B could use any fresh key as well). Either way B must never receive
+  //    A's result or any of A's data.
   const steal = await rpc(w.B.people.cash.token, "complete_sale", {
     p_shop_id: w.B.shops[0], p_shift_id: w.B.shifts[0], p_payment_method: "CASH", p_paid_mmk: w.B.price * 3, p_cart_discount_pct: 0,
     p_items: [{ product_id: w.B.products[0], qty: 1 }], p_idempotency_key: aKey });
-  capture("rpc idem steal B uses A key", steal.text);
-  const closed074 = steal.status >= 300;
-  gap("rpcs", "idempotency: B reusing A's key is refused (074 caller/org binding)", MAX_MIG >= 74 ? closed074 : closed074, ["rpc:idempotency-074"], "high",
-    `status ${steal.status}`);
+  if (applied(86)) {
+    const bSale = steal.json?.sale;
+    const aReplay = await rpc(w.A.people.cash.token, "complete_sale", {
+      p_shop_id: w.A.shops[0], p_shift_id: w.A.shifts[0], p_payment_method: "CASH", p_paid_mmk: w.A.price * 3, p_cart_discount_pct: 0,
+      p_items: [{ product_id: w.A.products[0], qty: 1 }], p_idempotency_key: aKey });
+    check("rpcs", "idempotency (086 per-organisation ledger): B's use of A's key is B's OWN sale in B (committed there), never A's result or data; A's replay still returns A's sale",
+      steal.status < 300 && bSale?.shopId === w.B.shops[0] && bSale?.id !== w.A.sales[0] && !steal.text.includes(w.A.can) && !steal.text.includes(w.A.shops[0])
+        && aReplay.status < 300 && aReplay.json?.sale?.id === w.A.sales[0], ["rpc:idempotency-074"],
+      `B status ${steal.status} sale ${bSale?.id ?? "-"} shop ${bSale?.shopId ?? "-"}; A replay ${aReplay.json?.sale?.id ?? aReplay.status}`);
+  } else {
+    capture("rpc idem steal B uses A key", steal.text);
+    gap("rpcs", "idempotency: B reusing A's key is refused (074 caller/org binding)", steal.status >= 300, ["rpc:idempotency-074"], "high", `status ${steal.status}`);
+  }
   check("rpcs", "idempotency: B's attempt with A's key did not return A's sale", !(steal.status < 300 && steal.json?.sale?.id === w.A.sales[0]), ["rpc:idempotency-074"],
     `returned ${steal.json?.sale?.id ?? "-"}`);
 }

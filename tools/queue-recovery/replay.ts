@@ -302,7 +302,10 @@ export async function replayExport(payload: QueueExportPayload, options: ReplayO
 
   const ledgerHas = async (key: string): Promise<boolean | null> => {
     if (!ledgerHeaders) return null;
-    const r = await send(f, `${rest}/idempotency_keys?select=key&key=eq.${encodeURIComponent(key)}`, { method: "GET", headers: ledgerHeaders }, timeoutMs);
+    // the ledger is per organisation (086: org_id, key): only the export's own
+    // organisation's row says whether THIS operation already ran
+    const org = payload.session.orgId;
+    const r = await send(f, `${rest}/idempotency_keys?select=key&key=eq.${encodeURIComponent(key)}${org ? `&org_id=eq.${encodeURIComponent(org)}` : ""}`, { method: "GET", headers: ledgerHeaders }, timeoutMs);
     if (r.error || !Array.isArray(r.body)) return null;
     return r.body.length > 0;
   };
@@ -383,7 +386,7 @@ export async function replayExport(payload: QueueExportPayload, options: ReplayO
       case "in_flight":
         return { outcome: "in-flight", extra: { httpStatus: r.status, detail: "the server is still running it; re-run later" } };
       case "unavailable":
-        return { outcome: "unavailable", extra: { httpStatus: r.status, detail: "the server will not report this operation to this user (another organisation or operation)" } };
+        return { outcome: "unavailable", extra: { httpStatus: r.status, detail: "the server will not report this key for this operation (used for another operation, or an old key whose organisation was never recorded)" } };
       case "not_found":
         if (!fence) return { outcome: "unknown", extra: { detail: "not on the server (yet)" } };
         return { outcome: "held", extra: { httpStatus: r.status, detail: d.reason === "expired" ? "too old to confirm or stop automatically: an owner reconciles it from the server records" : `could not be stopped by this user (${typeof d.reason === "string" ? d.reason : "not authorised"}): sign in as its creator or an administrator` } };

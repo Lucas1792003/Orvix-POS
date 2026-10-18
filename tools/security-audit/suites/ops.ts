@@ -1,11 +1,10 @@
 // Area "ops" (migration 086 and later): the operation executor (op_execute)
 // and the status lookup / fence (op_status) cannot cross organisations or
 // actors. Org A's and B's ADMINs (aal2) and cashiers act on each other's
-// keys; every effect is judged in the database. Recorded GAP (not a pass):
-// a fence sent WITHOUT arguments carries no organisation evidence, so any
-// user who knows another organisation's never-delivered key can claim it as
-// their own (denial of service only; documented residual R3 — SQL proposal
-// docs/selfhost-migration/phase-g/086-sql-proposals.md §1).
+// keys; every effect is judged in the database. The fence squat (another
+// organisation stopping a key it learnt) is closed by the per-organisation
+// ledger identity (org_id, key): §7 records a GAP if any variant still stops
+// A's own operation.
 import { randomBytes } from "node:crypto";
 import type { World } from "./seed";
 import { applied, capture, check, gap, q, rpc, sql, sqlJson } from "./lib";
@@ -21,7 +20,9 @@ function v7(): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
-const ledger = (key: string) => sql(`SELECT coalesce((SELECT state || '/' || coalesce(org_id, '') FROM idempotency_keys WHERE key = ${q(key)}::uuid), '<none>')`);
+// The ledger is per organisation (org_id, key): one row per organisation that used the key.
+const ledger = (key: string) => sql(`SELECT coalesce((SELECT string_agg(state || '/' || org_id, ',' ORDER BY org_id) FROM idempotency_keys WHERE key = ${q(key)}::uuid), '<none>')`);
+const ledgerIn = (key: string, org: string) => sql(`SELECT coalesce((SELECT state || '/' || org_id FROM idempotency_keys WHERE org_id = ${q(org)} AND key = ${q(key)}::uuid), '<none>')`);
 const movements = (org: string) => Number(sql(`SELECT count(*) FROM inventory_movements WHERE shop_id IN (SELECT id FROM shops WHERE org_id = ${q(org)})`));
 
 export async function opsSuite(w: World) {
@@ -44,7 +45,8 @@ export async function opsSuite(w: World) {
   // 2. B looks up A's committed key: no state, no reply
   const look = await rpc(w.adminB2, "op_status", { p_key: kA, p_rpc: "adjust_stock", p_fence: false, p_expected_actor_id: null, p_args: null });
   capture("ops B op_status on A key", look.text, [kA]);
-  check("ops", "op_status: B ADMIN learns nothing about A's committed key ('unavailable', no reply)", look.status < 300 && look.json?.status === "unavailable" && look.json?.response === undefined,
+  // per-organisation ledger: A's key does not exist in B at all ('not_found', as for any unseen key)
+  check("ops", "op_status: B ADMIN learns nothing about A's committed key (not even that it exists; no reply)", look.status < 300 && look.json?.status === "not_found" && look.json?.response === undefined,
     ["rpc:public.op_status"], `status ${look.status} ${look.json?.status}`);
 
   // 3. B replays A's key: never A's reply, never an effect
@@ -52,7 +54,7 @@ export async function opsSuite(w: World) {
   const steal = await rpc(w.adminB2, "op_execute", { p_key: kA, p_rpc: "adjust_stock", p_args: adjustA, p_actor_id: B.people.admin.userId });
   capture("ops B op_execute with A key", steal.text, [kA]);
   check("ops", "op_execute: B reusing A's key gets no reply, no 'committed', no effect, and A's ledger row is unchanged",
-    movements(A.id) === mA1 && steal.json?.outcome !== "committed" && steal.json?.response == null && ledger(kA) === `committed/${A.id}`,
+    movements(A.id) === mA1 && steal.json?.outcome !== "committed" && steal.json?.response == null && ledgerIn(kA, A.id) === `committed/${A.id}`,
     ["rpc:public.op_execute"], `status ${steal.status} ${steal.json?.outcome ?? steal.json?.message ?? ""} ledger ${ledger(kA)}`.slice(0, 160));
 
   // 4. A executes in the name of B's user: refused, nothing recorded
@@ -77,7 +79,7 @@ export async function opsSuite(w: World) {
   // ... and A's own ADMIN can stop it (then it never runs)
   const fenceA = await rpc(w.adminA2, "op_status", { p_key: kU, p_rpc: "adjust_stock", p_fence: true, p_expected_actor_id: A.people.admin.userId, p_args: adjustA });
   const late = await rpc(w.adminA2, "op_execute", { p_key: kU, p_rpc: "adjust_stock", p_args: adjustA, p_actor_id: A.people.admin.userId });
-  check("ops", "op_status fence: A ADMIN stops A's undelivered key; a late copy never runs", fenceA.json?.fenced === true && late.json?.outcome === "abandoned" && ledger(kU).startsWith("abandoned/"),
+  check("ops", "op_status fence: A ADMIN stops A's undelivered key; a late copy never runs", fenceA.json?.fenced === true && late.json?.outcome === "abandoned" && ledgerIn(kU, A.id).startsWith("abandoned/"),
     ["rpc:public.op_status"], `fence ${fenceA.json?.status} late ${late.json?.outcome}`);
 
   // 7. RESIDUAL (R3 / proposal §1): an own-actor fence whose arguments carry
@@ -88,9 +90,10 @@ export async function opsSuite(w: World) {
     const kS = v7();
     const mA2 = movements(A.id);
     const squat = await rpc(w.adminB2, "op_status", { p_key: kS, p_rpc: "adjust_stock", p_fence: true, p_expected_actor_id: B.people.admin.userId, p_args: args });
-    const squatted = squat.json?.fenced === true;
     const aAfter = await rpc(w.adminA2, "op_execute", { p_key: kS, p_rpc: "adjust_stock", p_args: adjustA, p_actor_id: A.people.admin.userId });
-    gap("ops", `op_status fence (${label}) cannot claim another organisation's never-delivered key`, !squatted, ["rpc:public.op_status"], "medium",
+    // B's fence may succeed — in B's own namespace only (per-organisation
+    // ledger). The squat is closed when A's own operation still runs.
+    gap("ops", `op_status fence (${label}) cannot stop another organisation's never-delivered key`, aAfter.json?.outcome === "committed", ["rpc:public.op_status"], "medium",
       `squat fenced=${squat.json?.fenced} ledger ${ledger(kS)}; A's own execution afterwards: ${aAfter.json?.outcome ?? aAfter.status} (denial of service only; no money moves)`);
     // whatever happened to the key: nothing in B, and A's effect is exactly what A's own outcome says
     const aRan = aAfter.json?.outcome === "committed";

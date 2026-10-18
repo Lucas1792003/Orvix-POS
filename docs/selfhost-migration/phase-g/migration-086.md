@@ -25,8 +25,46 @@ Client: the recovery protocol in `src/stores/data/` (see "Client protocol").
 
 ## What the migration does
 
-Additive. The 30 idempotent RPC bodies and `idem_finish` are **not changed**
-(guarded by md5 before and after). `idem_begin` gains exactly one block.
+Additive, plus two financial-safety corrections folded in before any
+deployment (below). 29 of the 30 idempotent RPC bodies are **not changed**
+(guarded by md5 before and after); `idem_begin`, `idem_finish` and
+`pay_supplier_lump_sum` are re-created from their 085 bodies with exact,
+generator-asserted edits.
+
+**Financial-safety corrections (after `19fe67a`; reproduced on the earlier
+086, fixed and verified — `src/live/m086-sql.live.test.ts`).**
+*Per-organisation ledger identity.* The ledger's primary key is
+`(org_id, key)`; the organisation always comes from the session
+(`op_caller` / the `users` row of `auth.uid()`), never from the caller. A key
+names an operation of ONE organisation: another organisation can neither
+claim (fence) it — with no arguments, empty arguments or its own rows as
+arguments, every variant fails safe — nor learn that it exists (its lookup
+and its execution are answered exactly as for a never-used key), and the
+same key used by two organisations is two independent operations. Within an
+organisation nothing changes: one key = one operation; another actor's replay
+never re-executes (reply withheld), different arguments are a mismatch, and
+concurrent first claims serialise on the per-(org, key) advisory lock (one
+execution; the other answered from the ledger). Rows whose organisation was
+never recorded (pre-074 / bootstrap) move to the reserved `!unattributed`
+namespace and keep refusing their key in every organisation, as 074 refused
+them. The UUIDv7 rules, rejected / abandoned tombstones and fencing are
+unchanged, per organisation; UUIDv4 keys on the legacy direct path replay in
+their own organisation (another organisation's use is its own operation).
+*`pay_supplier_lump_sum`.* The supplier's received purchase orders in the
+shop are locked (oldest first — the allocation order) BEFORE the outstanding
+balance is computed, so a concurrent payment waits and then sees the paid
+totals; a payment that cannot be applied in full is refused ("Payment amount
+exceeds total outstanding balance", a recorded definitive refusal through the
+executor) and rolls back entirely — never silently reduced.
+`record_supplier_payment` (one purchase order) already checks under the row
+lock and is unchanged.
+*Open decision (pre-existing classification):* a lump-sum refusal
+("Payment amount exceeds total outstanding balance") is a recorded, FINAL
+refusal through the executor; the single-PO "can only be recorded against
+received purchase orders" is a retried dependency. A lump sum entered while
+its purchase-order receipt is still queued on another till is therefore
+refused for good and must be re-entered (no money effect). Whether it should
+be a dependency is an owner decision (not changed here).
 
 1. **Ledger** (`idempotency_keys`): `state` (`committed` default | `rejected` | `abandoned`),
    `outcome_code`, `outcome_message`, `decided_at` (server clock at insert —
@@ -63,9 +101,12 @@ Additive. The 30 idempotent RPC bodies and `idem_finish` are **not changed**
      other failure re-raises with `HINT op_not_recorded:<class>` and records nothing.
 4. **`op_status(p_key, p_rpc, p_fence, p_expected_actor_id, p_args)`** — lookup:
    a **decided** key is answered from the ledger before any lock (decisions
-   are final and only visible once committed): `unavailable` for another
-   org's or another RPC's key (one fixed answer, no state, no in-flight
-   signal), otherwise `committed`/`rejected`/`abandoned`. For an undecided key:
+   are final and only visible once committed): `unavailable` for the
+   caller's organisation's key used for another RPC, or a key whose
+   organisation was never recorded (one fixed answer, no state, no in-flight
+   signal); another organisation's key does not exist for the caller at all
+   (per-organisation ledger: answered as a never-used key); otherwise
+   `committed`/`rejected`/`abandoned`. For an undecided key:
    `in_flight` while an execution holds the key's lock (lookups take it
    *shared*, so they never see each other as in flight; an execution holds it
    for the RPC's duration), else `not_found` with `executable`.
@@ -116,7 +157,7 @@ suite re-checks that none is unclassified), plus named constraints.
 | ADMIN (server-side `users.role`) | full, own org | **no** (never on someone else's behalf) | yes, own org; actor-less legacy entries only with org evidence |
 | MANAGER | state only | no | no — unless explicitly granted `sync:resolve` |
 | Another cashier | state only | no | no |
-| Another organization | `unavailable` / `mismatch` | never | never (arguments of another org refuse; see R3 for unseen keys) |
+| Another organization | nothing — the key does not exist in its namespace (answered as a never-used key) | its own, independent operation (the RPC's own org guards apply) | only in its own namespace: never stops the key's real organisation |
 
 ## Client protocol (G1 Stage 1)
 
@@ -390,10 +431,18 @@ Apply 086 **before or together with** the client. 086 is fully compatible with
 operation (and those block the desktop updater) until 086 is there.
 
 1. Run the preflight queries read-only against production first (md5 of the
-   32 bodies, SECURITY DEFINER/owner, hardened-function list, ledger columns).
+   32 bodies, SECURITY DEFINER/owner, hardened-function list, ledger columns,
+   the ledger's primary key — `(key)` before 086 — and the number of ledger
+   rows, and of rows with `org_id IS NULL`: those move to the `!unattributed`
+   namespace and keep refusing their key).
 2. Apply with `apply-migrations.sh` (`psql -U supabase_admin --single-transaction`)
    **outside** the e-mail backup window: the migration waits at most 3 s for
-   the `idempotency_keys` lock and then aborts with nothing changed. The runner
+   the `idempotency_keys` lock and then aborts with nothing changed. Once it
+   has the lock it HOLDS it (ACCESS EXCLUSIVE) until COMMIT — backfills, the
+   CHECK validation, index builds, the primary-key rebuild and all function
+   DDL — so every idempotent RPC waits for the whole apply. At the current
+   ledger size that is seconds; measure it on the size the preflight
+   reports before choosing the window. The runner
    fails closed: if psql exits non-zero it prints `APPLY FAILED`, exits 1 and
    records **no** version (before this pass a failed apply was hidden by
    `|| true` and its versions were recorded as applied). A `/tmp/mig` left in
@@ -409,17 +458,30 @@ operation (and those block the desktop updater) until 086 is there.
 Reviewed script: `supabase/rollbacks/086_operation_outcomes.rollback.sql`
 (generated with the migration; **owner-approved use only**; never run by
 `apply-migrations.sh`, which only reads `supabase/migrations/`). Functions
-only, plus the 085 `idem_begin` body (search_path stays hardened): it drops
-every `public.op_*` function and restores `idem_begin` byte-for-byte (md5
-`afca065f…`), then a post-check aborts the transaction unless `idem_begin`
-matches, no `op_*` function is left, no function is pinned to
-`search_path=public` and the kept prune is the inert 086 body. **Keep** the columns, constraint,
-index, every tombstone, the 086 `prune_idempotency_keys` (inert without the
-executor) and the hardened search paths. Forward recovery: re-apply 086
-(idempotent; outcome codes kept).
+only: it drops every `public.op_*` function and installs `idem_begin`
+WITHOUT the UUIDv7 guard — the 085 behaviour on the per-organisation ledger
+((org_id, key) lookups and locks; md5 in the script's post-check). The 085
+key-only body is deliberately NOT restored: once a key is used in two
+organisations it would read another organisation's row. A post-check aborts
+the transaction unless `idem_begin` is that body, `idem_finish` and
+`pay_supplier_lump_sum` are still the corrected 086 bodies, the ledger
+identity is still `(org_id, key)`, no `op_*` function is left, no function is
+pinned to `search_path=public` and the kept prune is the inert 086 body.
+**Keep** the per-organisation identity, the columns, constraint, indexes,
+every tombstone, the 086 `prune_idempotency_keys` (inert without the
+executor) and the hardened search paths. Forward recovery: re-apply 086 — its
+preflight accepts the rollback's `idem_begin` and the corrected bodies
+(idempotent; outcome codes kept). Tested: apply → re-apply → rollback →
+re-apply on a disposable stack (`tools/m086-verify`, `rollback` part).
 
 **Never:** restore 062's prune body (it deletes tombstones and re-opens
-refused keys); re-run 062 or 074 as "forward recovery"; restore a pre-086
+refused keys); re-run ANY migration 062–085 once 086 is applied — their
+key-only `idem_begin` / `idem_finish` over the per-organisation ledger would
+mix organisations' rows of one key (062's would hand one organisation's
+stored reply to another; 063/070 would also revert the lump-sum correction
+and re-pin search paths). `apply-migrations.sh` does not enforce this yet
+(proposal §4): a range must never END before 086 after 086 is applied. Never
+restore a pre-086
 backup/PITR without re-checking every till's held operations (it loses every
 rejected/abandoned decision); re-run 085 after 086 (it re-pins one function to
 `search_path=public`, see R4).
@@ -519,13 +581,14 @@ RECOVERED".
   and are never pruned. Closed by Stage 2 (blocked while the v1.0.16 updater
   refuses to install with a non-empty queue).
 * **R2 — downgrade limits** (see "Client rollback / downgrade").
-* **R3 — unseen keys.** The server cannot know who minted a never-delivered
-  key: anyone holding it can fence it as their own or record a refusal under
-  it in their own organisation (denial of service only; a key holder can also
-  learn whether such a key exists). Keys are UUIDv7 with 74 random bits.
-  Organisation evidence is a consistency check on what the till sent, not a
-  binding of the key; a fence attempt can tell "another organisation's row"
-  (refused) from "no such row" (own fence allowed) — ids are opaque.
+* **R3 — unseen keys (narrowed).** Across organisations: closed — the ledger
+  identity is `(org_id, key)`; another organisation's fence or refusal
+  decides only its own namespace and its lookups learn nothing. Within ONE
+  organisation the server still cannot know which user minted a
+  never-delivered key: a user of the same organisation who holds it (e.g.
+  from the shared till) can fence it as their own (denial of service only;
+  the till re-enters it, nothing is applied twice). Keys are UUIDv7 with 74
+  random bits.
 * **R4 — future migrations.** A later `CREATE OR REPLACE … SET search_path TO 'public'` silently re-opens S1 for that function.
 * **R5 — till clocks.** A clock more than 12 months behind (or 30 days ahead) mints keys `op_execute` refuses (`OP_KEY_OUTSIDE_WINDOW`, nothing recorded).
 * **R6 — the queue keeps final entries** (as conflicts) until an owner

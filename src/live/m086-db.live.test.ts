@@ -52,6 +52,7 @@ describe.skipIf(!enabled)("086 Stage 1 DB", () => {
   const L: { name: string; who: "admin" | "mgr" | "cashA" | "cashB"; rpc: string; args: any; key: string; response: any }[] = [];
   const hash085: Record<string, string> = {};
   let b2baseline: any;
+  let nullOrgKey = "";
   let s1baseline: any;
 
   // Promise.resolve: a postgrest-js builder is a lazy thenable that sends the
@@ -150,6 +151,11 @@ describe.skipIf(!enabled)("086 Stage 1 DB", () => {
     const osb = mustOk(await direct(B.c.cashA, "open_shift", { p_shop_id: B.st.ids.shop, p_opening_cash_mmk: 0, p_created_at: null, p_expected_actor_id: B.st.ids.cashA }), "B open_shift");
     shiftB = osb.shift.id;
     for (const l of L) hash085[l.key] = sql1(`SELECT request_hash FROM idempotency_keys WHERE key = ${lit(l.key)}::uuid`);
+    // a pre-074 ledger row whose organisation was never recorded (as 074's
+    // backfill could leave one): 086 must move it to the reserved namespace
+    nullOrgKey = randomUUID();
+    runSql(`INSERT INTO public.idempotency_keys (key, rpc, actor_id, org_id, request_hash, response)
+            VALUES (${lit(nullOrgKey)}::uuid, 'adjust_stock', NULL, NULL, 'pre074', '{}'::jsonb);`);
   }, 300_000);
 
   afterAll(() => {
@@ -192,6 +198,23 @@ describe.skipIf(!enabled)("086 Stage 1 DB", () => {
       await delay(250);
     }
     throw new Error("PostgREST never exposed op_status");
+  });
+
+  T("setup", "P2", "086 over EXISTING data: a pre-074 row with no organisation moves to '!unattributed' (org_id NOT NULL, PK (org_id, key)) and keeps refusing its key in every organisation", async () => {
+    expect(sql1(`SELECT org_id FROM public.idempotency_keys WHERE key = ${lit(nullOrgKey)}::uuid`)).toBe("!unattributed");
+    expect(sql1("SELECT count(*) FROM public.idempotency_keys WHERE org_id IS NULL")).toBe("0");
+    expect(sql1("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'idempotency_keys_pkey'")).toBe("PRIMARY KEY (org_id, key)");
+    const adj = L.find((l) => l.rpc === "adjust_stock")!;
+    const s0 = snapshot(A.st.ids.org);
+    const d = await direct(A.c.mgr, "adjust_stock", adj.args, nullOrgKey);
+    expect(d.error?.message ?? "").toMatch(/^IDEMPOTENCY_MISMATCH/);
+    expect(mustOk(await X(A.c.mgr, nullOrgKey, "adjust_stock", adj.args), "exec")).toEqual({ outcome: "mismatch" });
+    expect(mustOk(await S(A.c.mgr, nullOrgKey, "adjust_stock"), "status")).toEqual({ status: "unavailable" });
+    expect(mustOk(await S(B.c.admin, nullOrgKey, "adjust_stock", true, B.st.ids.admin, null), "B fence")).toEqual({ status: "unavailable" });
+    expect(snapDiff(s0, snapshot(A.st.ids.org))).toEqual([]);
+    expect(sql1(`SELECT count(*) FROM public.idempotency_keys WHERE key = ${lit(nullOrgKey)}::uuid`)).toBe("1");   // nothing else written
+    runSql(`DELETE FROM public.idempotency_keys WHERE key = ${lit(nullOrgKey)}::uuid;`);   // (no QA actor: removed here)
+    return { moved: "!unattributed", direct: "IDEMPOTENCY_MISMATCH", executor: "mismatch", status: "unavailable", fenceByB: "unavailable" };
   });
 
   // ============================ TASK 1 ===================================
@@ -249,15 +272,21 @@ describe.skipIf(!enabled)("086 Stage 1 DB", () => {
       adminByRole: "response visible, identical", managerWithExplicitSyncResolve: "visible" };
   });
 
-  T("1", "1.5", "other organization: executor 'mismatch', status 'unavailable', no write", async () => {
+  T("1", "1.5", "other organization (per-organisation ledger): A's key does not exist in B — B's use of it is B's own operation (refused by the RPC's own org guard for A's rows); A's row, A's data: untouched, nothing returned", async () => {
     const sale = L.find((l) => l.name === "complete_sale")!;
-    const before = ledgerRowText(sale.key);
-    const x = mustOk(await X(B.c.cashA, sale.key, sale.rpc, sale.args), "B exec");
-    const s = mustOk(await S(B.c.cashA, sale.key, sale.rpc, true, B.st.ids.cashA), "B status+fence");
-    expect(x).toEqual({ outcome: "mismatch" });
-    expect(s).toEqual({ status: "unavailable" });
-    expect(ledgerRowText(sale.key)).toBe(before);
-    return { exec: x, statusWithFence: s };
+    const before = ledgerRowText(sale.key, A.st.ids.org);
+    const s0 = snapshot(A.st.ids.org);
+    const x = await X(B.c.cashA, sale.key, sale.rpc, sale.args);
+    // the same request with a key nobody ever used gets the SAME answer (no oracle)
+    const fresh = await X(B.c.cashA, v7(), sale.rpc, sale.args);
+    expect(x.error?.code ?? x.data?.outcome).toBe(fresh.error?.code ?? fresh.data?.outcome);
+    expect(x.data?.outcome === "committed").toBe(false);
+    expect(JSON.stringify(x.data ?? {})).not.toContain(A.st.ids.shop);
+    const lookup = mustOk(await S(B.c.cashA, sale.key, sale.rpc), "B lookup");
+    expect(lookup.status === "committed" || lookup.response != null).toBe(false);
+    expect(ledgerRowText(sale.key, A.st.ids.org)).toBe(before);
+    expect(snapDiff(s0, snapshot(A.st.ids.org))).toEqual([]);
+    return { exec: x.error ? `${x.error.code} ${x.error.message}`.slice(0, 80) : x.data, sameAsFreshKey: true, lookup };
   });
 
   T("1", "1.6", "changed arguments / other RPC with the same key: mismatch, no write, no effect", async () => {
@@ -681,26 +710,33 @@ describe.skipIf(!enabled)("086 Stage 1 DB", () => {
     setPerms(B.st.ids.admin, ["sync:resolve"]);
     const sale = L.find((l) => l.name === "complete_sale")!;
     const targets = { committed: sale.key, rejected: keep.b2.key, abandoned: keep.fenced.key };
-    const before = Object.fromEntries(Object.entries(targets).map(([n, kk]) => [n, ledgerRowText(kk)]));
+    const before = Object.fromEntries(Object.entries(targets).map(([n, kk]) => [n, ledgerRowText(kk, A.st.ids.org)]));
     const seen: string[] = [];
+    // per-organisation ledger: whatever A's key's state, B's answers are EXACTLY
+    // those for a key nobody ever used (no state, no enumeration), and A's rows
+    // are never touched (B's own fence decides only B's namespace)
+    const answer = (r: any) => JSON.stringify(r.error ? { error: r.error.code } : r.data);
     for (const who of [B.c.cashA, B.c.admin]) {
       for (const [n, kk] of Object.entries(targets)) {
-        for (const fence of [false, true]) {
-          const s = mustOk(await S(who, kk, "complete_sale", fence, B.st.ids.cashA), "s");
-          expect(s).toEqual({ status: "unavailable" });
-          seen.push(`${n}/${fence ? "fence" : "lookup"}=${s.status}`);
-        }
-        const x = mustOk(await X(who, kk, "complete_sale", sale.args), "x");
-        expect(x).toEqual({ outcome: "mismatch" });
+        const control = v7();
+        const look = await S(who, kk, "complete_sale", false, B.st.ids.cashA);
+        expect(answer(look).replace(/"executable":(true|false)/, "")).toBe(answer(await S(who, control, "complete_sale", false, B.st.ids.cashA)).replace(/"executable":(true|false)/, ""));
+        // B's fence of A's decided key decides only B's namespace (as for a never-used key)
+        const fb = await S(who, kk, "complete_sale", true, B.st.ids.cashA, sale.args);
+        expect(answer(fb)).toBe(answer(await S(who, v7(), "complete_sale", true, B.st.ids.cashA, sale.args)));
+        const x = await X(who, kk, "complete_sale", sale.args, who === B.c.cashA ? B.st.ids.cashA : B.st.ids.admin);
+        const xc = await X(who, control, "complete_sale", sale.args, who === B.c.cashA ? B.st.ids.cashA : B.st.ids.admin);
+        expect(answer(x)).toBe(answer(xc));
+        seen.push(`${n}: as for an unused key`);
       }
     }
-    for (const [n, kk] of Object.entries(targets)) expect(ledgerRowText(kk)).toBe(before[n]);
+    for (const [n, kk] of Object.entries(targets)) expect(ledgerRowText(kk, A.st.ids.org)).toBe(before[n]);
     const own = mustOk(await S(A.c.cashA, sale.key, "adjust_stock"), "own other rpc");
     expect(own).toEqual({ status: "unavailable" });
     const unknown = mustOk(await S(B.c.cashA, v7(), "complete_sale"), "unknown");
     expect(unknown).toMatchObject({ status: "not_found" });
     setPerms(B.st.ids.admin, null);
-    return { foreignStates: "committed/rejected/abandoned → identical {status:'unavailable'} / {outcome:'mismatch'}", unknownKey: unknown.status, ownKeyOtherRpc: own.status };
+    return { foreignStates: "committed/rejected/abandoned → identical to a never-used key (lookup and execution); A's rows unchanged", seen, unknownKey: unknown.status, ownKeyOtherRpc: own.status };
   });
 
   T("1", "1.8", "old direct RPC calls cannot execute rejected or abandoned keys (both a cashier and the admin)", async () => {
@@ -1248,14 +1284,14 @@ describe.skipIf(!enabled)("086 Stage 1 DB", () => {
     } finally { s.close(); }
   });
 
-  T("C", "C.6", "foreign decided key: 'unavailable' comes first — no in_flight signal for another org's key", async () => {
+  T("C", "C.6", "another organisation's key: no in_flight signal, ever — A's per-organisation lock is invisible to B (B sees a never-used key)", async () => {
     const sale = L.find((l) => l.name === "complete_sale")!;
     const s = await as(A.auth.cashA);
     try {
-      await s.q(`BEGIN;\nSELECT pg_advisory_xact_lock(hashtext('idem:' || ${lit(sale.key)}));`);
+      await s.q(`BEGIN;\nSELECT pg_advisory_xact_lock(hashtext('idem:' || ${lit(A.st.ids.org)} || ':' || ${lit(sale.key)}));`);
       const foreign = mustOk(await S(B.c.cashA, sale.key, "complete_sale"), "foreign lookup while locked");
       await s.q("ROLLBACK;");
-      expect(foreign).toEqual({ status: "unavailable" });
+      expect(foreign).toEqual({ status: "not_found", executable: true });
       return { foreignWhileLocked: foreign.status };
     } finally { s.close(); }
   });
@@ -1322,7 +1358,8 @@ describe.skipIf(!enabled)("086 Stage 1 DB", () => {
     expect(mustOk(await X(A.c.cashA, k, "complete_sale", args), "decide")).toMatchObject({ outcome: "rejected" });
     const s = await as(A.auth.cashA);
     try {
-      await s.q(`BEGIN;\nSELECT pg_advisory_xact_lock(hashtext('idem:' || ${lit(k)}));`);
+      // the per-organisation lock every 086 path takes for this key
+      await s.q(`BEGIN;\nSELECT pg_advisory_xact_lock(hashtext('idem:' || ${lit(A.st.ids.org)} || ':' || ${lit(k)}));`);
       const t0 = Date.now();
       const replay = mustOk(await X(A.c.cashA, k, "complete_sale", args), "replay under lock");
       const lookup = mustOk(await S(A.c.cashA, k, "complete_sale"), "lookup under lock");

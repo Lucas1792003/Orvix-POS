@@ -63,9 +63,14 @@ describe.skipIf(!enabled)("086 Stage 1 rollback", () => {
     expect(Number(sql1("SELECT count(*) FROM idempotency_keys WHERE state IN ('rejected','abandoned')"))).toBe(tombstones);
     expect(sql1("SELECT count(*) FROM pg_proc WHERE pronamespace='public'::regnamespace AND proconfig = '{search_path=public}'")).toBe("0");
     const hardened = sql1(`SELECT count(*) FROM pg_proc WHERE pronamespace='public'::regnamespace AND proconfig = '{"search_path=public, pg_temp"}'`);
-    // idem_begin is byte-for-byte the 085 body again (search_path stays hardened)
+    // idem_begin is the 085 behaviour on the per-organisation ledger: the 086
+    // body WITHOUT the UUIDv7 guard (the 085 key-only body would read another
+    // organisation's row); its md5 is the one the generated rollback checks
+    const rollbackMd5 = /md5\(prosrc\) FROM pg_proc WHERE oid = 'public\.idem_begin\(uuid,text,text\)'::regprocedure\) <> '([0-9a-f]{32})'/.exec(readFileSync(process.env.M086_ROLLBACK!, "utf8"))![1];
     expect(sql1("SELECT md5(prosrc) || ' ' || array_to_string(proconfig, ',') FROM pg_proc WHERE oid = 'public.idem_begin(uuid,text,text)'::regprocedure"))
-      .toBe("afca065fea226a0c7a5b9bb56b540a9d search_path=public, pg_temp");
+      .toBe(`${rollbackMd5} search_path=public, pg_temp`);
+    expect(sql1("SELECT prosrc LIKE '%OP_EXECUTOR_REQUIRED%' FROM pg_proc WHERE oid = 'public.idem_begin(uuid,text,text)'::regprocedure")).toBe("f");
+    expect(sql1("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'idempotency_keys_pkey'")).toBe("PRIMARY KEY (org_id, key)");
     // the kept prune is INERT without the executor and its guard: even a 14-month-old v7 tombstone stays
     const oldKey = sql1("SELECT overlay(replace(gen_random_uuid()::text, '-', '') placing lpad(to_hex((extract(epoch FROM now() - interval '14 months') * 1000)::bigint), 12, '0') from 1 for 12)");
     const k14 = `${oldKey.slice(0, 8)}-${oldKey.slice(8, 12)}-7${oldKey.slice(13, 16)}-8${oldKey.slice(17, 20)}-${oldKey.slice(20, 32)}`;
