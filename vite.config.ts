@@ -72,5 +72,15 @@ export default defineConfig(({ mode, command }) => {
     // load, giving a blank white window. See package.json's
     // "electron:build:*" scripts, which set ELECTRON_BUILD=true.
     base: process.env.ELECTRON_BUILD === 'true' ? './' : '/',
+    // Dev server only, opt-in (tools/m086-verify Chromium runs): a same-origin
+    // proxy to the disposable LOOPBACK stack's gateway (E2E_API_GATEWAY), so the
+    // app makes no cross-origin calls. Refuses any non-loopback target. Unset
+    // (every normal dev run and every build): no effect.
+    server: process.env.E2E_API_GATEWAY ? (() => {
+      const target = process.env.E2E_API_GATEWAY as string
+      if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(target)) throw new Error('E2E_API_GATEWAY must be http://127.0.0.1:<port>')
+      const p = { target, changeOrigin: true, ws: true }
+      return { host: 'localhost', proxy: { '/auth/v1': p, '/rest/v1': p, '/realtime/v1': p, '/storage/v1': p, '/functions/v1': p } }
+    })() : undefined,
   }
 })

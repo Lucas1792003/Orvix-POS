@@ -23,7 +23,12 @@ export const QUEUE_EXPORT_FORMAT = "shwephala-queue-export";
  *  such a file (it rejects any version above its own) rather than silently
  *  drop them. Files of version 1 are still read. */
 export const QUEUE_EXPORT_FORMAT_VERSION = 2;
-export const SUPPORTED_FORMAT_VERSIONS: readonly number[] = [1, 2];
+/** Written only when the till holds online-operation records it cannot read
+ *  (deployment-blocker pass): their raw contents are in the file, and a reader
+ *  that does not know them (format ≤ 2) must refuse the file, not drop them. */
+export const QUEUE_EXPORT_FORMAT_VERSION_UNREADABLE = 3;
+export const MAX_FORMAT_VERSION = 3;
+export const SUPPORTED_FORMAT_VERSIONS: readonly number[] = [1, 2, 3];
 export const QUEUE_EXPORT_FILE_EXTENSION = "spqx";
 /** OWASP 2023 guidance for PBKDF2-HMAC-SHA-256. */
 export const KDF_ITERATIONS = 600_000;
@@ -191,11 +196,26 @@ const onlineOperationSchema = z.object({
   blocksReplacement: z.boolean().default(true),
 }).passthrough();
 
+/** An online-operation record the till could not read (corrupt, or written
+ *  by a newer build): its RAW stored value, verbatim, for an owner's recovery.
+ *  `claimed`: fields read from it, UNVERIFIED (never an identity). */
+const unreadableOnlineRecordSchema = z.object({
+  key: z.string(),
+  raw: z.string(),
+  reason: z.enum(["unparseable", "unknown-format"]),
+  /** set aside by the owner after an earlier export (still unknown). */
+  setAside: z.boolean().optional(),
+  claimed: z.object({
+    name: z.string().nullable(), scope: z.string().nullable(), orgId: z.string().nullable(),
+    userId: z.string().nullable(), backendOrigin: z.string().nullable(), version: z.unknown(),
+  }).passthrough(),
+});
+
 export type QueueExportEntry = z.infer<typeof entrySchema>;
 
 const payloadSchema = z.object({
   format: z.literal(QUEUE_EXPORT_FORMAT),
-  formatVersion: z.union([z.literal(1), z.literal(2)]),
+  formatVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   appVersion: z.string(),
   exportedAt: z.string(),
   tillId: z.string(),
@@ -215,15 +235,20 @@ const payloadSchema = z.object({
   /** RC3: the till's local reconciliation log (absent in older files). */
   reconciliationLog: z.array(reconcileLogSchema).default([]),
   onlineOperations: z.array(onlineOperationSchema).default([]),
+  /** Format 3: online-operation records the till could not read (raw). */
+  unreadableOnlineRecords: z.array(unreadableOnlineRecordSchema).default([]),
 });
 
 export type QueueExportPayload = z.infer<typeof payloadSchema>;
+export type UnreadableOnlineRecordExport = z.infer<typeof unreadableOnlineRecordSchema>;
 
 const summarySchema = z.object({
   /** Queue entries + unresolved online-only operations. */
   total: z.number().int().min(0),
   /** Unresolved online-only operations (absent when none, and in version 1). */
   onlineOperations: z.number().int().min(0).optional(),
+  /** Online-operation records the till could not read (format 3; absent when none). */
+  unreadableOnlineRecords: z.number().int().min(0).optional(),
   byStatus: z.record(z.number().int().min(0)),
   byOpType: z.record(z.number().int().min(0)),
 });
@@ -261,14 +286,23 @@ export type QueueExportEnvelope = z.infer<typeof envelopeSchema>;
 
 // --------------------------------------------------------------- helpers --
 
-export function summarize(entries: readonly Pick<QueueExportEntry, "status" | "opType">[], onlineOperations = 0): QueueExportSummary {
+/** The summary of a whole payload (entries, online operations, unreadable records). */
+export function summarizePayload(p: Pick<QueueExportPayload, "entries" | "onlineOperations"> & { unreadableOnlineRecords?: readonly unknown[] }): QueueExportSummary {
+  return summarize(p.entries, p.onlineOperations.length, p.unreadableOnlineRecords?.length ?? 0);
+}
+
+export function summarize(entries: readonly Pick<QueueExportEntry, "status" | "opType">[], onlineOperations = 0, unreadableOnlineRecords = 0): QueueExportSummary {
   const byStatus: Record<string, number> = {};
   const byOpType: Record<string, number> = {};
   for (const e of entries) {
     byStatus[e.status] = (byStatus[e.status] ?? 0) + 1;
     byOpType[e.opType] = (byOpType[e.opType] ?? 0) + 1;
   }
-  return { total: entries.length + onlineOperations, byStatus, byOpType, ...(onlineOperations > 0 ? { onlineOperations } : {}) };
+  return {
+    total: entries.length + onlineOperations + unreadableOnlineRecords, byStatus, byOpType,
+    ...(onlineOperations > 0 ? { onlineOperations } : {}),
+    ...(unreadableOnlineRecords > 0 ? { unreadableOnlineRecords } : {}),
+  };
 }
 
 /** JSON with object keys sorted at every level — the AES-GCM additional data. */
@@ -398,13 +432,13 @@ export async function encryptQueueExport(
   const iv = options.iv ?? globalThis.crypto.getRandomValues(new Uint8Array(12));
   const head: Omit<QueueExportEnvelope, "ciphertext"> = {
     format: QUEUE_EXPORT_FORMAT,
-    formatVersion: QUEUE_EXPORT_FORMAT_VERSION,
+    formatVersion: valid.unreadableOnlineRecords.length ? QUEUE_EXPORT_FORMAT_VERSION_UNREADABLE : QUEUE_EXPORT_FORMAT_VERSION,
     encrypted: true,
     header: {
       appVersion: valid.appVersion,
       exportedAt: valid.exportedAt,
       tillId: valid.tillId,
-      summary: summarize(valid.entries, valid.onlineOperations.length),
+      summary: summarizePayload(valid),
     },
     kdf: { name: "PBKDF2", hash: "SHA-256", iterations, salt: toBase64(salt) },
     cipher: { name: "AES-GCM", keyBits: 256, tagBits: 128, iv: toBase64(iv) },
@@ -429,8 +463,8 @@ export function parseEnvelope(input: string | unknown): QueueExportEnvelope {
   if (!v || typeof v !== "object" || v.format !== QUEUE_EXPORT_FORMAT) {
     throw new QueueExportError("bad-format", "Not a Shwe Pha La queue export file.");
   }
-  if (typeof v.formatVersion === "number" && (v.formatVersion > QUEUE_EXPORT_FORMAT_VERSION || !SUPPORTED_FORMAT_VERSIONS.includes(v.formatVersion))) {
-    throw new QueueExportError("unsupported-version", `Export format ${v.formatVersion} is newer than this tool supports (${QUEUE_EXPORT_FORMAT_VERSION}).`);
+  if (typeof v.formatVersion === "number" && (v.formatVersion > MAX_FORMAT_VERSION || !SUPPORTED_FORMAT_VERSIONS.includes(v.formatVersion))) {
+    throw new QueueExportError("unsupported-version", `Export format ${v.formatVersion} is newer than this tool supports (${MAX_FORMAT_VERSION}).`);
   }
   const parsed = envelopeSchema.safeParse(value);
   if (!parsed.success) {
@@ -468,7 +502,7 @@ export async function decryptQueueExport(input: string | unknown, passphrase: st
   }
   const payload = validatePayload(value);
   // The clear summary is authenticated, but check it describes this payload.
-  if (canonicalJson(summarize(payload.entries, payload.onlineOperations.length)) !== canonicalJson(env.header.summary)) {
+  if (canonicalJson(summarizePayload(payload)) !== canonicalJson(env.header.summary)) {
     throw new QueueExportError("bad-format", "The file's summary does not match its contents.");
   }
   return payload;

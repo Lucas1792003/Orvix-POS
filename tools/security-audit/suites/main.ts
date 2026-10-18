@@ -12,6 +12,7 @@ import { functionsSuite } from "./functions";
 import { authlinkSuite } from "./authlink";
 import { authzSuite } from "./authz";
 import { helpersSuite } from "./helpers";
+import { opsSuite } from "./ops";
 
 const area = async (name: string, f: () => Promise<void>) => {
   console.log(`\n== ${name} (migration ${MAX_MIG}) ==`);
@@ -31,6 +32,7 @@ await area("functions", () => functionsSuite(w));
 await area("authlink", () => authlinkSuite(w));
 await area("authz", () => authzSuite(w));
 await area("helpers", () => helpersSuite(w));
+await area("ops", () => opsSuite(w));
 
 // ---- leak scan over every captured refusal / response (req 11) ----
 console.log(`\n== errors (migration ${MAX_MIG}) ==`);

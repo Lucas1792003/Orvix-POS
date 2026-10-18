@@ -25,7 +25,7 @@ const payload = (entries: QueueExportEntry[] = [entry({})]): QueueExportPayload 
   format: "shwephala-queue-export", formatVersion: 1, appVersion: "1.0.16", exportedAt: "2026-10-13T02:00:00.000Z",
   tillId: "till-abc123", backendHost: "pos.example.test",
   session: { userId: "user-1", orgId: "org-1", shopId: "shop-1", role: "CASHIER" },
-  entries, provisionalIdMap: [], redactedFields: 0, reconciliationLog: [], onlineOperations: [],
+  entries, provisionalIdMap: [], redactedFields: 0, reconciliationLog: [], onlineOperations: [], unreadableOnlineRecords: [],
 });
 
 async function flipCiphertextByte(text: string): Promise<string> {
@@ -198,7 +198,7 @@ describe("format version 2 (migration 086 final pass)", () => {
 
   it("refuses a version it does not know (and an older tool refuses version 2 the same way)", async () => {
     const env = JSON.parse(JSON.stringify(await encryptQueueExport(payload(), PASS, FAST)));
-    env.formatVersion = 3;
+    env.formatVersion = 4;                                  // 3 = unreadable online records (deployment-blocker pass)
     await expect(decryptQueueExport(JSON.stringify(env), PASS)).rejects.toMatchObject({ code: "unsupported-version" });
   });
 

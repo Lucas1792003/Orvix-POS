@@ -206,6 +206,9 @@ export const SYNC_STATE_KEYS = {
   // it may have been replayed elsewhere (tools/queue-recovery), so it can no
   // longer prove it was never sent (stores/data/outbox.ts dependencyContext).
   lastQueueExport: "queue-export:last-at",
+  // Prefix + backend origin: that backend has answered op_execute/op_status
+  // (migration 086) at least once (stores/data/idempotentRpc.ts).
+  executorDemonstrated: "executor-086-seen:",
 } as const;
 
 export { RECONCILE_LOG_PREFIX } from "./reconcile/constants";

@@ -133,6 +133,23 @@ describe("recovery tool: an online attempt being SENT when exported is classifie
     expect(s.calls).toHaveLength(0);
   });
 
+  it("a Batch 2A close caught mid-send on a LATER attempt with nothing staged: its proof (the local shift row) is not in the file — looked up only, never fenced (the till would send it)", async () => {
+    const s = new Server();
+    const r = await run(s, exportOf({ opType: "close_shift", status: "syncing", staged: null, attempts: 2,
+      payload: { p_shift_id: "shift-1", p_closing_cash_mmk: 0, p_idempotency_key: KEY } }));
+    expect(r.ops[0].outcome).toBe("held");
+    expect(s.ledger.has(KEY)).toBe(false);
+    expect(s.calls.filter((c) => c.rpc === "op_status").every((c) => c.body.p_fence === false)).toBe(true);
+    expect(s.executed).toBe(0);
+  });
+
+  it("review-10 H1: a first online attempt already moved to 'pending' (write-ahead, no staged flag, no attempt recorded) is fenced like the till holds it — never replayed", async () => {
+    const s = new Server();
+    const r = await run(s, exportOf({ status: "pending", staged: null, attempts: 0, inDoubt: null }));
+    expect(r.ops[0].outcome).toBe("abandoned");
+    expect(s.executed).toBe(0);
+  });
+
   it("set aside while being sent (no in-doubt flag): a skipped entry that is NOT decided keeps the recovery from succeeding", async () => {
     const s = new Server();
     const r = await run(s, exportOf({ status: "archived", statusBeforeArchive: "syncing", staged: true, writeAhead: true }));

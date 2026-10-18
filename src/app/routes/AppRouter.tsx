@@ -69,6 +69,9 @@ const AuditLogPage = lazy(() =>
 const SyncConflictsPage = lazy(() =>
   import("../../pages/SyncConflictsPage").then((m) => ({ default: m.SyncConflictsPage })),
 );
+const MyUnresolvedOperationsPage = lazy(() =>
+  import("../../pages/MyUnresolvedOperationsPage").then((m) => ({ default: m.MyUnresolvedOperationsPage })),
+);
 const PlatformConsoleLoginPage = lazy(() =>
   import("../../pages/PlatformConsoleLoginPage").then((m) => ({ default: m.PlatformConsoleLoginPage })),
 );
@@ -337,6 +340,16 @@ export const AppRouter = () => (
           element={
             <RequireRole permission={ROUTE_PERMISSIONS.adminAudit}>
               <AuditLogPage />
+            </RequireRole>
+          }
+        />
+        <Route
+          path="sync/unresolved"
+          element={
+            // Any signed-in user, OWN operations only (no permission grants
+            // anything here beyond what re-entering the payment already allows).
+            <RequireRole>
+              <MyUnresolvedOperationsPage />
             </RequireRole>
           }
         />

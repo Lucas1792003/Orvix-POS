@@ -18,6 +18,8 @@ import { useAuthStore } from "../stores/authStore";
 import { useSaleActivityStore } from "../stores/saleActivityStore";
 import { drainOutbox, refreshSyncStatus } from "../stores/data/outbox";
 import { supabase } from "./supabase";
+import { localDb } from "./localDb";
+import { onlineRecordKeysBlockingInstall } from "./queueExport/collect";
 
 export const HEARTBEAT_MS = 30_000;
 
@@ -67,11 +69,15 @@ export function ownerSignedIn(): boolean {
  *  syncing, failed, conflict, quarantined and set-aside rows always block. */
 export async function collectAppState(): Promise<ElectronAppState> {
   const rows = await blockingOutboxRows(desktopVerifyDeps());
-  const ids = rows.map((r) => r.localId);
+  // Deployment-blocker pass: unresolved online payments (and records the till
+  // cannot read) block an install like queued work — they are not queued, but
+  // they may have been applied and must be exported first.
+  const onlineKeys = await onlineRecordKeysBlockingInstall(localDb);
+  const ids = [...rows.map((r) => r.localId), ...onlineKeys];
   const auth = useAuthStore.getState();
   return buildAppState({
     outboxIds: ids,
-    statuses: rows.map((r) => r.status),
+    statuses: [...rows.map((r) => r.status), ...onlineKeys.map(() => "online-unresolved")],
     online: useConnectivityStore.getState().isOnline,
     authenticated: Boolean(auth.currentUserId) && !useSyncStore.getState().needsReauth,
     saleInProgress: useSaleActivityStore.getState().saleInProgress,

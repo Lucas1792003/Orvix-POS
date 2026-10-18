@@ -164,7 +164,12 @@ sign-in screen): the export button is there too. Export it the same way and
 **do not enter the payment again** — it may already be on the server. The
 file lists it (with its organisation, server, user and key); signed in, only
 your organisation's are included. The engineer checks it on its own server
-(Sync › Unresolved operations › **Check status**); the tool never replays it.
+(the owner: Sync › Unresolved operations › **Check status**; anyone else, e.g. a
+manager: the badge opens **My unresolved operations** — their own only); the
+tool never replays it. **"Payment records cannot be read"** (a damaged record,
+or one written by a newer version): export first — the file (format 3) carries
+the raw record — and do not enter that payment again until the owner has
+resolved it; the owner may then set the record aside (kept, audited).
 
 **Cold copy as well** before any intervention on the till itself (app
 closed): Windows `%APPDATA%\retails-shop\`, macOS

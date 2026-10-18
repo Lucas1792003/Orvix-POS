@@ -14,8 +14,9 @@ import { useAuthStore } from "../../stores/authStore";
 import { useAppStore } from "../../stores/appStore";
 import { collectQueueExportSnapshot } from "./collect";
 import { recordQueueExport } from "./exportRecord";
+import { ONLINE_OP_PREFIX } from "../onlineOpRecord";
 import {
-  assertNoSecretValues, defaultExportFileName, encryptQueueExport, summarize, type QueueExportSummary,
+  assertNoSecretValues, defaultExportFileName, encryptQueueExport, summarizePayload, type QueueExportSummary,
 } from "./format";
 
 export type ExportQueueResult =
@@ -78,11 +79,18 @@ export async function exportPendingQueue(passphrase: string): Promise<ExportQueu
   const envelope = await encryptQueueExport(payload, passphrase);
   const contents = JSON.stringify(envelope, null, 1);
   const fileName = defaultExportFileName(tillId, now);
-  const summary = summarize(payload.entries, payload.onlineOperations.length);
+  const summary = summarizePayload(payload);
   // Durable BEFORE the file leaves the till: every entry in it was queued
   // before this time, and once it may be replayed elsewhere none of them can
   // prove it was never sent. (A failed write still leaves this session's
   // in-memory record, recordQueueExport below.)
+  // What this file covers, for the updater guard: the queue rows, plus the
+  // unresolved online operations and unreadable records it carries.
+  const covered = [
+    ...digests,
+    ...payload.onlineOperations.map((o) => `${ONLINE_OP_PREFIX}${o.id}`),
+    ...payload.unreadableOnlineRecords.map((r) => r.key),
+  ];
   const markedAt = new Date().toISOString();
   await localDb.syncState.put({ key: SYNC_STATE_KEYS.lastQueueExport, value: markedAt, updatedAt: markedAt }).catch(() => undefined);
 
@@ -91,7 +99,7 @@ export async function exportPendingQueue(passphrase: string): Promise<ExportQueu
     const res = await api.saveQueueExport({ defaultFileName: fileName, contents });
     if (res.canceled) return { status: "canceled" };
     if (!res.ok || !res.filePath) throw new Error(res.error ?? "The file could not be saved.");
-    recordQueueExport(digests);
+    recordQueueExport(covered);
     return { status: "saved", filePath: res.filePath, summary };
   }
 
@@ -107,6 +115,6 @@ export async function exportPendingQueue(passphrase: string): Promise<ExportQueu
   } finally {
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }
-  recordQueueExport(digests);
+  recordQueueExport(covered);
   return { status: "downloaded", fileName, summary };
 }

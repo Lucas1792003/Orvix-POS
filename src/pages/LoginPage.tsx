@@ -206,10 +206,14 @@ export const LoginPage = () => {
                 app version for a different server and will not be sent from here. Export them and give the file to the owner.
               </div>
             )}
-            {unresolvedMoneyOps > 0 && (
+            {(unresolvedMoneyOps.total > 0 || unresolvedMoneyOps.readError) && (
               <div role="alert" className="mt-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-900" data-testid="login-online-ops-export">
-                {unresolvedMoneyOps} {unresolvedMoneyOps === 1 ? "payment or money operation" : "payments or money operations"} on this till
-                may already have been applied on the server (the outcome is unknown). Do not enter {unresolvedMoneyOps === 1 ? "it" : "them"} again.{" "}
+                {unresolvedMoneyOps.readError
+                  ? t("unresolved", "readError")
+                  : <>
+                      {unresolvedMoneyOps.total} {unresolvedMoneyOps.total === 1 ? "payment or money operation" : "payments or money operations"} on this till
+                      may already have been applied on the server (the outcome is unknown{unresolvedMoneyOps.unreadable > 0 ? `; ${unresolvedMoneyOps.unreadable} of these records cannot be read` : ""}). Do not enter {unresolvedMoneyOps.total === 1 ? "it" : "them"} again.
+                    </>}{" "}
                 <button type="button" className="font-medium underline" onClick={() => setExportOpen(true)}>
                   {t("queueExport", "loginLink")}
                 </button>

@@ -21,6 +21,10 @@ export function liveCfg(): LiveConfig {
   }
   // The suite is for the self-hosted stack only — never the hosted project.
   assertNotHostedUrl(url, "the e2e run (E2E_SUPABASE_URL)");
+  // Disposable-stack runs (tools/m086-verify): loopback ONLY.
+  if (process.env.E2E_LOOPBACK_ONLY === "1" && !/^http:\/\/(127\.0\.0\.1|localhost):\d+\/?$/.test(url)) {
+    throw new Error(`E2E_LOOPBACK_ONLY: refusing non-loopback backend ${new URL(url).host}`);
+  }
   return {
     url: url.replace(/\/$/, ""),
     anonKey,
@@ -30,9 +34,18 @@ export function liveCfg(): LiveConfig {
   };
 }
 
-/** Glob matching every request to the Supabase origin (REST, auth, storage). */
-export function supabaseGlob(): string {
-  return `${liveCfg().url}/**`;
+let apiPattern: RegExp | null = null;
+/** Every request to the Supabase API (REST, auth, storage, realtime,
+ *  functions). With the same-origin dev proxy (E2E_API_GATEWAY, the
+ *  tools/m086-verify runs) the API shares the dev server's origin, so this is
+ *  a pattern for the API paths only — never the app's own files. */
+export function supabaseGlob(): string | RegExp {
+  if (!process.env.E2E_API_GATEWAY) return `${liveCfg().url}/**`;
+  if (!apiPattern) {
+    const origin = liveCfg().url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    apiPattern = new RegExp(`^${origin}/(auth|rest|realtime|storage|functions)/v1(/|\\?|$)`);
+  }
+  return apiPattern;
 }
 
 export function ensureResultsDir(): string {

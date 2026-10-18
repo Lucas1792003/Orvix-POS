@@ -3,6 +3,8 @@
 // over ssh for schemas PostgREST does not expose (auth.*). Nothing here is
 // ever imported by the app.
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { makeClient, runSql as liveRunSql, runSqlFile as liveRunSqlFile, signedInClient } from "../../src/live/liveHelpers";
 import { liveCfg } from "./env";
@@ -22,11 +24,29 @@ export async function userClient(email: string, password: string): Promise<Supab
   return signedInClient(liveCfg(), email, password);
 }
 
+// tools/m086-verify: SQL runs ONLY in the disposable loopback stack's
+// database container (E2E_DB_CONTAINER, e.g. phf-iso-db) — never over ssh.
+const SAFE = /^[A-Za-z0-9_.:-]+$/;
+function containerSql(container: string, sql: string, vars: Record<string, string>): string {
+  if (!SAFE.test(container)) throw new Error("unsafe E2E_DB_CONTAINER");
+  if (process.env.E2E_LOOPBACK_ONLY !== "1") throw new Error("E2E_DB_CONTAINER is for the disposable loopback stack only (set E2E_LOOPBACK_ONLY=1)");
+  if (process.env.DOCKER_HOST && !/^unix:\/\//.test(process.env.DOCKER_HOST)) throw new Error("E2E_DB_CONTAINER: refusing a remote DOCKER_HOST");
+  const args = ["exec", "-i", container, "psql", "-X", "-U", "supabase_admin", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-At", "-q"];
+  for (const [k, v] of Object.entries(vars)) {
+    if (!SAFE.test(k) || !SAFE.test(v)) throw new Error(`unsafe psql variable ${k}`);
+    args.push("-v", `${k}=${v}`);
+  }
+  return execFileSync("docker", args, { input: sql, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+}
+
 export function runSql(sql: string, vars: Record<string, string> = {}): string {
+  const container = process.env.E2E_DB_CONTAINER;
+  if (container) return containerSql(container, sql, vars);
   return liveRunSql(liveCfg(), sql, vars);
 }
 
 export function runSqlFile(file: string, vars: Record<string, string> = {}): string {
+  if (process.env.E2E_DB_CONTAINER) return runSql(readFileSync(file, "utf8"), vars);
   return liveRunSqlFile(liveCfg(), file, vars);
 }
 

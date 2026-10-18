@@ -17,6 +17,7 @@ import {
   type WebSocketRoute,
 } from "@playwright/test";
 import { mkdirSync } from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { DEV_SERVER_URL, PROJECT_ROOT, RESULTS_DIR, liveCfg, supabaseGlob } from "./env";
 import { noteHostedRequest } from "./hostedGuard";
@@ -66,6 +67,14 @@ const LANG_INIT = `try { if (!localStorage.getItem("pos-language")) localStorage
 const ONLINE_INIT = `try { delete navigator.onLine; } catch (e) {}`;
 
 export interface RequestLogEntry { url: string; method: string; at: number; status?: number }
+
+/** E2E_LOOPBACK_ONLY=1 (tools/m086-verify): every non-loopback request any
+ *  terminal attempted (aborted). Empty otherwise. */
+export const blockedNonLoopback: string[] = [];
+const LOOPBACK_ONLY = process.env.E2E_LOOPBACK_ONLY === "1";
+// A dead-end proxy for everything that is not loopback (Chromium bypasses
+// loopback by default): a second, browser-level network guard. Opt-in.
+export const LOOPBACK_ONLY_ARGS = LOOPBACK_ONLY ? ["--proxy-server=http://127.0.0.1:9", "--proxy-bypass-list=127.0.0.1;localhost;[::1]"] : [];
 
 export class Terminal {
   readonly requests: RequestLogEntry[] = [];
@@ -125,6 +134,17 @@ export class Terminal {
       noteHostedRequest(url, kind);
       void route.abort("blockedbyclient");
     });
+    // E2E_LOOPBACK_ONLY: any other host (fonts included) is aborted and
+    // remembered; loopback requests fall through to the other routes.
+    if (LOOPBACK_ONLY) void context.route("**/*", (route) => {
+      const u = new URL(route.request().url());
+      if (u.protocol === "data:" || u.protocol === "blob:" || u.hostname === "127.0.0.1" || u.hostname === "localhost" || u.hostname === "[::1]") {
+        void route.fallback();
+        return;
+      }
+      blockedNonLoopback.push(`${kind}:${u.protocol}//${u.hostname}`);
+      void route.abort("blockedbyclient");
+    });
     page.on("response", (res) => {
       const entry = [...this.requests].reverse().find((e) => e.url === res.url() && e.status === undefined);
       if (entry) entry.status = res.status();
@@ -155,7 +175,7 @@ export class Terminal {
     // test timeout right after "Display is turned off". Playwright passes
     // these to its own Chromium by default, but not to Electron.
     const app = await electron.launch({
-      args: ["--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows", "--disable-background-timer-throttling", "."],
+      args: [...LOOPBACK_ONLY_ARGS, "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows", "--disable-background-timer-throttling", "."],
       cwd: PROJECT_ROOT, env,
     });
     const context = app.context();
@@ -190,13 +210,59 @@ export class Terminal {
 
   /** The second terminal: a headed Chromium page on the same dev server. */
   static async launchBrowser(options: { headless?: boolean } = {}): Promise<Terminal> {
-    const browser = await chromium.launch({ headless: options.headless ?? true });
+    const browser = await chromium.launch({ headless: options.headless ?? true, args: LOOPBACK_ONLY_ARGS });
     const context = await browser.newContext({ viewport: { width: 1366, height: 768 } });
     await context.addInitScript(LANG_INIT);
     await context.addInitScript(SHOP_WRITE_SPY);
     const page = await context.newPage();
     return new Terminal("browser", page, context, undefined, browser);
   }
+
+  /** tools/m086-verify: real Chromium with a PERSISTENT profile (real IndexedDB on
+   *  disk), started as OUR process (remote debugging on loopback) so a crash
+   *  is a real SIGKILL; close() then launch again = a browser restart. */
+  static async launchPersistent(userDataDir: string): Promise<Terminal> {
+    mkdirSync(userDataDir, { recursive: true });
+    const port = 9300 + Math.floor(Math.random() * 500);
+    const proc = spawn(chromium.executablePath(), [
+      ...LOOPBACK_ONLY_ARGS, "--headless=new", `--user-data-dir=${userDataDir}`, `--remote-debugging-port=${port}`,
+      "--remote-debugging-address=127.0.0.1", "--no-first-run", "--no-default-browser-check", "--window-size=1366,768",
+      "--disable-renderer-backgrounding", "--disable-background-timer-throttling", "about:blank",
+    ], { stdio: "ignore" });
+    let browser: Browser | null = null;
+    for (let i = 0; i < 100 && !browser; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`).catch(() => null);
+    }
+    if (!browser) { proc.kill("SIGKILL"); throw new Error("could not start Chromium"); }
+    const context = browser.contexts()[0];
+    await context.addInitScript(LANG_INIT);
+    await context.addInitScript(SHOP_WRITE_SPY);
+    const page = context.pages()[0] ?? await context.newPage();
+    await page.setViewportSize({ width: 1366, height: 768 });
+    const t = new Terminal("browser", page, context, undefined, browser, userDataDir);
+    t.proc = proc;
+    return t;
+  }
+
+  /** tools/m086-verify: a second TAB of the same browser profile (shared IndexedDB
+   *  and Web Locks). */
+  async openTab(): Promise<Terminal> {
+    const page = await this.context.newPage();
+    return new Terminal("browser", page, this.context, undefined, undefined, this.userDataDir);
+  }
+
+  /** tools/m086-verify: crash — the browser process is SIGKILLed (no unload, no flush). */
+  async crash(): Promise<void> {
+    const proc = this.app?.process() ?? this.proc;
+    if (!proc) throw new Error("no process to crash");
+    const exited = new Promise<void>((r) => proc.once("exit", () => r()));
+    proc.kill("SIGKILL");
+    await exited;
+    await this.browser?.close().catch(() => undefined);
+  }
+
+  private proc: ChildProcess | null = null;
 
   /** A phone: Chromium with an iPhone 13 profile (viewport, DPR, touch,
    *  mobile UA). Used for the anonymous QR upload page. Same hosted guard. */
@@ -227,7 +293,18 @@ export class Terminal {
   async close(): Promise<void> {
     try {
       if (this.app) await this.app.close();
-      else if (this.browser) await this.browser.close();
+      else if (this.proc) {
+        // graceful: Chromium's own shutdown (CDP Browser.close), as when the
+        // user quits the browser; then wait for the process to exit.
+        const proc = this.proc;
+        const exited = proc.exitCode !== null ? Promise.resolve() : new Promise<void>((r) => proc.once("exit", () => r()));
+        try {
+          const cdp = await this.browser!.newBrowserCDPSession();
+          await cdp.send("Browser.close").catch(() => undefined);
+        } catch { /* already gone */ }
+        await Promise.race([exited, new Promise((r) => setTimeout(r, 15_000))]);
+        if (proc.exitCode === null) proc.kill("SIGKILL");
+      } else if (this.browser) await this.browser.close();
     } catch {
       /* already gone */
     }

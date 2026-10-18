@@ -4,6 +4,8 @@ import { isNetworkError } from "../../lib/errors";
 import { classifyFailure, failureInfo, signalOf, type FailureInfo } from "../../lib/failureClass";
 import { retryAfterRemainingMs } from "../../lib/retryAfter";
 import { touchAuthCache } from "../authCache";
+import { localDb, SYNC_STATE_KEYS } from "../../lib/localDb";
+import { currentBackendOrigin } from "../../lib/backendOrigin";
 
 // ----------------------------------------------------------------------
 // Idempotent RPC calls — client half of
@@ -259,9 +261,50 @@ export function setExecutorCapabilityForTests(next: ExecutorCapability, pin = tr
   capability = next;
   pinned = pin;
   capabilitySince = Date.now();
+  demonstratedHere.clear();
 }
 
+// Deployment-blocker pass (stale schema cache): once THIS backend has
+// answered op_execute / op_status, it is known to have 086 — durably, per
+// backend origin. A later "function not found" from it is a stale PostgREST
+// schema cache (or a server being changed), never proof that 086 is absent:
+// nothing is decided from it (no direct-path fallback, no manual close, no
+// replacement). Only a server that never answered them keeps the 085 path.
+const demonstratedHere = new Set<string>();
+const demonstratedKey = (origin: string) => `${SYNC_STATE_KEYS.executorDemonstrated}${origin}`;
+
+function noteDemonstrated(): void {
+  const origin = currentBackendOrigin();
+  if (!origin || demonstratedHere.has(origin)) return;
+  demonstratedHere.add(origin);
+  const at = new Date().toISOString();
+  void localDb.syncState.put({ key: demonstratedKey(origin), value: at, updatedAt: at }).catch((err) => {
+    console.error("[sync] could not record that this server has migration 086 (kept for this session):", err);
+  });
+}
+
+/** Has THIS backend ever shown it has 086? true / false; a storage error
+ *  counts as true (fail closed: nothing is decided from "not found"). */
+export async function executorDemonstrated(): Promise<boolean> {
+  const origin = currentBackendOrigin();
+  if (!origin) return true;
+  if (demonstratedHere.has(origin)) return true;
+  try {
+    return Boolean(await localDb.syncState.get(demonstratedKey(origin)));
+  } catch {
+    return true;
+  }
+}
+
+/** "Function not found" from a backend that has answered 086 before. */
+const staleSchemaError = (fn: string, status?: number): RpcError =>
+  new RpcError(
+    `The server answered that ${fn} does not exist, but it has migration 086 (it answered before): its schema cache is stale or it is being changed. Nothing ran and nothing was decided — this is retried later.`,
+    { status, code: "OP_SCHEMA_UNAVAILABLE", failure: failureInfo("WAITING_BACKEND") },
+  );
+
 const noteCapability = (next: ExecutorCapability): void => {
+  if (next === "available") noteDemonstrated();
   if (pinned) return;
   capability = next;
   capabilitySince = Date.now();
@@ -331,7 +374,12 @@ async function viaExecutor(name: string, args: Record<string, unknown>, timeoutM
     supabase.rpc("op_execute", { p_key: key, p_rpc: name, p_args: rest, p_actor_id: actorId }), name, timeoutMs,
   );
   if (outcome.error) {
-    if (isMissingFunction(outcome.error, "op_execute")) return "absent";
+    if (isMissingFunction(outcome.error, "op_execute")) {
+      if (await executorDemonstrated()) return { data: null, status: outcome.status, via: "executor", error: staleSchemaError("op_execute", outcome.status) };
+      return "absent";
+    }
+    // op_execute itself raised (OP_… refusals): it exists — the backend has 086.
+    if ((outcome.error.message ?? "").startsWith("OP_")) noteDemonstrated();
     return { ...outcome, via: "executor" };
   }
   noteCapability("available");
@@ -385,6 +433,7 @@ export async function lookupOperation(
   );
   if (outcome.error) {
     if (isMissingFunction(outcome.error, "op_status")) {
+      if (await executorDemonstrated()) return { absent: false, status: null, error: staleSchemaError("op_status", outcome.status) };
       noteCapability("absent");
       return { absent: true, status: null, error: null };
     }
@@ -438,6 +487,7 @@ async function attempt(name: string, args: Record<string, unknown>, timeoutMs: n
   if (EXECUTOR_RPCS.has(name) && executorRequired(direct.error)) {
     // An 086 server refused the legacy path for this key (nothing ran): the
     // executor exists after all (e.g. a stale schema cache). Ask it.
+    noteDemonstrated();
     noteCapability("unknown");
     const viaExec = await viaExecutor(name, args, timeoutMs, actorId);
     if (viaExec !== "absent") return viaExec;

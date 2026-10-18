@@ -301,6 +301,39 @@ payments (reproduced at `d0390a1`). Reproduced at
 `d0390a1` (two payments) and fixed: `src/stores/data/paymentAtomic.test.ts`;
 live X1/X2 (one `supplier_payments` row, the balance moved once).
 
+**Deployment-blocker pass (after `9d37787`).**
+*Stale schema cache.* Once a backend has answered `op_execute` / `op_status`,
+the till records that durably (per backend origin, `syncState`
+`executor-086-seen:<origin>`). From then on a "function not found" from it is a
+stale PostgREST cache or a server being changed — never "no 086": nothing runs
+on the direct path, nothing is closed manually, no replacement passes, and the
+operation stays held with its key ("waiting for the server",
+`OP_SCHEMA_UNAVAILABLE`). An unreadable record counts as "has 086". Only a
+backend that never answered 086 to this till keeps the 085 fallback.
+*Client-decided "not applied".* On a backend that has shown 086 — or whose 086
+support is unknown — a first attempt's own evidence (503, not delivered, …)
+never settles a payment: the LATEST attempt fences its key on the server and
+settles from the answer (abandoned / refused / applied); if that fails it stays
+unresolved. Only a server known to lack 086 (no fence exists) keeps the
+client's evidence. *Unreadable records.* A stored operation record this build
+cannot read (corrupt, or a newer format) is never dropped: it is counted
+(badges, sign-in hint, updater guard), shown, exported raw (export **format
+3** — older tools refuse such a file instead of dropping it), and it blocks a
+new entry it could be (same or unknown operation / scope); nothing is invented
+for it. The owner sets one aside only after an export (the raw record is kept,
+the action audited, its outcome stays unknown). A store that cannot be read
+sends nothing and shows a read error. *Own-scope view.* Any signed-in user
+(e.g. a MANAGER) has "My unresolved operations" (`/app/sync/unresolved`): their
+OWN operations of their organisation, Check (a read-only lookup, never a fence)
+and an unchanged Retry; Mark verified, set-aside and the organisation-wide list
+stay on the owner's Sync page; Check refuses another user's or organisation's
+operation in the client, and the server applies its own rules. *One recovery
+rule.* Startup classification, stranded-attempt recovery, Retry, Restore,
+Confirm with server (owner-only, enforced in the function) and the recovery tool
+use one rule for "authorised offline" (`offlineAuthorisation`); proof found is
+kept as `staged`. The updater guard counts unresolved payments and unreadable
+records as unsynced work.
+
 **Exporting unresolved money operations.** A till with **no** queued entries
 but an unresolved online operation can export it: the app shell shows "N
 payment(s) await server confirmation — do not enter again" and the export
@@ -510,7 +543,7 @@ RECOVERED".
   commute; which of them a stock check refuses can change; an offline record
   whose creating entry provably never left the till is not a wildcard). The
   remaining shared-till delay is an accepted limitation ("Shared till").
-* **R11 — export format.** New exports are **format version 2**: the 086
+* **R11 — export format.** New exports are **format version 2** (**3** when the till holds online-operation records it cannot read — their raw contents are in the file, and every reader of format ≤ 2 refuses it): the 086
   recovery fields (actor, held, server decision, blocking), the owner-action
   log and the unresolved online-only operations are safety-critical. Every
   older recovery tool refuses a version-2 file outright ("unsupported-version",

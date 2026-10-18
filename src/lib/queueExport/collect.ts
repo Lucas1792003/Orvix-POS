@@ -15,9 +15,10 @@ import type { LocalDb, SyncOutboxEntry } from "../localDb";
 import { RECONCILE_LOG_PREFIX } from "../reconcile/constants";
 import { entryDigest } from "../reconcile/digest";
 import {
-  QUEUE_EXPORT_FORMAT, QUEUE_EXPORT_FORMAT_VERSION, inQueueOrder, redactSecrets, summarize,
-  type QueueExportEntry, type QueueExportPayload, type QueueExportSummary,
+  QUEUE_EXPORT_FORMAT, QUEUE_EXPORT_FORMAT_VERSION, QUEUE_EXPORT_FORMAT_VERSION_UNREADABLE, inQueueOrder, redactSecrets, summarize,
+  type QueueExportEntry, type QueueExportPayload, type QueueExportSummary, type UnreadableOnlineRecordExport,
 } from "./format";
+import { ONLINE_OP_PREFIX, UNREADABLE_SET_ASIDE_PREFIX, classifyOnlineRecord, setAsideRecord, unreadableInScope } from "../onlineOpRecord";
 
 export interface QueueExportContext {
   appVersion: string;
@@ -93,9 +94,15 @@ export async function collectQueueExportSnapshot(db: LocalDb, ctx: QueueExportCo
     (await db.syncOutbox.toArray()) as StoredRow[],
     await db.provisionalIdMap.toArray(),
     await db.syncState.where("key").startsWith(RECONCILE_LOG_PREFIX).toArray(),
-    await db.syncState.where("key").startsWith(ONLINE_OP_PREFIX).toArray(),
+    await onlineRows(db),
   ] as const);
-  const payload = { ...buildPayload(rows, idMap, logRows, ctx), onlineOperations: parseOnlineOperations(opRows, ctx.session.orgId) };
+  const unreadable = parseUnreadableRecords(opRows, ctx.session.orgId);
+  const payload: QueueExportPayload = {
+    ...buildPayload(rows, idMap, logRows, ctx),
+    ...(unreadable.length ? { formatVersion: QUEUE_EXPORT_FORMAT_VERSION_UNREADABLE } : {}),
+    onlineOperations: parseOnlineOperations(opRows, ctx.session.orgId),
+    unreadableOnlineRecords: unreadable,
+  };
   const digests = await Promise.all(rows.map(async (r) => ({ opId: r.localId, digest: await entryDigest(r) })));
   return { payload, digests };
 }
@@ -104,21 +111,23 @@ export async function collectQueueExport(db: LocalDb, ctx: QueueExportContext): 
   return (await collectQueueExportSnapshot(db, ctx)).payload;
 }
 
-const ONLINE_OP_PREFIX = "online-op:";
-
 /** Unresolved online-only operations (stores/data/onlineOnly.ts records) of
  *  one organisation (`orgId`), or of the whole till when no session is known
- *  (the sign-in screen — the same scope as the queue itself). */
-function parseOnlineOperations(rows: readonly { value?: string }[], orgId: string | null = null): QueueExportPayload["onlineOperations"] {
+ *  (the sign-in screen — the same scope as the queue itself). Records this
+ *  build cannot read are NOT here: see parseUnreadableRecords. */
+function parseOnlineOperations(rows: readonly { key: string; value?: string }[], orgId: string | null = null): QueueExportPayload["onlineOperations"] {
   const out: QueueExportPayload["onlineOperations"] = [];
   for (const r of rows) {
     try {
-      const op = JSON.parse(r.value ?? "null") as Record<string, unknown> | null;
-      if (!op || op.v !== 2 || op.status !== "unresolved" || typeof op.id !== "string") continue;
-      if (orgId && op.orgId !== orgId) continue;            // another organisation's: never in this export
+      const c = classifyOnlineRecord(r);
+      if (!("op" in c)) continue;
+      const op = c.op;
+      if (op.status !== "unresolved") continue;
+      // another organisation's: never in this export (one that names none is kept — it might be this one's)
+      if (orgId && typeof op.orgId === "string" && op.orgId && op.orgId !== orgId) continue;
       const args = (op.args ?? {}) as Record<string, unknown>;
       out.push({
-        id: op.id, name: String(op.name), idempotencyKey: typeof args.p_idempotency_key === "string" ? args.p_idempotency_key : null,
+        id: String(op.id), name: String(op.name), idempotencyKey: typeof args.p_idempotency_key === "string" ? args.p_idempotency_key : null,
         userId: typeof op.userId === "string" ? op.userId : null, orgId: typeof op.orgId === "string" ? op.orgId : null,
         backendOrigin: typeof op.backendOrigin === "string" ? op.backendOrigin : null,
         createdAt: String(op.createdAt), attempts: typeof op.attempts === "number" ? op.attempts : 0,
@@ -126,11 +135,31 @@ function parseOnlineOperations(rows: readonly { value?: string }[], orgId: strin
         uncertain: true, lastError: typeof op.lastError === "string" ? op.lastError.slice(0, 300) : null, blocksReplacement: true,
       });
     } catch {
-      /* unreadable record: skipped */
+      /* counted as unreadable by parseUnreadableRecords */
     }
   }
   return out;
 }
+
+/** Records the till cannot read (corrupt, or a newer build's), raw and
+ *  verbatim — never dropped (deployment-blocker pass). Scoped like the
+ *  operations, except that a record whose organisation cannot be read is
+ *  always included (it might be this organisation's). */
+function parseUnreadableRecords(rows: readonly { key: string; value?: string }[], orgId: string | null = null): UnreadableOnlineRecordExport[] {
+  const out: UnreadableOnlineRecordExport[] = [];
+  for (const r of rows) {
+    // an owner's set-aside record stays in every export (its outcome is unknown)
+    const u = r.key.startsWith(UNREADABLE_SET_ASIDE_PREFIX) ? setAsideRecord(r) : (() => { const c = classifyOnlineRecord(r); return "unreadable" in c ? c.unreadable : null; })();
+    if (u && unreadableInScope(u, orgId)) out.push(u);
+  }
+  return out;
+}
+
+/** Every online-operation record row, the owner's set-aside ones included. */
+const onlineRows = (db: LocalDb) => Promise.all([
+  db.syncState.where("key").startsWith(ONLINE_OP_PREFIX).toArray(),
+  db.syncState.where("key").startsWith(UNREADABLE_SET_ASIDE_PREFIX).toArray(),
+]).then(([a, b]) => [...a, ...b]);
 
 function parseLog(rows: readonly { value?: string }[]): QueueExportPayload["reconciliationLog"] {
   const out: QueueExportPayload["reconciliationLog"] = [];
@@ -166,14 +195,39 @@ function buildPayload(
     redactedFields: counter.n,
     reconciliationLog: parseLog(logRows),
     onlineOperations: [],
+    unreadableOnlineRecords: [],
   };
 }
 
 /** Counts only (for the dialog, before anything is decrypted or written). */
 /** Unresolved online-only money operations (of `orgId`, or the whole till). */
 export async function countUnresolvedOnlineOperations(db: LocalDb, orgId: string | null = null): Promise<number> {
-  const rows = await db.syncState.where("key").startsWith(ONLINE_OP_PREFIX).toArray();
-  return parseOnlineOperations(rows, orgId).length;
+  return (await countOnlineRecords(db, orgId)).total;
+}
+
+/** The syncState keys of every unresolved online operation and unreadable
+ *  record on the till (any organisation) — the updater guard counts them as
+ *  unsynced work. Throws when the store cannot be read (the guard then
+ *  reports nothing and the install stays blocked). */
+export async function onlineRecordKeysBlockingInstall(db: LocalDb): Promise<string[]> {
+  const rows = await onlineRows(db);
+  return rows.filter((r) => {
+    if (r.key.startsWith(UNREADABLE_SET_ASIDE_PREFIX)) return true;   // outcome unknown: like a set-aside entry
+    const c = classifyOnlineRecord(r);
+    return "unreadable" in c || c.op.status === "unresolved";
+  }).map((r) => r.key);
+}
+
+/** Unresolved operations and unreadable records (of `orgId`, or the whole
+ *  till). Throws when the store cannot be read (callers fail closed). */
+export async function countOnlineRecords(db: LocalDb, orgId: string | null = null, userId: string | null = null): Promise<{ unresolved: number; unreadable: number; total: number }> {
+  const rows = await onlineRows(db);
+  // `userId`: only that user's own operations (the own-scope view's badge)
+  const unresolved = parseOnlineOperations(rows, orgId).filter((o) => !userId || o.userId === userId).length;
+  // the owner's set-aside records are exported and block an install, but no
+  // longer block new entries: the badge / sign-in warning does not count them
+  const unreadable = parseUnreadableRecords(rows, orgId).filter((r) => !r.setAside).length;
+  return { unresolved, unreadable, total: unresolved + unreadable };
 }
 
 export async function countQueue(db: LocalDb, orgId: string | null = null): Promise<QueueExportSummary> {
@@ -181,7 +235,7 @@ export async function countQueue(db: LocalDb, orgId: string | null = null): Prom
   // is a supplier payment of unknown outcome can still export it.
   const [rows, opRows] = await db.transaction("r", db.syncOutbox, db.syncState, async () => [
     await db.syncOutbox.toArray(),
-    await db.syncState.where("key").startsWith(ONLINE_OP_PREFIX).toArray(),
+    await onlineRows(db),
   ] as const);
-  return summarize(rows.map((r) => ({ status: r.status, opType: r.name })), parseOnlineOperations(opRows, orgId).length);
+  return summarize(rows.map((r) => ({ status: r.status, opType: r.name })), parseOnlineOperations(opRows, orgId).length, parseUnreadableRecords(opRows, orgId).length);
 }

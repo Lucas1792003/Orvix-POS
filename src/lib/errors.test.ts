@@ -13,6 +13,7 @@ import {
   isStorageError,
   mapSupabaseError,
   OFFLINE_AUTHORIZATION_ERROR,
+  UNRESOLVED_OPERATION_ERROR,
 } from "./errors";
 
 describe("error classifiers", () => {
@@ -155,6 +156,14 @@ describe("getErrorMessage", () => {
   it("strips multi-line and JSON-shaped raw messages", () => {
     const ugly = { message: "{ \"code\": 500, \"details\": \"server exploded\" }" };
     expect(getErrorMessage(ugly, "Save failed.")).toBe("Save failed.");
+  });
+});
+
+describe("unresolved-operation refusals", () => {
+  it("are shown as written (the cashier must learn why nothing was sent)", () => {
+    const err = new Error("This till holds a payment record it cannot read (damaged, or written by a newer version) that may be this same operation. Nothing was sent.");
+    err.name = UNRESOLVED_OPERATION_ERROR;
+    expect(getErrorMessage(err, "Could not record supplier payment.")).toMatch(/cannot read/);
   });
 });
 

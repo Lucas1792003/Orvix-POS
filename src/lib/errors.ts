@@ -25,6 +25,8 @@ export const ERROR_MESSAGES = {
 // for the cashier and must be shown as is — while offline, the generic
 // mapping below would otherwise turn it into "Network error".
 export const OFFLINE_AUTHORIZATION_ERROR = "OfflineAuthorizationError";
+// stores/data/operationPrompt.ts UnresolvedOperationError (same reason).
+export const UNRESOLVED_OPERATION_ERROR = "UnresolvedOperationError";
 
 // Postgres SQLSTATE codes we care about.
 // 42501 - insufficient_privilege (RLS / RBAC deny)
@@ -296,6 +298,12 @@ const looksLikeFriendlyMessage = (message: string): boolean => {
 export const getErrorMessage = (error: AnyError, fallback?: string): string => {
   if (!error) return fallback ?? ERROR_MESSAGES.unknown;
   if (error?.name === OFFLINE_AUTHORIZATION_ERROR && typeof error.message === "string" && error.message) {
+    return error.message;
+  }
+  // "Nothing was sent" refusals of money operations (an earlier attempt or an
+  // unreadable record may be this same payment): written for the cashier and
+  // the reason must reach them — never replaced by a generic "could not record".
+  if (error?.name === UNRESOLVED_OPERATION_ERROR && typeof error.message === "string" && error.message) {
     return error.message;
   }
 

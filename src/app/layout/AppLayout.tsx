@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Outlet, useNavigate } from "react-router-dom";
+import { Link, Outlet, useNavigate } from "react-router-dom";
+import { hasPermission, ROUTE_PERMISSIONS } from "../../lib/permissions";
 import { Sidebar } from "./Sidebar";
 import { SmallScreenGuard } from "./SmallScreenGuard";
 import { Button } from "../../components/ui/Button";
@@ -40,7 +41,12 @@ export const AppLayout = () => {
   const currentOrgId = useAuthStore((state) => state.currentOrgId);
   // Online-only money operations whose outcome is unknown: NOT queued work —
   // shown apart, and they make the recovery export available on their own.
-  const unresolvedMoneyOps = useUnresolvedOnlineOperations(currentOrgId);
+  // Where the badge leads: the owner's organisation-wide Sync page, or the
+  // signed-in user's own unresolved operations (then it counts only those).
+  const currentUserIdForBadge = useAuthStore((state) => state.currentUserId);
+  const currentUserForBadge = useDataStore((state) => state.users.find((u) => u.id === currentUserIdForBadge));
+  const canSeeOrgUnresolved = hasPermission(currentUserForBadge, ROUTE_PERMISSIONS.adminSyncConflicts);
+  const moneyOps = useUnresolvedOnlineOperations(currentOrgId, canSeeOrgUnresolved ? null : currentUserIdForBadge ?? null);
   const needsReauth = useSyncStore((state) => state.needsReauth);
   const isDraining = useSyncStore((state) => state.isDraining);
   const inventorySyncState = useSyncStore((state) => state.inventorySyncState);
@@ -276,13 +282,24 @@ export const AppLayout = () => {
             {isDraining ? "Syncing — " : ""}{queuedLabel}
           </div>
         )}
-        {unresolvedMoneyOps > 0 && (
-          <div className="rounded-full bg-rose-100 px-3 py-1 text-xs text-rose-800 shadow-lg border border-rose-200" data-testid="online-ops-unresolved"
-            title="It may already have been applied on the server. Check it under Sync › Unresolved operations; do not enter it again.">
-            {unresolvedMoneyOps} {unresolvedMoneyOps === 1 ? "payment awaits" : "payments await"} server confirmation — do not enter again
+        {moneyOps.unresolved > 0 && (
+          <Link
+            to={canSeeOrgUnresolved ? "/app/admin/sync-conflicts" : "/app/sync/unresolved"}
+            className="rounded-full bg-rose-100 px-3 py-1 text-xs text-rose-800 shadow-lg border border-rose-200 hover:bg-rose-50" data-testid="online-ops-unresolved"
+            title={canSeeOrgUnresolved
+              ? "It may already have been applied on the server. Check it under Sync › Unresolved operations; do not enter it again."
+              : "It may already have been applied on the server. Open your unresolved operations to check it; do not enter it again."}>
+            {moneyOps.unresolved} {moneyOps.unresolved === 1 ? "payment awaits" : "payments await"} server confirmation — do not enter again
+          </Link>
+        )}
+        {(moneyOps.unreadable > 0 || moneyOps.readError) && (
+          <div role="alert" className="max-w-xs rounded-2xl bg-rose-100 px-3 py-1 text-xs text-rose-900 shadow-lg border border-rose-300" data-testid="online-ops-unreadable">
+            {moneyOps.readError
+              ? t("unresolved", "readError")
+              : `${moneyOps.unreadable} payment ${moneyOps.unreadable === 1 ? "record" : "records"} on this till cannot be read — do not enter payments again; export the pending data and tell the owner.`}
           </div>
         )}
-        {(pendingCount > 0 || conflictCount > 0 || quarantinedCount > 0 || unresolvedMoneyOps > 0) && (
+        {(pendingCount > 0 || conflictCount > 0 || quarantinedCount > 0 || moneyOps.total > 0 || moneyOps.readError) && (
           // Outage recovery: any signed-in role can save an encrypted copy of
           // the queue, offline too (docs/selfhost-migration/phase-f/queue-export.md).
           <button

@@ -598,6 +598,7 @@ describe("stabilization pass", () => {
     const [a, b] = await rows();
     for (const r of [a, b]) await localDb.syncOutbox.update(r.localId, { status: "archived", statusBeforeArchive: "syncing", inDoubt: true, writeAhead: true });
     await fake.rpc("op_execute", { p_key: b.idempotencyKey, p_rpc: "complete_sale", p_args: sale(2), p_actor_id: "user-1" });
+    actingRole = "ADMIN";                                   // an owner action (enforced in confirmWithServer itself)
     expect(await confirmWithServer(a.localId)).toBe("abandoned");
     expect(await localDb.syncOutbox.get(a.localId)).toMatchObject({ status: "archived", serverOutcome: "abandoned" });
     expect(fake.server.idempotency.get(a.idempotencyKey!)).toMatchObject({ state: "abandoned" });

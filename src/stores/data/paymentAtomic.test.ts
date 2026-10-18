@@ -83,15 +83,17 @@ describe("M1: a stale in-memory 'settled' note never hides an unresolved payment
     lookup.release(NOT_FOUND);                                          // the Retry goes on with its own decision
     const retried = await retry;
     // The Retry was claimed against the STORED record: it is already settled
-    // ("not applied", by A's own first attempt) -> nothing is resent.
+    // (A's "not delivered" FENCED the key on the server — deployment-blocker
+    // pass: never the client's word alone on an 086 server) -> nothing is resent.
     expect(retried.error?.message ?? "").toMatch(/already settled/);
     expect(fake.callsFor("op_execute").filter((c) => c.args.p_key === op.args.p_idempotency_key)).toHaveLength(1);
-    expect(await stored(op.id)).toMatchObject({ status: "settled", outcome: "not-applied", decidedBy: "client", attempts: 1 });
+    expect(await stored(op.id)).toMatchObject({ status: "settled", outcome: "abandoned", decidedBy: "server", attempts: 1 });
+    expect(fake.server.idempotency.get(op.args.p_idempotency_key)).toMatchObject({ state: "abandoned" });
     // the cashier enters it again: no earlier payment can commit any more -> one new payment
     const replacement = await callOnlineOnly("pay_supplier_lump_sum", payArgs, { retries: 0 });
     expect(replacement.error).toBeNull();
     expect(executions()).toBe(1);                                       // ONE financial effect
-    expect(fake.server.idempotency.get(op.args.p_idempotency_key)).toBeUndefined();   // the original key never ran
+    expect(fake.server.idempotency.get(op.args.p_idempotency_key)).toMatchObject({ state: "abandoned" });   // the original key can never run
   });
 
   it("the Retry claims its attempt FIRST; A's late 'not delivered' then decides nothing; while B is in flight the payment stays LISTED and a replacement is refused -> at most ONE payment", async () => {

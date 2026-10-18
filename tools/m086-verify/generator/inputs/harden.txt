@@ -1,0 +1,69 @@
+public.adjust_stock(text,text,text,integer,text,text,integer,timestamp with time zone,text,uuid)|true
+public.app_can_for_shop(text,text)|true
+public.app_has_perm(text)|true
+public.app_org_id()|true
+public.app_org_shop_ids()|true
+public.app_org_user_ids()|true
+public.app_require_org_items(jsonb)|true
+public.app_require_org(text,text)|true
+public.app_role()|true
+public.app_seed_default_price_levels(text)|true
+public.app_setup_needed()|true
+public.app_shop_id()|true
+public.app_shop_in_org(text)|true
+public.app_storage_can_write_path(text)|true
+public.app_storage_object_in_my_org(text)|true
+public.app_storage_object_org(text)|true
+public.app_storage_owner_in_org(text,uuid)|true
+public.app_upload_session_public_url(text)|false
+public.app_user_id()|true
+public.approve_purchase_order(text,uuid)|true
+public.approve_refund_request(text,uuid)|true
+public.approve_stock_transfer(text,uuid)|true
+public.approve_void_request(text,uuid)|true
+public.attach_product_image_upload_session_token(text,text)|true
+public.bootstrap_first_admin()|true
+public.cancel_product_image_upload_session(text)|true
+public.cancel_purchase_order(text,text,uuid)|true
+public.cancel_stock_transfer(text,text,uuid)|true
+public.claim_phone_upload_token_issue(text)|true
+public.close_shift(text,integer,text,timestamp with time zone,text,uuid)|true
+public.complete_product_image_upload_session(text,text,text,integer,text)|true
+public.complete_sale(text,text,text,integer,numeric,jsonb,timestamp with time zone,uuid)|true
+public.complete_stock_transfer(text)|true
+public.create_app_user(text,text,text,text,text,uuid,text[],text[],uuid)|true
+public.create_product_image_upload_session(text,text)|true
+public.create_purchase_order(text,text,text,jsonb,uuid)|true
+public.create_refund_void_request(text,text,text,jsonb,timestamp with time zone,text,uuid)|true
+public.create_stock_transfer(text,text,text,jsonb,uuid)|true
+public.create_supplier(text,text,text,text,text,text,text,uuid)|true
+public.current_app_user()|true
+public.deactivate_app_user(text,boolean,uuid)|true
+public.delete_product(text,uuid)|true
+public.dispatch_stock_transfer(text,timestamp with time zone,text,uuid)|true
+public.enforce_same_org_refs()|false
+public.ensure_inventory_rows_for_product()|true
+public.ensure_inventory_rows_for_shop()|true
+public.get_product_image_upload_session_by_token(text)|true
+public.get_product_image_upload_session_status(text)|true
+public.guard_user_privilege_columns()|false
+public.idem_begin(uuid,text,text)|true
+public.idem_finish(uuid,jsonb)|true
+public.log_audit_event(text,text,text,text,text,uuid)|true
+public.log_receipt_reprint(text,uuid)|true
+public.open_shift(text,integer,timestamp with time zone,text,uuid)|true
+public.organizations_seed_business_profile()|true
+public.organizations_seed_price_levels()|true
+public.pay_supplier_lump_sum(text,text,integer,text,text,text,uuid)|true
+public.product_barcodes_set_org_id()|false
+public.prune_idempotency_keys()|true
+public.receive_purchase_order(text,jsonb,timestamp with time zone,text,uuid)|true
+public.receive_stock_transfer(text,jsonb,timestamp with time zone,text,uuid)|true
+public.record_supplier_payment(text,integer,text,text,text,timestamp with time zone,text,uuid)|true
+public.reject_refund_void_request(text,text,uuid)|true
+public.reject_stock_transfer(text,text,uuid)|true
+public.replace_manager(text,text,uuid)|true
+public.set_org_id_from_caller()|false
+public.update_app_user(text,text,text,text,text[],text[],uuid)|true
+public.update_supplier(text,text,text,text,text,text,text,text,boolean,uuid)|true
+public.void_supplier_payment(text,text,uuid)|true

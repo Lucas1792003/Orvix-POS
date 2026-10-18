@@ -2,14 +2,17 @@ import { localDb } from "../../lib/localDb";
 import { newId } from "../../lib/id";
 import { classifyFailure } from "../../lib/failureClass";
 import {
-  callRpc, IDEMPOTENCY_KEY_ARG, keepUnknown, lookupOperation, newIdempotencyKey, ONLINE_ONLY_RETRIES, RpcError, stampOperationArgs,
+  callRpc, executorCapability, executorDemonstrated, IDEMPOTENCY_KEY_ARG, keepUnknown, lookupOperation, newIdempotencyKey, ONLINE_ONLY_RETRIES, RpcError, stampOperationArgs,
   type OperationStatus, type RpcOutcome,
 } from "./idempotentRpc";
 import { replyProblem } from "./replyShapes";
 import { verifiedReload } from "./verifiedReload";
 import { askAboutUnresolved, UnresolvedOperationError, type UnresolvedOperationInfo } from "./operationPrompt";
 import { useAuthStore } from "../authStore";
-import { blockingEarlierWork, drainOutbox, isOwnerSession } from "./outbox";
+import { blockingEarlierWork, drainOutbox, isOwnerSession, ownerAudit } from "./outbox";
+import { wasExported } from "../../lib/queueExport/exportRecord";
+import { classifyOnlineRecord, UNREADABLE_SET_ASIDE_PREFIX, unreadableInScope, type UnreadableOnlineRecord } from "../../lib/onlineOpRecord";
+export { classifyOnlineRecord, type UnreadableOnlineRecord };
 import { currentBackendOrigin } from "../../lib/backendOrigin";
 
 // ----------------------------------------------------------------------
@@ -172,26 +175,43 @@ async function save(op: OnlineOperation): Promise<void> {
   await localDb.syncState.put({ key: PREFIX + op.id, value: JSON.stringify(op), updatedAt: op.updatedAt });
 }
 
+/** The stored record as an operation, or null when this build cannot read it
+ *  (the same rule as classifyOnlineRecord: never acted on). */
 const parseOp = (value: string | undefined): OnlineOperation | null => {
-  const op = JSON.parse(value ?? "") as OnlineOperation;
-  return op?.v === 2 && op.id ? op : null;
+  const c = classifyOnlineRecord<OnlineOperation>({ key: "", value });
+  return "op" in c ? c.op : null;
 };
 
-/** Reads fail CLOSED: an unreadable store throws (callers send nothing). */
-async function loadAll(): Promise<OnlineOperation[]> {
+/** Every stored record, readable or not. Reads fail CLOSED: an unreadable
+ *  STORE throws (callers send nothing). */
+async function loadRecords(): Promise<{ ops: OnlineOperation[]; unreadable: UnreadableOnlineRecord[] }> {
   const rows = await localDb.syncState.filter((e) => e.key.startsWith(PREFIX)).toArray();
-  const out: OnlineOperation[] = [];
+  const ops: OnlineOperation[] = [];
+  const unreadable: UnreadableOnlineRecord[] = [];
   for (const row of rows) {
-    try {
-      const op = parseOp(row.value);
-      if (op) out.push(op);
-    } catch {
-      // An unparseable record carries no identity it could be resent under;
-      // it is never treated as settled either (see listUnresolvedOnlineOperations).
-    }
+    const c = classifyOnlineRecord<OnlineOperation>(row);
+    if ("op" in c) ops.push(c.op);
+    else unreadable.push(c.unreadable);
   }
-  return out;
+  return { ops, unreadable };
 }
+
+async function loadAll(): Promise<OnlineOperation[]> {
+  return (await loadRecords()).ops;
+}
+
+/** Unreadable records that may belong to the signed-in organisation (one
+ *  that claims another organisation is not shown here — it is exported from
+ *  the sign-in screen, the whole till). */
+export async function listUnreadableOnlineRecords(): Promise<UnreadableOnlineRecord[]> {
+  const { orgId } = identity();
+  return (await loadRecords()).unreadable.filter((r) => unreadableInScope(r, orgId));
+}
+
+/** Could this unreadable record be the operation `name` / `scope`? Unless it
+ *  names ANOTHER operation (or scope) it might be the same: yes. */
+const mayBeSameOperation = (r: UnreadableOnlineRecord, name: string, scope: string): boolean =>
+  !(r.claimed.scope && r.claimed.scope !== scope) && !(r.claimed.name && r.claimed.name !== name);
 
 /** Atomically read the stored record, decide, and write the result (or
  *  nothing). `decide` gets the CURRENT stored record; it returns the record
@@ -359,6 +379,14 @@ async function send(op: OnlineOperation, retries: number, fresh = false): Promis
     return keepPending("the server holds a different request under this key; it may have been applied.", outcome.error);
   }
   if (!failure.mayHaveCommitted) {
+    // Deployment-blocker pass: the client's own evidence never makes it
+    // replaceable on a server that HAS 086 — its key is stopped there first
+    // (fenced) or the server's decision taken; if that is impossible, or
+    // whether the server has 086 is unknown, it is held. Only a server known
+    // to lack 086 (no fence exists) keeps the client's evidence.
+    if ((await executorDemonstrated()) || executorCapability() !== "absent") {
+      return decideOnServer(claimed, myAttempt, outcome, keepPending);
+    }
     // The first attempt of a fresh operation proved it was not applied —
     // recorded only while it is still the latest attempt.
     const settledHere = await settle(claimed, failure.retryable ? "not-applied" : "refused", "client", myAttempt);
@@ -368,6 +396,40 @@ async function send(op: OnlineOperation, retries: number, fresh = false): Promis
     return outcome;
   }
   return keepPending("the server did not confirm this (its reply was lost or unclear).", outcome.error);
+}
+
+/** A client-side "not applied" on an 086 server: fence the key (a late copy
+ *  can never run) or take the server's decision; anything else holds it. */
+async function decideOnServer(
+  op: OnlineOperation, myAttempt: number, outcome: RpcOutcome,
+  keepPending: (detail: string, cause: RpcError | null) => Promise<RpcOutcome>,
+): Promise<RpcOutcome> {
+  // Only the LATEST attempt asks: an older one never stops a newer attempt
+  // (a Retry) — that attempt's own outcome decides.
+  const stored = await loadAll().then((all) => all.find((o) => o.id === op.id), () => undefined);
+  if (!stored || stored.status !== "unresolved" || stored.attempts !== myAttempt) {
+    return { data: null, status: outcome.status, error: pendingError(op, outcome.error, "another attempt of it was sent meanwhile (or its record could not be read); that attempt's outcome decides it.") };
+  }
+  const key = op.args[IDEMPOTENCY_KEY_ARG];
+  if (typeof key !== "string") return keepPending("it has no key to confirm on the server.", outcome.error);
+  const { status, error } = await lookupOperation(op.name, key, { fence: true, actorId: op.userId, args: op.args });
+  if (!error && status?.status === "abandoned") {
+    await settle(op, "abandoned");
+    return outcome;                                       // stopped on the server: it never runs
+  }
+  if (!error && status?.status === "rejected") {
+    await settle(op, "refused");
+    return outcome;
+  }
+  if (!error && status?.status === "committed") {
+    await settle(op, "applied");
+    void verifiedReload();
+    // an unreadable stored reply is never handed back as the operation's result
+    const readable = status.response != null && replyProblem(op.name, status.response) === null;
+    return { data: readable ? status.response : null, error: null, serverOutcome: "committed", status: outcome.status,
+      ...(readable ? {} : { responseUnavailable: status.withheld ? "withheld" as const : "purged" as const }) };
+  }
+  return keepPending("it could not be confirmed or stopped on the server; it may still be applied.", error ?? outcome.error);
 }
 
 /**
@@ -416,10 +478,21 @@ async function run(
     }
   }
   let existing: OnlineOperation[] = [];
+  let unreadable: UnreadableOnlineRecord[] = [];
   try {
-    existing = (await loadAll()).filter((op) => isUnresolved(op) && op.orgId === orgId && op.scope === scope);
+    const records = await loadRecords();
+    existing = records.ops.filter((op) => isUnresolved(op) && op.orgId === orgId && op.scope === scope);
+    unreadable = records.unreadable.filter((r) => mayBeSameOperation(r, name, scope));
   } catch (err) {
     throw new Error(`Not sent: the till could not check for an unresolved earlier attempt (${err instanceof Error ? err.message : String(err)}).`);
+  }
+  if (unreadable.length) {
+    // It may be an earlier attempt of this very payment (outcome unknown):
+    // its key cannot be read, so it cannot be asked about or stopped.
+    throw new UnresolvedOperationError(
+      `This till holds ${unreadable.length === 1 ? "a payment record it cannot read" : `${unreadable.length} payment records it cannot read`} (damaged, or written by a newer version) that may be this same operation. Nothing was sent. Export the pending data (Sync) and have the owner resolve it before entering it again.`,
+      unreadable.map((r) => ({ kind: "operation" as const, summary: `Unreadable record${r.claimed.name ? ` (${FRIENDLY[r.claimed.name] ?? r.claimed.name}?)` : ""}`, createdAt: "" })),
+    );
   }
 
   if (existing.length) {
@@ -509,9 +582,11 @@ async function settleEarlier(ops: OnlineOperation[]): Promise<"clear" | "applied
 
 /** Unresolved operations of this organisation (newest first). Prunes
  *  settled records past the server's key retention. */
-export async function listUnresolvedOnlineOperations(now = Date.now()): Promise<(OnlineOperation & { retryable: boolean; mine: boolean; foreign: boolean })[]> {
+export async function listUnresolvedOnlineOperations(
+  now = Date.now(), opts: { own?: boolean } = {},
+): Promise<(OnlineOperation & { retryable: boolean; mine: boolean; foreign: boolean })[]> {
   const { orgId, userId } = identity();
-  const all = await loadAll();
+  const all = (await loadAll()).filter((op) => !opts.own || (userId !== null && op.userId === userId));
   const stale = all.filter((op) => op.status === "settled" && now - Date.parse(op.updatedAt) > SETTLED_KEEP_MS);
   if (stale.length) await localDb.syncState.bulkDelete(stale.map((op) => PREFIX + op.id)).catch(() => undefined);
   return all
@@ -526,6 +601,11 @@ export async function listUnresolvedOnlineOperations(now = Date.now()): Promise<
 export async function checkOnlineOperation(id: string): Promise<{ absent: boolean; status: OperationStatus | null; error: RpcError | null }> {
   const op = (await loadAll()).find((o) => o.id === id);
   if (!op || !isUnresolved(op)) throw new Error("This operation is no longer unresolved.");
+  // Own organisation only; anyone but the owner checks only their OWN
+  // operations (the server's own rules apply as well: a lookup never fences).
+  const me = identity();
+  if (op.orgId !== me.orgId) throw new Error("This operation belongs to another organisation; it cannot be checked here.");
+  if (!isOwnerSession() && op.userId !== me.userId) throw new Error("Only the person who entered it (or the owner) can check this operation.");
   if (op.backendOrigin && op.backendOrigin !== currentBackendOrigin()) {
     throw new Error("This operation was made against another server; it can only be checked there (or verified by an owner). Nothing was asked here.");
   }
@@ -619,7 +699,37 @@ export async function markOnlineOperationVerified(id: string): Promise<void> {
   }
 }
 
-/** Tests / diagnostics. */
+/** Tests / diagnostics: unresolved operations plus unreadable records. */
 export async function countUnsettledOnlineOperations(): Promise<number> {
-  return (await loadAll()).filter(isUnresolved).length;
+  const { ops, unreadable } = await loadRecords();
+  return ops.filter(isUnresolved).length + unreadable.length;
+}
+
+export { UNREADABLE_SET_ASIDE_PREFIX };
+
+/** Owner (ADMIN) only, and only after the pending data was exported in this
+ *  session: move an unreadable record out of the way of new operations. The
+ *  raw record is KEPT (under another key) and the action audited — it is not
+ *  "cancelled" or "not applied": nobody can tell what it was. */
+export async function setAsideUnreadableOnlineRecord(key: string): Promise<void> {
+  if (!isOwnerSession()) throw new Error("Only the owner (administrator) can set aside an unreadable record.");
+  // Only once THIS record was in an export of this session (its raw contents saved).
+  if (!wasExported(key)) throw new Error("Export the pending data first (in this session, with this record in it): the record is kept, but its contents must be saved for recovery.");
+  const moved = await localDb.transaction("rw", localDb.syncState, async () => {
+    const row = await localDb.syncState.get(key);
+    if (!row || !key.startsWith(PREFIX)) return null;
+    const c = classifyOnlineRecord<OnlineOperation>(row);
+    if ("op" in c) throw new Error("This record is readable; it is resolved under Unresolved operations, not set aside.");
+    if (!unreadableInScope(c.unreadable, identity().orgId)) throw new Error("This record claims another organisation; only its own owner can set it aside.");
+    const at = new Date().toISOString();
+    await localDb.syncState.put({
+      key: `${UNREADABLE_SET_ASIDE_PREFIX}${key.slice(PREFIX.length)}`, updatedAt: at,
+      value: JSON.stringify({ originalKey: key, raw: c.unreadable.raw, reason: c.unreadable.reason, setAsideAt: at, setAsideBy: identity().userId }),
+    });
+    await localDb.syncState.delete(key);
+    return c.unreadable;
+  });
+  if (moved) {
+    await ownerAudit(key, `unreadable online-operation record set aside (${moved.reason}${moved.claimed.name ? `, claims ${moved.claimed.name}` : ""}); raw record kept under ${UNREADABLE_SET_ASIDE_PREFIX}; its outcome is UNKNOWN`);
+  }
 }

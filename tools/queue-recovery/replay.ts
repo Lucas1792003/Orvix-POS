@@ -489,9 +489,16 @@ export async function replayExport(payload: QueueExportPayload, options: ReplayO
     const outcomeUnknown = e.inDoubt === true || sending(e);
     const nothingStaged = (e.provisional?.length ?? 0) === 0;
     const legacyFile = payload.formatVersion === 1;
-    const strandedFirst = e.kind === "rpc" && sending(e) && e.writeAhead === true && e.staged !== true && (e.attempts === 0 || nothingStaged);
-    const legacyInDoubt = e.kind === "rpc" && !sending(e) && e.writeAhead === true && e.inDoubt === true && (e.staged === null || e.staged === undefined) && nothingStaged;
-    const evidenceElsewhere = legacyInDoubt && (e.opType === "close_shift" || e.opType === "dispatch_stock_transfer");
+    // (deployment-blocker pass: the till's ONE rule, outbox.ts offlineAuthorisation)
+    const evidenceOp = e.opType === "close_shift" || e.opType === "dispatch_stock_transfer";
+    const unflagged = e.staged === null || e.staged === undefined;
+    // (a write-ahead row with no staged flag and no attempt recorded is a
+    //  first online attempt whatever its status — offlineAuthorisation)
+    const strandedFirst = e.kind === "rpc" && e.writeAhead === true && e.staged !== true
+      && ((unflagged && e.attempts === 0) || (sending(e) && (e.attempts === 0 || (nothingStaged && !evidenceOp))));
+    const strandedWithLocalProof = e.kind === "rpc" && sending(e) && e.writeAhead === true && unflagged && e.attempts > 0 && nothingStaged && evidenceOp;
+    const legacyInDoubt = e.kind === "rpc" && !sending(e) && e.writeAhead === true && e.inDoubt === true && unflagged && nothingStaged;
+    const evidenceElsewhere = (legacyInDoubt && evidenceOp) || strandedWithLocalProof;
     const neverAuthorised = e.kind === "rpc" && (e.staged === false && outcomeUnknown || strandedFirst || (legacyInDoubt && !evidenceElsewhere));
     const authorisationUnknown = e.kind === "rpc" && !neverAuthorised && (evidenceElsewhere || (legacyFile && sending(e)));
     const fenceable = e.kind === "rpc" && (e.fenceRequired === true || neverAuthorised);
@@ -692,6 +699,15 @@ export async function replayExport(payload: QueueExportPayload, options: ReplayO
     report.ops.push({
       seq: null, opId: op.id, opType: op.name, idempotencyKey: op.idempotencyKey, outcome: "held",
       detail: `online-only operation, unresolved on the till (it may have been applied${op.backendOrigin ? ` on ${op.backendOrigin}` : ", server not recorded"}): verify it there; never replayed by this tool`,
+    });
+    report.counts.held++;
+  }
+  // Records the till could not read: each may be an unresolved payment.
+  for (const r of payload.unreadableOnlineRecords ?? []) {
+    report.onlineUnresolved! += 1;
+    report.ops.push({
+      seq: null, opId: r.key, opType: r.claimed.name ?? "unreadable-record", idempotencyKey: null, outcome: "held",
+      detail: `online-operation record the till could not read (${r.reason}); it may be an unresolved payment — an owner examines its raw contents; never replayed`,
     });
     report.counts.held++;
   }

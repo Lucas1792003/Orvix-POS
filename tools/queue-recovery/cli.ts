@@ -17,7 +17,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { installHostedBackendGuard } from "../../src/test/hostedGuard";
-import { decryptQueueExport, parseEnvelope, summarize, type QueueExportPayload } from "../../src/lib/queueExport/format";
+import { decryptQueueExport, parseEnvelope, summarize, summarizePayload, type QueueExportPayload } from "../../src/lib/queueExport/format";
 import { TargetError, confinedFetch, exitCodeFor, formatReport, replayExport, resolveTarget } from "./replay";
 
 // The hosted project is refused at the network boundary for this process.
@@ -100,6 +100,10 @@ function printSummary(p: QueueExportPayload): void {
     console.log(`UNRESOLVED ONLINE-ONLY OPERATIONS (${p.onlineOperations.length}) — they may have been applied; never replayed by this tool, verify them on their server:`);
     for (const o of p.onlineOperations) console.log(`  ${o.name.padEnd(28)}  key ${o.idempotencyKey?.slice(0, 8) ?? "-"}  by ${o.userId ?? "-"}  org ${o.orgId ?? "-"}  server ${o.backendOrigin ?? "(not recorded)"}  attempts ${o.attempts}  created ${o.createdAt}`);
   }
+  if (p.unreadableOnlineRecords.length) {
+    console.log(`UNREADABLE ONLINE-OPERATION RECORDS (${p.unreadableOnlineRecords.length}) — the till could not read them (damaged, or written by a newer version); each may be an unresolved payment. Raw contents are in the file (--json does not print them); nothing below is verified:`);
+    for (const r of p.unreadableOnlineRecords) console.log(`  ${r.key}  ${r.reason}  claims: ${r.claimed.name ?? "?"} org ${r.claimed.orgId ?? "?"} by ${r.claimed.userId ?? "?"} server ${r.claimed.backendOrigin ?? "?"} format ${JSON.stringify(r.claimed.version)}  (${r.raw.length} bytes)`);
+  }
   if (p.reconciliationLog.length) {
     console.log(`reconciliation log (${p.reconciliationLog.length}):`);
     for (const l of p.reconciliationLog) console.log(`  ${l.at}  ${l.event.padEnd(15)}  ${l.localId}  ${l.detail}`);
@@ -136,9 +140,10 @@ async function main(): Promise<number> {
       // Counts and identifiers only — payloads stay in the encrypted file.
       console.log(JSON.stringify({
         tillId: payload.tillId, exportedAt: payload.exportedAt, appVersion: payload.appVersion,
-        backendHost: payload.backendHost, session: payload.session, summary: summarize(payload.entries),
+        backendHost: payload.backendHost, session: payload.session, summary: summarizePayload(payload),
         entries: payload.entries.map((e) => ({ seq: e.seq, opId: e.opId, opType: e.opType, status: e.status, idempotencyKey: e.idempotencyKey, attempts: e.attempts, backendOrigin: e.backendOrigin, actorId: e.actorId, fenceRequired: e.fenceRequired, blocksQueue: e.blocksQueue, serverOutcome: e.serverOutcome })),
         onlineOperations: payload.onlineOperations.map((o) => ({ id: o.id, name: o.name, idempotencyKey: o.idempotencyKey, userId: o.userId, orgId: o.orgId, backendOrigin: o.backendOrigin, attempts: o.attempts, uncertain: o.uncertain })),
+        unreadableOnlineRecords: payload.unreadableOnlineRecords.map((r) => ({ key: r.key, reason: r.reason, claimed: r.claimed, bytes: r.raw.length })),
       }, null, 1));
     } else printSummary(payload);
     // Not "clean" while anything may have been applied without a server
@@ -149,7 +154,9 @@ async function main(): Promise<number> {
     if (undecided) console.log(`NOT CLEAN: ${undecided} entr${undecided === 1 ? "y is" : "ies are"} not decided on the server (it may have been applied).`);
     const ops = payload.onlineOperations.length;
     if (ops) console.log(`NOT CLEAN: ${ops} online-only operation${ops === 1 ? " has" : "s have"} no server decision (it may have been applied).`);
-    return payload.onlineOperations.length || undecided ? 4 : 0;
+    const unreadable = payload.unreadableOnlineRecords.length;
+    if (unreadable) console.log(`NOT CLEAN: ${unreadable} online-operation record${unreadable === 1 ? " is" : "s are"} unreadable (each may be an unresolved payment).`);
+    return ops || unreadable || undecided ? 4 : 0;
   }
 
   const targetFlag = args.flags.get("target");

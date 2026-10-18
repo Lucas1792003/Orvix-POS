@@ -31,7 +31,7 @@ async function inspect(p: QueueExportPayload): Promise<{ out: string; code: numb
 const base = (onlineOperations: QueueExportPayload["onlineOperations"]): QueueExportPayload => ({
   format: "shwephala-queue-export", formatVersion: 2, appVersion: "t", exportedAt: "2026-10-17T02:00:00.000Z",
   tillId: "till-abc123", backendHost: "pos.example.test", session: { userId: "user-1", orgId: "org-1", shopId: null, role: "MANAGER" },
-  entries: [], provisionalIdMap: [], redactedFields: 0, reconciliationLog: [], onlineOperations,
+  entries: [], provisionalIdMap: [], redactedFields: 0, reconciliationLog: [], onlineOperations, unreadableOnlineRecords: [],
 } as QueueExportPayload);
 
 describe("queue-recovery inspect", () => {
@@ -43,6 +43,17 @@ describe("queue-recovery inspect", () => {
     expect(r.code).toBe(4);
     expect(r.out).toMatch(/NOT CLEAN: 1 online-only operation has no server decision/);
     expect(r.out).toMatch(/pay_supplier_lump_sum .*key 0190a000 .*org org-1 .*server https:\/\/pos\.example\.test/);
+  }, 60_000);
+
+  it("format 3: an UNREADABLE online-operation record is listed (claims only, unverified) and the file is NOT CLEAN, exit 4", async () => {
+    const r = await inspect({ ...base([]), formatVersion: 3, unreadableOnlineRecords: [{
+      key: "online-op:op-bad", raw: "garbage", reason: "unparseable",
+      claimed: { name: null, scope: null, orgId: null, userId: null, backendOrigin: null, version: null },
+    }] } as QueueExportPayload);
+    expect(r.code).toBe(4);
+    expect(r.out).toMatch(/UNREADABLE ONLINE-OPERATION RECORDS \(1\)/);
+    expect(r.out).toMatch(/NOT CLEAN: 1 online-operation record is unreadable/);
+    expect(r.out).not.toContain("garbage");                               // raw contents stay in the encrypted file
   }, 60_000);
 
   it("an empty export is clean: exit 0", async () => {

@@ -468,30 +468,33 @@ export const SYNCING_STALE_MS = 2 * RPC_TIMEOUT_MS + 2 * 60_000;
  */
 export async function recoverStrandedSyncing(olderThanMs: number = SYNCING_STALE_MS, now: number = Date.now()): Promise<number> {
   const busy = await rowsInFlightAnywhere();
-  const n = await localDb.transaction("rw", localDb.syncOutbox, async () => {
+  const n = await localDb.transaction("rw", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, async () => {
     let n = 0;
-    await localDb.syncOutbox.where("status").equals("syncing").modify((entry: SyncOutboxEntry) => {
+    for (const entry of await localDb.syncOutbox.where("status").equals("syncing").toArray()) {
       // An online attempt of this (or another) window still waits for its reply.
-      if (busy.has(entry.localId)) return;
+      if (busy.has(entry.localId)) continue;
       const since = entry.syncingSince ? Date.parse(entry.syncingSince) : Number.NaN;
-      if (olderThanMs > 0 && Number.isFinite(since) && now - since < olderThanMs) return;
+      if (olderThanMs > 0 && Number.isFinite(since) && now - since < olderThanMs) continue;
+      // G1 Stage 1: a write-ahead row whose offline eligibility was never
+      // established (its FIRST online attempt, or an older build's row with
+      // nothing staged and no local proof) is never resent blindly: it is
+      // held and the drain asks the server, fencing it if it never arrived.
+      // One rule for every recovery path (offlineAuthorisation).
+      const auth = await offlineAuthorisation(entry);
       entry.status = "pending";
       // The request was sent and no reply arrived: it may have committed.
       entry.inDoubt = true;
-      // G1 Stage 1: a write-ahead row whose offline eligibility was never
-      // established (its FIRST online attempt, or a row with nothing staged
-      // that an older build left) is never resent blindly: it is held and
-      // the drain asks the server, fencing it if the server never saw it.
-      if (entry.writeAhead === true && entry.staged !== true && ((entry.attempts ?? 0) === 0 || !(entry.provisional?.length))) {
-        holdForRecovery(entry);
-      }
+      if (auth === "never") holdForRecovery(entry);
+      else if (entry.kind === "rpc" && entry.staged === undefined) entry.staged = true;   // keep the proof
       entry.attempts = (entry.attempts ?? 0) + 1;
       entry.failureKind = "transient";
-      entry.lastError = "Interrupted while sending (no reply from the server). Resent with the same idempotency key, so it cannot be applied twice.";
+      entry.lastError = auth === "never" ? NOT_YET_CONFIRMED_TEXT
+        : "Interrupted while sending (no reply from the server). Resent with the same idempotency key, so it cannot be applied twice.";
       entry.nextAttemptAt = undefined;
       delete entry.syncingSince;
+      await localDb.syncOutbox.put(entry);
       n += 1;
-    });
+    }
     return n;
   });
   if (n > 0) notifyQueueChanged();
@@ -524,6 +527,35 @@ async function stagedWithoutProvisional(entry: SyncOutboxEntry): Promise<boolean
   return false;
 }
 
+/**
+ * Deployment-blocker pass: ONE rule for whether an RPC entry was authorised
+ * offline — used by startup classification, stranded-attempt recovery,
+ * Retry, Restore and Confirm with server alike (and mirrored by the
+ * emergency recovery tool, which cannot see the local shift / transfer rows).
+ *  - held (`fenceRequired`) or refused offline (`staged: false`): never;
+ *  - `staged: true`, or not write-ahead (queued offline): authorised;
+ *  - a write-ahead row in its FIRST attempt while being sent (this build's
+ *    own interrupted online attempt): never established -> never;
+ *  - staged records, or (Batch 2A close / dispatch) the local row carrying
+ *    the operation's own key: authorised;
+ *  - otherwise in doubt / being sent with nothing staged: never; else (never
+ *    sent, nothing in doubt) authorised.
+ * Must run inside a transaction covering syncOutbox, shifts and stockTransfers
+ * when used to rewrite an entry.
+ */
+export async function offlineAuthorisation(entry: SyncOutboxEntry): Promise<"authorised" | "never"> {
+  if (entry.kind !== "rpc") return "authorised";
+  if (entry.fenceRequired === true || entry.staged === false) return "never";
+  if (entry.staged === true || entry.writeAhead !== true) return "authorised";
+  const sending = entry.status === "syncing" || entry.statusBeforeArchive === "syncing";
+  // A write-ahead row with no staged flag and NO attempt recorded is a first
+  // online attempt (every build records attempts: 1 when an attempt falls
+  // back to the queue) — whatever its status now (e.g. a Retry moved it).
+  if ((entry.attempts ?? 0) === 0) return "never";
+  if ((entry.provisional?.length ?? 0) > 0 || (await stagedWithoutProvisional(entry))) return "authorised";
+  return entry.inDoubt === true || sending ? "never" : "authorised";
+}
+
 /** Mark an entry (in a modify/transaction) as held for lookup + fence. */
 function holdForRecovery(entry: SyncOutboxEntry): void {
   entry.fenceRequired = true;
@@ -550,9 +582,7 @@ export async function classifyLegacyQueue(): Promise<number> {
     const rows = await localDb.syncOutbox.where("status").anyOf("pending", "failed").toArray();
     for (const entry of rows) {
       if (entry.kind !== "rpc" || entry.staged !== undefined || entry.fenceRequired !== undefined) continue;
-      const proven = !(entry.writeAhead === true && entry.inDoubt === true) || (entry.provisional?.length ?? 0) > 0
-        || (await stagedWithoutProvisional(entry));
-      if (proven) {
+      if ((await offlineAuthorisation(entry)) === "authorised") {
         await localDb.syncOutbox.update(entry.localId, { staged: true });
       } else {
         holdForRecovery(entry);
@@ -1202,7 +1232,7 @@ async function markFinal(entry: SyncOutboxEntry, outcome: "rejected" | "abandone
 }
 
 /** Audit line for an owner's recovery action (exported with the queue). */
-async function ownerAudit(localId: string, detail: string): Promise<void> {
+export async function ownerAudit(localId: string, detail: string): Promise<void> {
   const at = new Date().toISOString();
   const line = { id: newId("rlog"), at, event: "owner-action" as const, localId, ownerUserId: useAuthStore.getState().currentUserId ?? null, detail: detail.slice(0, 300) };
   await localDb.syncState.put({ key: `${RECONCILE_LOG_PREFIX}${line.id}`, value: JSON.stringify(line), updatedAt: at }).catch(() => undefined);
@@ -1447,18 +1477,31 @@ export async function retryOutboxEntry(localId: string): Promise<void> {
     notifyQueueChanged();
     return;
   }
-  if (entry.kind === "rpc" && entry.writeAhead === true && entry.inDoubt === true && entry.staged !== true) {
-    // An in-doubt attempt never authorised offline (an older build's row):
-    // "retry" means ask the server, never resend.
-    holdForRecovery(entry);
-    await localDb.syncOutbox.put(entry);
-    notifyQueueChanged();
-    return;
+  // Being sent right now (this or another window): its reply decides it.
+  if (entry.status === "syncing" || (await rowsInFlightAnywhere()).has(localId)) {
+    throw new Error("This entry is being sent right now. Wait for its outcome (or a restart's check with the server) — it is never sent twice.");
   }
-  await localDb.syncOutbox.update(localId, {
-    status: "pending", lastError: undefined, nextAttemptAt: undefined, failureKind: undefined,
-    blocksQueue: undefined, dependencySince: undefined, refWaitSince: undefined,
+  // An attempt never authorised offline: "retry" means ask the server, never
+  // resend. One proven authorised keeps its proof (staged).
+  const held = await localDb.transaction("rw", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, async () => {
+    const row = await localDb.syncOutbox.get(localId);
+    if (!row) return true;
+    // (re-checked atomically: a drain may have started sending it meanwhile)
+    if (row.status === "syncing") throw new Error("This entry is being sent right now. Wait for its outcome (or a restart's check with the server) — it is never sent twice.");
+    const auth = row.kind === "rpc" && (row.inDoubt === true || row.writeAhead === true) ? await offlineAuthorisation(row) : "authorised";
+    if (row.kind === "rpc" && auth === "never") {
+      holdForRecovery(row);
+      await localDb.syncOutbox.put(row);
+      return true;
+    }
+    await localDb.syncOutbox.update(localId, {
+      status: "pending", lastError: undefined, nextAttemptAt: undefined, failureKind: undefined,
+      blocksQueue: undefined, dependencySince: undefined, refWaitSince: undefined,
+      ...(row.kind === "rpc" && row.writeAhead === true && row.staged === undefined && auth === "authorised" ? { staged: true } : {}),
+    });
+    return false;
   });
+  void held;
   notifyQueueChanged();
 }
 
@@ -1486,7 +1529,10 @@ export async function confirmWithServer(localId: string): Promise<"committed" | 
   // sent: it is looked up, NEVER fenced — confirming must not cancel it
   // (shared-till pass). Only an attempt never authorised offline (held, or a
   // write-ahead row with nothing staged) is fenced when the server never saw it.
-  const fenceIt = (e: SyncOutboxEntry) => e.fenceRequired === true || (e.writeAhead === true && e.staged !== true);
+  // Owner action: enforced here, not only in the UI.
+  if (!isOwnerSession()) throw new OutboxActionError("not-owner", "Only the owner (administrator) can confirm an entry with the server.");
+  const neverAuthorised = entry ? (await localDb.transaction("r", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, () => offlineAuthorisation(entry))) === "never" : false;
+  const fenceIt = (e: SyncOutboxEntry) => e.localId === localId ? neverAuthorised : e.fenceRequired === true;
   const r = await settleBeforeReplacement([localId], { fence: fenceIt });
   const after = await localDb.syncOutbox.get(localId);
   await ownerAudit(localId, `confirm-with-server: ${r === "committed" ? "committed (recorded)" : after?.serverOutcome ?? (entry && !fenceIt(entry) ? "not decided — authorised offline, looked up only (never fenced)" : "not decided")}${
@@ -1652,7 +1698,7 @@ export async function restoreSetAsideEntry(localId: string): Promise<SyncOutboxE
   if (!isOwnerSession()) {
     throw new OutboxActionError("not-owner", "Only the owner (administrator) can restore a set-aside entry.");
   }
-  const restored = await localDb.transaction("rw", localDb.syncOutbox, async () => {
+  const restored = await localDb.transaction("rw", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, async () => {
     const entry = await localDb.syncOutbox.get(localId);
     if (!entry) throw new OutboxActionError("not-found", "This entry is no longer on this till.");
     if (entry.status !== "archived") throw new OutboxActionError("not-set-aside", "This entry is not set aside.");
@@ -1663,7 +1709,7 @@ export async function restoreSetAsideEntry(localId: string): Promise<SyncOutboxE
     // fence first); authorised offline (staged) -> in doubt, resent only with
     // its own key (the server answers a committed key from its ledger).
     if (entry.kind === "rpc" && !entry.serverOutcome && before !== "quarantined" && (before === "syncing" || entry.inDoubt === true)) {
-      if (entry.fenceRequired === true || (entry.writeAhead === true && entry.staged !== true)) {
+      if ((await offlineAuthorisation(entry)) === "never") {
         holdForRecovery(next);
       } else {
         next.inDoubt = true;
