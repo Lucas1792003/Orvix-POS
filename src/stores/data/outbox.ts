@@ -15,6 +15,7 @@ import { replyProblem } from "./replyShapes";
 import { flushStockCommit, releaseEntry, stagedStockInTransaction } from "./stockLedger";
 import { deleteLocalRows, localRowTables, putLocalRowsInTransaction, recordCommittedPut, type LocalRowBatch } from "./localWrites";
 import { verifiedReload } from "./verifiedReload";
+import { lastQueueExportAt } from "../../lib/queueExport/exportRecord";
 import type { Inventory, InventoryMovement } from "../../types";
 import { useAuthStore } from "../authStore";
 import { useSyncStore } from "../syncStore";
@@ -78,18 +79,40 @@ async function unsentWork(): Promise<OutboxRow[]> {
  *  never prove independence. Whose shift it is comes from the till's shift
  *  rows (under either id). Stored arguments are never rewritten. */
 async function dependencyContext(): Promise<DependencyContext> {
-  const [maps, rows, shifts] = await Promise.all([
+  const [maps, rows, shifts, exportMark] = await Promise.all([
     localDb.provisionalIdMap.toArray(),
     localDb.syncOutbox.toArray(),
     localDb.shifts.toArray(),
+    localDb.syncState.get(SYNC_STATE_KEYS.lastQueueExport).catch(() => null),
   ]);
   const real = new Map(maps.map((m) => [m.provisionalId, m.realId]));
   const unmapped = new Set<string>();
+  // An offline id whose creating entry was PROVABLY never sent to this
+  // backend (still queued here, no attempt, never stamped as sent, not in
+  // doubt, not being sent) cannot be any server record yet: it is compared as
+  // itself ("local:<id>") instead of "any id" — e.g. another cashier's close of
+  // a server-known shift does not wait for sales on a shift that does not
+  // exist on the server yet. Any doubt keeps the wildcard: an entry queued
+  // before the last queue export (it may have been replayed elsewhere with
+  // the recovery tool), or an id that any sent row also lists.
+  const neverSent = new Set<string>();
+  const sentIds = new Set<string>();
+  const origin = currentBackendOrigin();
+  const marks = [typeof exportMark?.value === "string" ? exportMark.value : null, lastQueueExportAt()].filter((m): m is string => !!m).sort();
+  const exportedUpTo = marks.at(-1) ?? null;
   for (const r of rows) {
     if (r.status === "reconciled") continue;
-    for (const p of r.provisional ?? []) for (const id of p.ids) if (!real.has(id)) unmapped.add(id);
+    const unsentHere = (r.status === "pending" || r.status === "failed") && (r.attempts ?? 0) === 0 && !r.sentAt
+      && r.inDoubt !== true && r.fenceRequired !== true && belongsToBackend(r, origin)
+      && !(exportedUpTo && !(r.createdAt > exportedUpTo));
+    for (const p of r.provisional ?? []) for (const id of p.ids) {
+      if (real.has(id)) continue;
+      unmapped.add(id);
+      (unsentHere ? neverSent : sentIds).add(id);
+    }
     for (const ref of r.refs ?? []) if (!real.has(ref.provisionalId)) unmapped.add(ref.provisionalId);
   }
+  for (const id of sentIds) neverSent.delete(id);
   const cashier = new Map<string, string>();
   for (const sh of shifts) {
     if (!sh?.id || !sh.cashierId) continue;
@@ -98,7 +121,7 @@ async function dependencyContext(): Promise<DependencyContext> {
     if (mapped) cashier.set(mapped, sh.cashierId);
   }
   return {
-    resolve: (id) => real.get(id) ?? (unmapped.has(id) ? "*" : id),
+    resolve: (id) => real.get(id) ?? (neverSent.has(id) ? `local:${id}` : unmapped.has(id) ? "*" : id),
     shiftCashier: (id) => cashier.get(id) ?? null,
   };
 }
@@ -876,14 +899,19 @@ async function runDrainPass(): Promise<DrainResult> {
         // entry: it was never authorised offline; the server authorizes it.)
         if (candidate.status === "pending" && (candidate.heldReason !== "needs-original-user" || !candidate.nextAttemptAt)) {
           await park(candidate, "needs-original-user", OTHER_USER_TEXT, 5 * 60_000);
+          await localDb.syncOutbox.update(candidate.localId, { parkedWhileSignedIn: me });
         }
         passed.push(candidate);
         continue;
       }
       if (isBlockingConflict(candidate)) return "backoff";   // a person decides; never sent automatically
-      if (candidate.heldReason === "needs-original-user" && candidate.nextAttemptAt) {
-        // its creator is signed in again: due now (not after the 5-minute park)
-        await localDb.syncOutbox.update(candidate.localId, { nextAttemptAt: undefined });
+      if (candidate.heldReason === "needs-original-user" && candidate.nextAttemptAt
+          && candidate.parkedWhileSignedIn && candidate.parkedWhileSignedIn !== me && me && actorOf(candidate) === me) {
+        // Parked while ANOTHER user was signed in; its own creator is signed in
+        // now: due at once. A park set in the creator's own session (the
+        // server refused it for this user — WRONG_ACTOR, an unauthorised
+        // fence) keeps its backoff: no resend loop.
+        await localDb.syncOutbox.update(candidate.localId, { nextAttemptAt: undefined, parkedWhileSignedIn: undefined });
         candidate.nextAttemptAt = undefined;
       }
       const args = await resolveArgs(candidate);

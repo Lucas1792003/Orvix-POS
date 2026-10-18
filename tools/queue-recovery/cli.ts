@@ -98,7 +98,7 @@ function printSummary(p: QueueExportPayload): void {
   }
   if (p.onlineOperations.length) {
     console.log(`UNRESOLVED ONLINE-ONLY OPERATIONS (${p.onlineOperations.length}) — they may have been applied; never replayed by this tool, verify them on their server:`);
-    for (const o of p.onlineOperations) console.log(`  ${o.name.padEnd(28)}  key ${o.idempotencyKey?.slice(0, 8) ?? "-"}  by ${o.userId ?? "-"}  server ${o.backendOrigin ?? "(not recorded)"}  attempts ${o.attempts}  created ${o.createdAt}`);
+    for (const o of p.onlineOperations) console.log(`  ${o.name.padEnd(28)}  key ${o.idempotencyKey?.slice(0, 8) ?? "-"}  by ${o.userId ?? "-"}  org ${o.orgId ?? "-"}  server ${o.backendOrigin ?? "(not recorded)"}  attempts ${o.attempts}  created ${o.createdAt}`);
   }
   if (p.reconciliationLog.length) {
     console.log(`reconciliation log (${p.reconciliationLog.length}):`);
@@ -138,11 +138,18 @@ async function main(): Promise<number> {
         tillId: payload.tillId, exportedAt: payload.exportedAt, appVersion: payload.appVersion,
         backendHost: payload.backendHost, session: payload.session, summary: summarize(payload.entries),
         entries: payload.entries.map((e) => ({ seq: e.seq, opId: e.opId, opType: e.opType, status: e.status, idempotencyKey: e.idempotencyKey, attempts: e.attempts, backendOrigin: e.backendOrigin, actorId: e.actorId, fenceRequired: e.fenceRequired, blocksQueue: e.blocksQueue, serverOutcome: e.serverOutcome })),
-        onlineOperations: payload.onlineOperations.map((o) => ({ id: o.id, name: o.name, idempotencyKey: o.idempotencyKey, userId: o.userId, backendOrigin: o.backendOrigin, attempts: o.attempts, uncertain: o.uncertain })),
+        onlineOperations: payload.onlineOperations.map((o) => ({ id: o.id, name: o.name, idempotencyKey: o.idempotencyKey, userId: o.userId, orgId: o.orgId, backendOrigin: o.backendOrigin, attempts: o.attempts, uncertain: o.uncertain })),
       }, null, 1));
     } else printSummary(payload);
-    // An export that still holds an undecided online money operation is not "clean".
-    return payload.onlineOperations.length ? 4 : 0;
+    // Not "clean" while anything may have been applied without a server
+    // decision: an unresolved online money operation, or an entry in doubt,
+    // held, blocking or being sent.
+    const undecided = payload.entries.filter((e) => !e.serverOutcome && e.status !== "reconciled"
+      && (e.inDoubt === true || e.fenceRequired === true || e.blocksQueue === true || e.status === "syncing" || e.statusBeforeArchive === "syncing")).length;
+    if (undecided) console.log(`NOT CLEAN: ${undecided} entr${undecided === 1 ? "y is" : "ies are"} not decided on the server (it may have been applied).`);
+    const ops = payload.onlineOperations.length;
+    if (ops) console.log(`NOT CLEAN: ${ops} online-only operation${ops === 1 ? " has" : "s have"} no server decision (it may have been applied).`);
+    return payload.onlineOperations.length || undecided ? 4 : 0;
   }
 
   const targetFlag = args.flags.get("target");

@@ -61,11 +61,11 @@ describe("queue export format stability (RC1 audit 1a)", () => {
     expect(back.entries.map((e) => [e.opId, e.status])).toEqual([["outbox-a", "quarantined"], ["outbox-b", "pending"]]);
     const noNet = (async () => { throw new Error("dry run must not send"); }) as unknown as typeof fetch;
     const report = await replayExport(back, {
-      target: "http://127.0.0.1:54321", anonKey: null, accessToken: "x", dryRun: true, includeQuarantined: true, fetchImpl: noNet,
+      target: "http://127.0.0.1:54321", anonKey: null, accessToken: "x", dryRun: true, includeQuarantined: true, otherBackendConfirmed: true, fetchImpl: noNet,
     });
     expect(report.ops.map((o) => o.outcome)).toEqual(["planned", "planned"]);
     // without the explicit owner flag the quarantined entry is skipped, never dropped silently
-    const report2 = await replayExport(back, { target: "http://127.0.0.1:54321", anonKey: null, accessToken: "x", dryRun: true, fetchImpl: noNet });
+    const report2 = await replayExport(back, { target: "http://127.0.0.1:54321", anonKey: null, accessToken: "x", dryRun: true, otherBackendConfirmed: true, fetchImpl: noNet });
     expect(report2.ops.map((o) => o.outcome)).toEqual(["skipped-quarantined", "planned"]);
   });
 });

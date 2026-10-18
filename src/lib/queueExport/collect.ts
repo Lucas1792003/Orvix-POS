@@ -95,7 +95,7 @@ export async function collectQueueExportSnapshot(db: LocalDb, ctx: QueueExportCo
     await db.syncState.where("key").startsWith(RECONCILE_LOG_PREFIX).toArray(),
     await db.syncState.where("key").startsWith(ONLINE_OP_PREFIX).toArray(),
   ] as const);
-  const payload = { ...buildPayload(rows, idMap, logRows, ctx), onlineOperations: parseOnlineOperations(opRows) };
+  const payload = { ...buildPayload(rows, idMap, logRows, ctx), onlineOperations: parseOnlineOperations(opRows, ctx.session.orgId) };
   const digests = await Promise.all(rows.map(async (r) => ({ opId: r.localId, digest: await entryDigest(r) })));
   return { payload, digests };
 }
@@ -106,17 +106,21 @@ export async function collectQueueExport(db: LocalDb, ctx: QueueExportContext): 
 
 const ONLINE_OP_PREFIX = "online-op:";
 
-/** Unresolved online-only operations (stores/data/onlineOnly.ts records). */
-function parseOnlineOperations(rows: readonly { value?: string }[]): QueueExportPayload["onlineOperations"] {
+/** Unresolved online-only operations (stores/data/onlineOnly.ts records) of
+ *  one organisation (`orgId`), or of the whole till when no session is known
+ *  (the sign-in screen — the same scope as the queue itself). */
+function parseOnlineOperations(rows: readonly { value?: string }[], orgId: string | null = null): QueueExportPayload["onlineOperations"] {
   const out: QueueExportPayload["onlineOperations"] = [];
   for (const r of rows) {
     try {
       const op = JSON.parse(r.value ?? "null") as Record<string, unknown> | null;
       if (!op || op.v !== 2 || op.status !== "unresolved" || typeof op.id !== "string") continue;
+      if (orgId && op.orgId !== orgId) continue;            // another organisation's: never in this export
       const args = (op.args ?? {}) as Record<string, unknown>;
       out.push({
         id: op.id, name: String(op.name), idempotencyKey: typeof args.p_idempotency_key === "string" ? args.p_idempotency_key : null,
-        userId: typeof op.userId === "string" ? op.userId : null, backendOrigin: typeof op.backendOrigin === "string" ? op.backendOrigin : null,
+        userId: typeof op.userId === "string" ? op.userId : null, orgId: typeof op.orgId === "string" ? op.orgId : null,
+        backendOrigin: typeof op.backendOrigin === "string" ? op.backendOrigin : null,
         createdAt: String(op.createdAt), attempts: typeof op.attempts === "number" ? op.attempts : 0,
         // a stored unresolved operation may always have been applied
         uncertain: true, lastError: typeof op.lastError === "string" ? op.lastError.slice(0, 300) : null, blocksReplacement: true,
@@ -166,12 +170,18 @@ function buildPayload(
 }
 
 /** Counts only (for the dialog, before anything is decrypted or written). */
-export async function countQueue(db: LocalDb): Promise<QueueExportSummary> {
+/** Unresolved online-only money operations (of `orgId`, or the whole till). */
+export async function countUnresolvedOnlineOperations(db: LocalDb, orgId: string | null = null): Promise<number> {
+  const rows = await db.syncState.where("key").startsWith(ONLINE_OP_PREFIX).toArray();
+  return parseOnlineOperations(rows, orgId).length;
+}
+
+export async function countQueue(db: LocalDb, orgId: string | null = null): Promise<QueueExportSummary> {
   // Unresolved online-only operations count too: a till whose only open item
   // is a supplier payment of unknown outcome can still export it.
   const [rows, opRows] = await db.transaction("r", db.syncOutbox, db.syncState, async () => [
     await db.syncOutbox.toArray(),
     await db.syncState.where("key").startsWith(ONLINE_OP_PREFIX).toArray(),
   ] as const);
-  return summarize(rows.map((r) => ({ status: r.status, opType: r.name })), parseOnlineOperations(opRows).length);
+  return summarize(rows.map((r) => ({ status: r.status, opType: r.name })), parseOnlineOperations(opRows, orgId).length);
 }

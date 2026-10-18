@@ -146,6 +146,9 @@ export interface SyncOutboxEntry {
   dependencySince?: string;
   /** When it first waited for a record another entry creates (its ref). */
   refWaitSince?: string;
+  /** Who was signed in when it was parked as "another user's" — only a
+   *  sign-in by its own creator AFTER that skips the rest of the park. */
+  parkedWhileSignedIn?: string | null;
 }
 
 /** provisionalId -> the real id the server assigned once that entry synced.
@@ -199,6 +202,10 @@ export const SYNC_STATE_KEYS = {
   // Origin of the backend this profile's local data (snapshot, auth cache,
   // session) belongs to. Written by lib/backendOrigin.ts at startup.
   backendOrigin: "backend-origin",
+  // When the queue was last exported (ISO, durable): an entry queued before
+  // it may have been replayed elsewhere (tools/queue-recovery), so it can no
+  // longer prove it was never sent (stores/data/outbox.ts dependencyContext).
+  lastQueueExport: "queue-export:last-at",
 } as const;
 
 export { RECONCILE_LOG_PREFIX } from "./reconcile/constants";

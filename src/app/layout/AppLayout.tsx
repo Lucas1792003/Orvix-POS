@@ -7,6 +7,7 @@ import { useDataStore } from "../../stores/dataStore";
 import { useConnectivityStore } from "../../stores/connectivityStore";
 import { useSyncStore } from "../../stores/syncStore";
 import { useAuthStore } from "../../stores/authStore";
+import { useUnresolvedOnlineOperations } from "../../hooks/useUnresolvedOnlineOperations";
 import { useAppStore } from "../../stores/appStore";
 import { useViewportWidth } from "../../hooks/useViewportWidth";
 import { supabase } from "../../lib/supabase";
@@ -36,6 +37,10 @@ export const AppLayout = () => {
   const pendingCount = useSyncStore((state) => state.pendingCount);
   const conflictCount = useSyncStore((state) => state.conflictCount);
   const quarantinedCount = useSyncStore((state) => state.quarantinedCount);
+  const currentOrgId = useAuthStore((state) => state.currentOrgId);
+  // Online-only money operations whose outcome is unknown: NOT queued work —
+  // shown apart, and they make the recovery export available on their own.
+  const unresolvedMoneyOps = useUnresolvedOnlineOperations(currentOrgId);
   const needsReauth = useSyncStore((state) => state.needsReauth);
   const isDraining = useSyncStore((state) => state.isDraining);
   const inventorySyncState = useSyncStore((state) => state.inventorySyncState);
@@ -271,7 +276,13 @@ export const AppLayout = () => {
             {isDraining ? "Syncing — " : ""}{queuedLabel}
           </div>
         )}
-        {(pendingCount > 0 || conflictCount > 0 || quarantinedCount > 0) && (
+        {unresolvedMoneyOps > 0 && (
+          <div className="rounded-full bg-rose-100 px-3 py-1 text-xs text-rose-800 shadow-lg border border-rose-200" data-testid="online-ops-unresolved"
+            title="It may already have been applied on the server. Check it under Sync › Unresolved operations; do not enter it again.">
+            {unresolvedMoneyOps} {unresolvedMoneyOps === 1 ? "payment awaits" : "payments await"} server confirmation — do not enter again
+          </div>
+        )}
+        {(pendingCount > 0 || conflictCount > 0 || quarantinedCount > 0 || unresolvedMoneyOps > 0) && (
           // Outage recovery: any signed-in role can save an encrypted copy of
           // the queue, offline too (docs/selfhost-migration/phase-f/queue-export.md).
           <button

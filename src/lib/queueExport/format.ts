@@ -179,6 +179,8 @@ const onlineOperationSchema = z.object({
   name: z.string(),
   idempotencyKey: z.string().nullable(),
   userId: z.string().nullable(),
+  /** The organisation it belongs to (exports are scoped to the session's). */
+  orgId: z.string().nullable().default(null),
   backendOrigin: z.string().nullable(),
   createdAt: z.string(),
   attempts: z.number().int().min(0),

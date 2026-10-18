@@ -195,7 +195,17 @@ offline is compared under its **server** id once the verified mapping exists
 (written when its creating entry was acknowledged), so a close made with a
 shift's server id waits for that shift's sales still queued under its
 offline id; an offline id with no mapping yet stands for *any* id and never
-proves independence. The stored, idempotency-frozen arguments are never
+proves independence — **unless** its creating entry provably never left this
+till (post-checkpoint pass): still `pending`/`failed` here, no attempt, never
+stamped as sent, not in doubt, not held, queued for this backend, queued
+**after** the till's last queue export (an exported entry may have been
+replayed elsewhere with the recovery tool — the export time is stored
+durably on the till), and not listed by any row that has been sent. Such a
+record does not exist on any server yet, so it is compared as itself
+(`local:<id>`): another cashier's close of a server-known shift does not
+wait for sales on a shift a cashier opened offline and never sent. Once the
+creating entry has been attempted (outcome unknown), the wildcard comes back.
+The stored, idempotency-frozen arguments are never
 rewritten. One open shift per **cashier**: an open waits for every queued
 close of a shift that cashier owns (from the till's shift rows — in any
 shop, whoever queued the close, a manager included); when the owner is
@@ -206,7 +216,33 @@ is a decrease or an increase by the sign of its quantity — with or without a
 unit; an unknown sign counts as both. The other
 user's entry is never sent in this session (and never fenced, unless it is a
 held entry and an ADMIN asks the server). This user's own blocked entries
-still stop the pass.
+still stop the pass. Another user's entry is parked for 5 minutes; the park
+is lifted early only when it was set while **someone else** was signed in
+(`parkedWhileSignedIn`) and its creator is now signed in. A park set in the
+creator's own session (the server refused it for this user) keeps its
+backoff — no resend on every drain. Rows of older builds that carry their
+actor only in the stamped `p_expected_actor_id` are attributed by it (a
+deactivation of that user waits for them).
+
+**Accepted limitation — the shared-till delay.** *Cause:* when cashier A's
+work is waiting for A (another user's entries are never sent in B's
+session), B's later entries that the model cannot prove independent wait
+too — typically B's close of a shift whose cashier the till does not know,
+or anything after A's open/sale on a shift whose open was already attempted
+(it may now be any server shift). *What the cashier sees:* B's entry stays in
+"N actions waiting to sync"; nothing is lost and nothing fails. *What the
+owner can do safely:* have A sign in on that till (A's entries go in A's
+session, then B's follow), or export the queue and, if A cannot return, set
+A's entries aside (exported first). *Why the till never sends A's entries in
+B's session:* the server runs a UUIDv7 operation only for its own creator,
+and a legacy one would run as the wrong user (shift/actor checks, audit
+trail); the till therefore never replays another cashier's operations.
+*Set aside ≠ cancelled:* a set-aside entry keeps its key, its stock
+reservation and its "outcome unknown" status; it may still have run, or still
+run, until the server decides it (Confirm with server). Independence is
+proven (and the delay removed) only where the till can show the record
+cannot exist on the server yet (above) — tested in
+`src/stores/data/postCheckpoint.test.ts` and live (X4).
 
 **Online operations wait for what they depend on.** An online sale, close or
 other offline-capable operation is never sent ahead of an unsent entry of
@@ -236,6 +272,43 @@ records the backend it was created for; one created for another backend — or
 an older record with no backend — is never fenced, retried or replaced here
 (a read-only Check may still settle it from a positive server answer; an
 owner can mark it verified), and blocks new operations of the same kind.
+
+**Atomic records (post-checkpoint pass).** The stored record is the only
+authority — there is no in-memory "settled" note. Every change is one
+IndexedDB read-check-write transaction on that record: *claiming* an attempt
+(refused when the record is settled — "already settled … nothing was sent";
+the attempt counter is incremented and the record marked uncertain before the
+request leaves), *settling* (monotonic: client < server = owner; the client
+may settle only an unresolved record and only for the latest attempt), and
+*re-opening* (never over a server or owner decision). The request always
+carries the claimed record's own name, arguments, key and user. A stale copy
+can therefore never overwrite a newer outcome, a Retry can never resend a
+payment another window or attempt already settled, and a replacement is
+never sent while an earlier attempt may still commit (that attempt keeps the
+record unresolved and listed). A record that cannot be read or parsed, a
+storage error, or a key mismatch (also on a brand-new payment) leaves the
+operation unresolved — nothing is sent on a failed read. An owner may mark
+verified only an operation of their own organisation, and **Mark verified
+decides it on the server first** (review-snapshot-7 M-1): on its own
+backend the key is looked up and, if it never arrived, fenced — the record
+then settles from the server's answer (applied / refused / abandoned); while
+it is in flight or the server cannot answer, Mark verified is refused and
+nothing changes. Only where no fence exists (a server without 086, another
+or an unrecorded backend) does the owner's word close it ("verified
+manually") — the owner must have checked the server's records. Before this,
+an owner's Verify followed by the same payment entered again could leave two
+payments (reproduced at `d0390a1`). Reproduced at
+`d0390a1` (two payments) and fixed: `src/stores/data/paymentAtomic.test.ts`;
+live X1/X2 (one `supplier_payments` row, the balance moved once).
+
+**Exporting unresolved money operations.** A till with **no** queued entries
+but an unresolved online operation can export it: the app shell shows "N
+payment(s) await server confirmation — do not enter again" and the export
+button; the Sync page's export is enabled; the sign-in screen shows the same
+hint with an export link. Signed in, the export carries only the signed-in
+organisation's operations (each with its organisation, backend, user and
+key); from the sign-in screen it carries the whole till, like the queue.
+`inspect` lists them and exits 4 ("NOT CLEAN"). Tested in Chromium (M6).
 
 **Replacing an unresolved operation** ("new" in the prompt, sales and online
 money operations): every earlier attempt of the same operation whose outcome
@@ -371,11 +444,25 @@ committed), and an inconclusive 086 probe stops the run at the first RPC
 entry (table writes before it may already have been replayed).
 
 The tool classifies an attempt as the till does: an online attempt being
-sent when exported (`syncing`, or set aside while being sent) is undecided;
-a write-ahead attempt never authorised offline (`staged: false`) is held —
-looked up and fenced on its own backend, never executed; one whose
-authorisation cannot be established from the file (an older build's row) is
-looked up only and otherwise held. Like the drain, the run stops at a
+sent when exported (`syncing`, or set aside while being sent) is undecided.
+**Definitely not authorised offline → looked up and fenced** on its own
+backend, never executed: `staged: false` with an unknown outcome; a
+write-ahead row being sent with no `staged` flag on its first attempt or with
+nothing staged (the till's `recoverStrandedSyncing` — the current build's own
+interrupted online sale); an older build's write-ahead row in doubt with
+nothing staged (`classifyLegacyQueue`). **Authorisation unknown → looked up
+only** (never fenced, never sent): a Batch 2A `close_shift` /
+`dispatch_stock_transfer` of that kind (its proof lives in the till's local
+row, not in the file) and an entry being sent in a version-1 file.
+**Definitely authorised** (staged) → replayed with its own key. A dry run
+predicts the same from the file: `held` for anything the real run would not
+replay (another backend without `--confirm-host`, and a UUIDv7 executor
+operation of another backend even with it), and stops there. Who will be
+signed in is known only to the real run (the server says): a planned entry
+with a recorded creator says "only if signed in as <creator>; otherwise
+held".
+`inspect` exits 4 ("NOT CLEAN") while the file has an undecided entry or an
+unresolved online operation. Like the drain, the run stops at a
 refusal the server did not record, at an unresolvable reference and at an
 entry it cannot replay (redacted) — nothing later is replayed past them.
 
@@ -419,8 +506,10 @@ RECOVERED".
   or an owner's set-aside (exported first; its stock decrease keeps counting).
   Another user's entry no longer stops the till: only work that may depend on
   it waits. The independence model is conservative (anything unmodelled
-  waits) and its one relaxation is documented above (two sales of a product
-  commute; which of them a stock check refuses can change).
+  waits) and its relaxations are documented above (two sales of a product
+  commute; which of them a stock check refuses can change; an offline record
+  whose creating entry provably never left the till is not a wildcard). The
+  remaining shared-till delay is an accepted limitation ("Shared till").
 * **R11 — export format.** New exports are **format version 2**: the 086
   recovery fields (actor, held, server decision, blocking), the owner-action
   log and the unresolved online-only operations are safety-critical. Every

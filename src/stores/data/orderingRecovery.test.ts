@@ -84,8 +84,10 @@ describe("H1: an offline shift id and its server id are the same shift for order
     expect(blocking.map((r) => r.name)).toEqual(["complete_sale"]);
   });
 
-  it("an offline shift id with NO mapping yet blocks every close (it may be that shift)", async () => {
+  it("an offline shift id with NO mapping yet, whose open was SENT (outcome unknown), blocks every close (it may be that shift)", async () => {
     await enqueueOutbox({ kind: "rpc", name: "open_shift", args: { p_shop_id: "shop-1", p_opening_cash_mmk: 0 }, shopId: "shop-1", provisional: [{ table: "shifts", ids: ["shift-local-2"] }] });
+    const sentOpen = (await localDb.syncOutbox.toArray()).find((r) => r.name === "open_shift")!;
+    await localDb.syncOutbox.update(sentOpen.localId, { sentAt: new Date().toISOString(), inDoubt: true, attempts: 1 });
     await enqueueOutbox({ kind: "rpc", name: "complete_sale", args: sale("shift-local-2"), shopId: "shop-1", refs: [{ field: "p_shift_id", provisionalId: "shift-local-2" }] });
     const close = { kind: "rpc" as const, name: "close_shift", args: { p_shift_id: "shift-server-77" }, shopId: "shop-1", actorId: "user-1" };
     expect((await blockingEarlierWork(close)).map((r) => r.name)).toContain("complete_sale");

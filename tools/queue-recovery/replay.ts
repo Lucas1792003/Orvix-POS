@@ -476,9 +476,24 @@ export async function replayExport(payload: QueueExportPayload, options: ReplayO
     // sent when exported) and that was NOT authorised offline is held and
     // fenced if the server never saw it; one whose authorisation is unknown
     // (an older build's row) is looked up only — never fenced, never sent.
+    // EXACTLY the till's decision for the same row (post-checkpoint fix):
+    //  - outbox.ts recoverStrandedSyncing: a write-ahead attempt left being sent
+    //    and not staged, on its first attempt or with nothing staged, was
+    //    never authorised offline -> held (lookup + fence);
+    //  - classifyLegacyQueue: an in-doubt write-ahead row with no staged flag
+    //    and nothing staged -> held; one with staged records was authorised;
+    //    a close / dispatch with nothing staged may carry local proof the file
+    //    lacks (the shift / transfer row) -> lookup only, never fenced here;
+    //  - a version-1 file has no 086 fields at all: anything being sent ->
+    //    lookup only (never replayed blindly, never fenced).
     const outcomeUnknown = e.inDoubt === true || sending(e);
-    const neverAuthorised = e.kind === "rpc" && e.writeAhead === true && e.staged === false && outcomeUnknown;
-    const authorisationUnknown = e.kind === "rpc" && e.writeAhead === true && (e.staged === null || e.staged === undefined) && outcomeUnknown;
+    const nothingStaged = (e.provisional?.length ?? 0) === 0;
+    const legacyFile = payload.formatVersion === 1;
+    const strandedFirst = e.kind === "rpc" && sending(e) && e.writeAhead === true && e.staged !== true && (e.attempts === 0 || nothingStaged);
+    const legacyInDoubt = e.kind === "rpc" && !sending(e) && e.writeAhead === true && e.inDoubt === true && (e.staged === null || e.staged === undefined) && nothingStaged;
+    const evidenceElsewhere = legacyInDoubt && (e.opType === "close_shift" || e.opType === "dispatch_stock_transfer");
+    const neverAuthorised = e.kind === "rpc" && (e.staged === false && outcomeUnknown || strandedFirst || (legacyInDoubt && !evidenceElsewhere));
+    const authorisationUnknown = e.kind === "rpc" && !neverAuthorised && (evidenceElsewhere || (legacyFile && sending(e)));
     const fenceable = e.kind === "rpc" && (e.fenceRequired === true || neverAuthorised);
     const held = fenceable || authorisationUnknown;
     if (status === "conflict" && !held && !options.includeConflicts) {
@@ -503,11 +518,22 @@ export async function replayExport(payload: QueueExportPayload, options: ReplayO
       }
       args[ref.field] = real;
     }
+    // A UUIDv7 executor operation is never run against a backend it was not
+    // queued for, --confirm-host or not (below, on an 086 target).
+    const executorElsewhere = e.kind === "rpc" && e.backendOrigin !== origin && !!e.idempotencyKey && isUuidV7(e.idempotencyKey) && EXECUTOR_RPCS.has(e.opType);
+    if (options.dryRun && (held || (e.backendOrigin !== origin && (undecided(e) || !options.otherBackendConfirmed || executorElsewhere)))) {
+      // The real run would not replay it (the same tests as below): say so and stop.
+      push(e, "held", { detail: `dry run: ${e.backendOrigin !== origin ? `queued for ${e.backendOrigin ?? "an unrecorded backend"}` : fenceable ? "held: would be looked up and fenced, never replayed" : "held: would be looked up only"}` });
+      continue;
+    }
     if (options.dryRun) {
       // A ref whose parent is replayed earlier in this run resolves at run time.
       const pendingRef = unresolved && ordered.slice(0, i).some((p) => p.provisional.some((pp) => e.refs.some((r) => pp.ids.includes(r.provisionalId))));
+      // Who will be signed in is only known to the real run (the server says):
+      // an entry with a recorded creator runs only in that user's session.
+      const creator = e.kind === "rpc" ? (e.actorId ?? (typeof args.p_expected_actor_id === "string" ? args.p_expected_actor_id : null)) : null;
       push(e, unresolved && !pendingRef ? "blocked-unresolved-ref" : "planned", {
-        detail: `${e.kind === "rpc" ? `rpc ${e.opType}` : `${e.tableOp} ${e.table}`} key ${shortKey(e.idempotencyKey)}${held ? " (HELD: lookup + fence only, never replayed)" : ""}${pendingRef ? " (ref resolves from an earlier entry)" : ""}${unresolved && !pendingRef ? `: ${unresolved}` : ""}`,
+        detail: `${e.kind === "rpc" ? `rpc ${e.opType}` : `${e.tableOp} ${e.table}`} key ${shortKey(e.idempotencyKey)}${held ? " (HELD: lookup + fence only, never replayed)" : ""}${pendingRef ? " (ref resolves from an earlier entry)" : ""}${unresolved && !pendingRef ? `: ${unresolved}` : ""}${creator ? ` (only if signed in as ${creator}; otherwise held)` : ""}`,
       });
       continue;
     }

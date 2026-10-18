@@ -494,13 +494,13 @@ describe("export / import round trip and the recovery tool", () => {
     expect(e.reconciliation).toMatchObject({ resolution: "cancelled", owner: { userId: "admin-1", name: "Owner One" }, check: { result: "not-recorded" } });
     expect(back.reconciliationLog.map((l) => `${l.event}:${l.localId}`)).toEqual([`reconciled:${rec.localId}`]);
 
-    const dry = await replayExport(back, { target: "https://pos.example.test", anonKey: null, accessToken: "t", dryRun: true });
+    const dry = await replayExport(back, { target: "https://pos.example.test", anonKey: null, accessToken: "t", dryRun: true, otherBackendConfirmed: true });
     expect(Object.fromEntries(dry.ops.map((o) => [o.opId, o.outcome]))).toEqual({
       [rec.localId]: "skipped-reconciled", [aside.localId]: "skipped-set-aside", [conflict.localId]: "skipped-conflict",
     });
     expect(dry.ops.find((o) => o.opId === rec.localId)!.detail).toMatch(/Owner One.*cancelled/);
     expect(exitCodeFor(dry)).toBe(0);
-    const forced = await replayExport(back, { target: "https://pos.example.test", anonKey: null, accessToken: "t", dryRun: true, includeReconciled: true, includeConflicts: true });
+    const forced = await replayExport(back, { target: "https://pos.example.test", anonKey: null, accessToken: "t", dryRun: true, otherBackendConfirmed: true, includeReconciled: true, includeConflicts: true });
     expect(forced.ops.find((o) => o.opId === rec.localId)!.outcome).toBe("planned");
     const fetchSpy = vi.fn();
     await replayExport(back, { target: "https://pos.example.test", anonKey: null, accessToken: "t", fetchImpl: fetchSpy as unknown as typeof fetch, includeConflicts: false });

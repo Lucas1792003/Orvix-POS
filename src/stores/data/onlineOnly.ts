@@ -155,35 +155,61 @@ const identity = () => {
 
 // ---- storage ----------------------------------------------------------------
 
-const settledThisSession = new Set<string>();
+// The STORED record is the only truth about an operation (post-checkpoint
+// fix): no in-memory "settled" note can hide a stored unresolved operation,
+// and every state change is ONE IndexedDB read-check-write transaction on the
+// stored record (atomic across windows, reloads and restarts) — never a write
+// of a caller's possibly stale copy. The in-flight map below only coalesces a
+// double click; it decides nothing.
 const inFlight = new Map<string, Promise<RpcOutcome>>();
 
 /** Tests only: a new app instance. */
 export function resetOnlineOnlyForTests(): void {
   inFlight.clear();
-  settledThisSession.clear();
 }
 
 async function save(op: OnlineOperation): Promise<void> {
   await localDb.syncState.put({ key: PREFIX + op.id, value: JSON.stringify(op), updatedAt: op.updatedAt });
 }
 
+const parseOp = (value: string | undefined): OnlineOperation | null => {
+  const op = JSON.parse(value ?? "") as OnlineOperation;
+  return op?.v === 2 && op.id ? op : null;
+};
+
+/** Reads fail CLOSED: an unreadable store throws (callers send nothing). */
 async function loadAll(): Promise<OnlineOperation[]> {
   const rows = await localDb.syncState.filter((e) => e.key.startsWith(PREFIX)).toArray();
   const out: OnlineOperation[] = [];
   for (const row of rows) {
     try {
-      const op = JSON.parse(row.value ?? "") as OnlineOperation;
-      if (op?.v === 2 && op.id) out.push(op);
+      const op = parseOp(row.value);
+      if (op) out.push(op);
     } catch {
-      // A record from the pre-correction format (fingerprint-keyed): ignored —
-      // it carried no identity; see listUnresolvedOnlineOperations.
+      // An unparseable record carries no identity it could be resent under;
+      // it is never treated as settled either (see listUnresolvedOnlineOperations).
     }
   }
   return out;
 }
 
-const isUnresolved = (op: OnlineOperation) => op.status === "unresolved" && !settledThisSession.has(op.id);
+/** Atomically read the stored record, decide, and write the result (or
+ *  nothing). `decide` gets the CURRENT stored record; it returns the record
+ *  to store, or null to leave it untouched. Throws if the store fails. */
+async function transition<T>(
+  id: string, decide: (stored: OnlineOperation | null) => { next: OnlineOperation | null; result: T },
+): Promise<T> {
+  return localDb.transaction("rw", localDb.syncState, async () => {
+    const row = await localDb.syncState.get(PREFIX + id);
+    let current: OnlineOperation | null = null;
+    try { current = row ? parseOp(row.value) : null; } catch { current = null; }
+    const { next, result } = decide(current);
+    if (next) await localDb.syncState.put({ key: PREFIX + id, value: JSON.stringify(next), updatedAt: next.updatedAt });
+    return result;
+  });
+}
+
+const isUnresolved = (op: OnlineOperation) => op.status === "unresolved";
 /** Not bound to THIS backend (another origin, or an older record with none):
  *  nothing this server says "not found" about it proves anything. */
 export const isForeignOperation = (op: OnlineOperation): boolean => op.backendOrigin !== currentBackendOrigin();
@@ -208,31 +234,60 @@ const pendingError = (op: OnlineOperation, cause: RpcError | null, detail: strin
 };
 
 const RANK = { client: 1, server: 2, owner: 2 } as const;
-const storedOp = async (id: string): Promise<OnlineOperation | undefined> =>
-  (await loadAll().catch(() => [] as OnlineOperation[])).find((o) => o.id === id);
 
-/** Settle monotonically (payment-safety race fix). A client-evidence
- *  outcome is written only by the LATEST attempt (`attempt` = its sequence
- *  number) and never over an existing settlement; a server / owner outcome
- *  overwrites a client one but never another server / owner one. */
+/** Settle atomically and monotonically. A client-evidence outcome is written
+ *  only by the LATEST attempt of a still-unresolved operation (`attempt` = its
+ *  sequence number); a server / owner outcome overwrites an unresolved or a
+ *  client-settled record, never another server / owner decision. Returns
+ *  whether THIS call decided it. A storage failure decides nothing (the
+ *  record stays as it was — unresolved operations stay listed). */
 async function settle(
   op: OnlineOperation, outcome: NonNullable<OnlineOperation["outcome"]>,
   by: "server" | "client" | "owner" = "server", attempt?: number,
 ): Promise<boolean> {
-  const stored = await storedOp(op.id);
-  if (stored?.status === "settled" && RANK[stored.decidedBy ?? "server"] >= RANK[by]) {
-    settledThisSession.add(op.id);
-    return false;                                         // a decision at least as authoritative stands
+  try {
+    return await transition(op.id, (stored) => {
+      if (!stored) return { next: null, result: false };
+      if (stored.status === "settled" && RANK[stored.decidedBy ?? "server"] >= RANK[by]) return { next: null, result: false };
+      if (by === "client" && (stored.status !== "unresolved" || attempt === undefined || stored.attempts !== attempt)) {
+        return { next: null, result: false };            // a newer attempt exists: its outcome decides
+      }
+      return { next: { ...stored, status: "settled", outcome, decidedBy: by, updatedAt: new Date().toISOString() }, result: true };
+    });
+  } catch (err) {
+    console.error(`[sync] ${op.name}: could not record its settlement (it stays unresolved):`, err);
+    return false;
   }
-  if (by === "client" && stored && (stored.status === "settled" || (attempt !== undefined && stored.attempts !== attempt))) {
-    return false;                                         // a newer attempt exists: its outcome decides
+}
+
+/** Claim the next attempt of an UNRESOLVED operation, atomically: the stored
+ *  attempt counter is incremented and the record marked uncertain BEFORE the
+ *  request (a crash from here on leaves it uncertain). A settled operation is
+ *  never resent. Returns the stored record as claimed, or why not. */
+type Claim = { claimed: OnlineOperation } | { refused: OnlineOperation | null };
+async function claimAttempt(op: OnlineOperation): Promise<Claim> {
+  return transition<Claim>(op.id, (stored) => {
+    if (!stored || stored.status !== "unresolved") return { next: null, result: { refused: stored } };
+    const claimed: OnlineOperation = { ...stored, attempts: stored.attempts + 1, uncertain: true, updatedAt: new Date().toISOString() };
+    return { next: claimed, result: { claimed } };
+  });
+}
+
+/** An attempt whose outcome is unknown: the operation is unresolved again
+ *  (it may have been applied) unless the SERVER or an OWNER has decided it. */
+async function reopen(op: OnlineOperation, lastError: string): Promise<"reopened" | "decided"> {
+  try {
+    return await transition(op.id, (stored) => {
+      if (!stored) return { next: null, result: "reopened" as const };
+      if (stored.status === "settled" && (stored.decidedBy ?? "server") !== "client") return { next: null, result: "decided" as const };
+      return {
+        next: { ...stored, status: "unresolved", outcome: undefined, decidedBy: undefined, uncertain: true, lastError, updatedAt: new Date().toISOString() },
+        result: "reopened" as const,
+      };
+    });
+  } catch {
+    return "reopened";                                    // nothing written: it was unresolved before the attempt
   }
-  // Never reusable after this, even if the write below fails.
-  settledThisSession.add(op.id);
-  const base = stored ?? op;
-  const next: OnlineOperation = { ...base, status: "settled", outcome, decidedBy: by, updatedAt: new Date().toISOString() };
-  await save(next).catch((err) => console.error(`[sync] ${op.name}: could not record its settlement (kept as settled for this session):`, err));
-  return true;
 }
 
 /** `fresh`: the operation was created by this very call and has never been
@@ -243,73 +298,72 @@ async function send(op: OnlineOperation, retries: number, fresh = false): Promis
   if (isForeignOperation(op)) {
     return { data: null, error: pendingError(op, null, "it was made against another server (or by an older version that did not record its server); it can only be verified there or by an owner.") };
   }
-  const uncertainBefore = !fresh || op.uncertain === true;
-  // Durable attempt sequence: never behind what is stored (another window or
-  // a Retry may have sent it meanwhile).
-  const current = await storedOp(op.id);
-  op.attempts = Math.max(op.attempts, current?.attempts ?? 0) + 1;
-  const myAttempt = op.attempts;
-  // Durable BEFORE the request: a crash from here on leaves it uncertain.
+  // Claim the attempt on the STORED record (atomic): never a stale copy, and
+  // never a resend of an operation already settled.
+  let claim: Awaited<ReturnType<typeof claimAttempt>>;
   try {
-    await save({ ...op, uncertain: true, updatedAt: new Date().toISOString() });
+    claim = await claimAttempt(op);
   } catch (err) {
-    return { data: null, error: pendingError(op, null, `it could not be saved before sending (${err instanceof Error ? err.message : String(err)}); nothing was sent.`) };
+    return { data: null, error: pendingError(op, null, `its record could not be read or saved before sending (${err instanceof Error ? err.message : String(err)}); nothing was sent.`) };
   }
-  // Executed only in its creator's session (the server checks p_actor_id).
-  let outcome = await callRpc(op.name, op.args, { retries, actorId: op.userId });
+  if ("refused" in claim) {
+    const s0 = claim.refused;
+    return {
+      data: null,
+      error: pendingError(op, null, s0
+        ? `it is already settled (${s0.outcome ?? "decided"}${s0.decidedBy ? ` by the ${s0.decidedBy}` : ""}); nothing was sent — check Sync before entering anything again.`
+        : "its record is missing on this till; nothing was sent."),
+    };
+  }
+  const claimed = claim.claimed;
+  const myAttempt = claimed.attempts;
+  // Only the FIRST attempt of an operation created by this very call can
+  // prove "not applied" by its own answer; every other attempt may follow
+  // one that committed.
+  const uncertainBefore = !fresh || myAttempt !== 1 || op.uncertain === true;
+  // Executed only in its creator's session (the server checks p_actor_id),
+  // with the STORED frozen arguments and key.
+  let outcome = await callRpc(claimed.name, claimed.args, { retries, actorId: claimed.userId });
   if (uncertainBefore) outcome = keepUnknown(outcome);
   const keepPending = async (detail: string, cause: RpcError | null) => {
-    const stored = await storedOp(op.id);
-    // Decided by the SERVER or an OWNER meanwhile: that stands.
-    if (stored?.status === "settled" && (stored.decidedBy ?? "server") !== "client") {
-      return { data: null, status: outcome.status, error: pendingError(op, cause, "it was settled meanwhile — check before entering it again.") } as RpcOutcome;
-    }
-    // Unresolved, or only settled "not applied" on a CLIENT's evidence: this
-    // attempt may have been applied — it is (re)opened, never left closed.
-    settledThisSession.delete(op.id);
-    const base = stored ?? op;
-    const next: OnlineOperation = {
-      ...base, status: "unresolved", outcome: undefined, decidedBy: undefined, uncertain: true,
-      attempts: Math.max(base.attempts, op.attempts), lastError: cause?.message ?? detail, updatedAt: new Date().toISOString(),
-    };
-    await save(next).catch(() => undefined);
-    return { data: null, status: outcome.status, error: pendingError(op, cause, detail) } as RpcOutcome;
+    const r = await reopen(claimed, cause?.message ?? detail);
+    return {
+      data: null, status: outcome.status,
+      error: pendingError(claimed, cause, r === "decided" ? "it was settled meanwhile — check before entering it again." : detail),
+    } as RpcOutcome;
   };
   if (!outcome.error && outcome.responseUnavailable) {
     // Applied on the server (086 ledger); the reply is not readable here.
-    // Settled, and the till's data is reloaded from the server instead.
-    await settle(op, "applied");
+    await settle(claimed, "applied");
     void verifiedReload();
     return outcome;
   }
   if (outcome.error && outcome.serverOutcome === "abandoned") {
-    await settle(op, "abandoned");
+    await settle(claimed, "abandoned");
     return outcome;
   }
   if (outcome.error && outcome.serverOutcome === "rejected") {
-    await settle(op, "refused");
+    await settle(claimed, "refused");
     return outcome;
   }
   if (!outcome.error) {
-    const problem = replyProblem(op.name, outcome.data);
+    const problem = replyProblem(claimed.name, outcome.data);
     if (problem) return keepPending(`the server's reply could not be read (${problem}).`, null);
-    await settle(op, "applied");
+    await settle(claimed, "applied");
     return outcome;
   }
   const { failure } = outcome.error;
   // A key mismatch means the server holds ANOTHER decision under this key
-  // (possibly committed): never a refusal of a stored operation.
-  if (outcome.serverOutcome === "mismatch" && uncertainBefore) {
+  // (possibly committed): never a refusal — fresh or not.
+  if (outcome.serverOutcome === "mismatch") {
     return keepPending("the server holds a different request under this key; it may have been applied.", outcome.error);
   }
-  // Below: no server decision. Only the FIRST attempt of a fresh operation
-  // can prove anything by its own answer (keepUnknown turned every other
-  // answer into "may have committed") — and only while it is still the
-  // latest attempt (a Retry or another window may have sent it meanwhile).
   if (!failure.mayHaveCommitted) {
-    const settledHere = await settle(op, failure.retryable ? "not-applied" : "refused", "client", myAttempt);
+    // The first attempt of a fresh operation proved it was not applied —
+    // recorded only while it is still the latest attempt.
+    const settledHere = await settle(claimed, failure.retryable ? "not-applied" : "refused", "client", myAttempt);
     if (!settledHere) {
-      return { data: null, status: outcome.status, error: pendingError(op, outcome.error, "another attempt of it was sent meanwhile; that attempt's outcome decides it.") };
+      return { data: null, status: outcome.status, error: pendingError(claimed, outcome.error, "another attempt of it was sent meanwhile (or its record could not be updated); that attempt's outcome decides it.") };
     }
     return outcome;
   }
@@ -533,7 +587,36 @@ export async function markOnlineOperationVerified(id: string): Promise<void> {
   if (!isOwnerSession()) throw new Error("Only the owner (administrator) can mark an operation as verified.");
   const op = (await loadAll()).find((o) => o.id === id);
   if (!op) return;
-  await settle(op, "verified-manually", "owner");
+  // An owner closes operations of THEIR organisation only.
+  if (op.orgId !== identity().orgId) throw new Error("This operation belongs to another organisation; it cannot be verified here.");
+  // Closing it lets the same payment be entered again under a NEW key: on its
+  // own backend, the earlier key is first decided or stopped (fenced) on the
+  // server, exactly as before a replacement. Only where no fence exists (no
+  // 086, another or an unrecorded backend) does the owner's word close it.
+  const key = op.args[IDEMPOTENCY_KEY_ARG];
+  if (isUnresolved(op) && !isForeignOperation(op) && typeof key === "string") {
+    const { absent, status, error } = await lookupOperation(op.name, key, { fence: true, actorId: op.userId, args: op.args });
+    // A key the server says can never execute any more (too old: outside the
+    // executor window) cannot be stopped, but cannot run either: the owner's
+    // word closes it, as the server's own records direct ("a person verifies it").
+    const neverRuns = status?.status === "not_found" && (status.executable === false || status.reason === "expired");
+    if (!absent && !neverRuns) {
+      if (error || !status || !["committed", "rejected", "abandoned"].includes(status.status)) {
+        throw new Error("It could not be confirmed or stopped on the server (it may still be running). Nothing was changed — try again when the server answers.");
+      }
+      const outcome = status.status === "committed" ? "applied" : status.status === "rejected" ? "refused" : "abandoned";
+      if (!(await settle(op, outcome))) {
+        const now = (await loadAll()).find((o) => o.id === id);
+        if (now?.status !== "settled") throw new Error("Its record could not be updated on this till; nothing was changed. Try again.");
+      }
+      if (outcome === "applied") void verifiedReload();
+      return;
+    }
+  }
+  if (!(await settle(op, "verified-manually", "owner"))) {
+    const now = (await loadAll()).find((o) => o.id === id);
+    if (now?.status !== "settled") throw new Error("Its record could not be updated on this till; nothing was changed. Try again.");
+  }
 }
 
 /** Tests / diagnostics. */

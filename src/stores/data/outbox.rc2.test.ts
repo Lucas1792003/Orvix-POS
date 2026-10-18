@@ -246,7 +246,7 @@ describe("D3: provisional id map prune", () => {
     const back = await decryptQueueExport(JSON.stringify(await encryptQueueExport(payload, "correct horse battery", { iterations: 100_000 })), "correct horse battery");
     const noNet = (async () => { throw new Error("no network"); }) as unknown as typeof fetch;
     const report = await replayExport(back, {
-      target: "http://127.0.0.1:54321", anonKey: null, accessToken: "x", dryRun: true,
+      target: "http://127.0.0.1:54321", anonKey: null, accessToken: "x", dryRun: true, otherBackendConfirmed: true,
       includeQuarantined: true, includeConflicts: true, includeSetAside: true, fetchImpl: noNet,
     });
     expect(report.counts["blocked-unresolved-ref"]).toBe(0);

@@ -166,7 +166,7 @@ describe("findings in the outbox (audit 1a/1b)", () => {
     expect(late.provisionalIdMap).toEqual([expect.objectContaining({ provisionalId: "shift-prov", realId: "shift-real" })]); // kept
 
     const noNet = (async () => { throw new Error("no network"); }) as unknown as typeof fetch;
-    const report = await replayExport(late, { target: "http://127.0.0.1:54321", anonKey: null, accessToken: "x", dryRun: true, includeQuarantined: true, fetchImpl: noNet });
+    const report = await replayExport(late, { target: "http://127.0.0.1:54321", anonKey: null, accessToken: "x", dryRun: true, includeQuarantined: true, otherBackendConfirmed: true, fetchImpl: noNet });
     expect(report.ops[0].outcome).toBe("planned");
   });
 

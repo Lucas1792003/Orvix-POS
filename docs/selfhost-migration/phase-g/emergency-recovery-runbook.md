@@ -158,6 +158,14 @@ B9 (gateway 503), B10 (database unavailable, simulated) — results in
 4. The dialog says "Nothing was removed": leave the till as it is; it syncs by
    itself when the server is back.
 
+**A payment awaiting confirmation, nothing queued** (rose badge "N payment(s)
+await server confirmation — do not enter again", or the same hint on the
+sign-in screen): the export button is there too. Export it the same way and
+**do not enter the payment again** — it may already be on the server. The
+file lists it (with its organisation, server, user and key); signed in, only
+your organisation's are included. The engineer checks it on its own server
+(Sync › Unresolved operations › **Check status**); the tool never replays it.
+
 **Cold copy as well** before any intervention on the till itself (app
 closed): Windows `%APPDATA%\retails-shop\`, macOS
 `~/Library/Application Support/retails-shop/`, copied whole to the stick as
@@ -224,9 +232,18 @@ QUEUE_RECOVERY_ANON_KEY="$(ssh -o BatchMode=yes lucashome 'grep "^ANON_KEY=" /sr
   Optional `QUEUE_RECOVERY_SERVICE_KEY` (same ssh pattern, `SERVICE_ROLE_KEY`)
   only reads the idempotency ledger so the report says exactly
   `applied` vs `already-applied`.
+- `inspect` exits 4 and prints "NOT CLEAN" while the file holds an undecided
+  entry or an unresolved payment; the dry run predicts `held` for the
+  entries the file shows the real run would not replay, and marks a planned
+  entry "only if signed in as <creator>" (the signed-in user is known only to
+  the real run).
 - Entries the till HELD ("Not recorded on this till", `fenceRequired`) are
   never replayed: the tool asks the server and, if it never saw them, stops
-  them there (`abandoned`). Entries the server already decided are reported
+  them there (`abandoned`). The same for a sale interrupted while being sent
+  that was never authorised offline (the till fences those itself after a
+  restart). An entry whose authorisation the file cannot show (an older
+  build's close or transfer dispatch in doubt, an entry being sent in an old
+  file) is only looked up — `held`; reconcile it from the server records. Entries the server already decided are reported
   (`rejected-final`, `abandoned`), not sent.
 - The run stops at the first entry whose outcome is not decided —
   `not-attempted` (transient), `in-flight`, `unavailable`, `held`, `unknown` —

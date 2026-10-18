@@ -81,14 +81,56 @@ describe("recovery tool: an online attempt being SENT when exported is classifie
     expect(s.executed).toBe(0);
   });
 
-  it("authorisation unknown (an older build's write-ahead row): looked up only — never fenced, never executed; the run stops, exit 4", async () => {
+  it("the CURRENT till's own interrupted online sale (write-ahead, being sent, no staged flag, first attempt): fenced like the till does — never executed", async () => {
     const s = new Server();
-    const r = await run(s, exportOf({ staged: null }));
+    const r = await run(s, exportOf({ staged: null, attempts: 0 }));
+    expect(s.executed).toBe(0);
+    expect(s.ledger.get(KEY)).toMatchObject({ state: "abandoned" });
+    expect(r.ops[0].outcome).toBe("abandoned");
+  });
+
+  it("authorisation that only the till could prove (an older close with nothing staged, in doubt): looked up only — never fenced, never executed; the run stops, exit 4", async () => {
+    const s = new Server();
+    const r = await run(s, exportOf({ opType: "close_shift", status: "pending", inDoubt: true, staged: null, attempts: 1,
+      payload: { p_shift_id: "shift-1", p_closing_cash_mmk: 0, p_idempotency_key: KEY } }));
     expect(s.executed).toBe(0);
     expect(s.ledger.has(KEY)).toBe(false);
     expect(s.calls.filter((c) => c.rpc === "op_status").every((c) => c.body.p_fence === false)).toBe(true);
     expect(r.ops[0].outcome).toBe("held");
     expect(exitCodeFor(r)).toBe(4);
+  });
+
+  it("a VERSION-1 file (no 086 fields) with an entry being sent: looked up only, never replayed blindly", async () => {
+    const s = new Server();
+    const p = exportOf({ writeAhead: null, staged: null, inDoubt: null, attempts: 1 });
+    const r = await run(s, { ...p, formatVersion: 1 } as QueueExportPayload);
+    expect(s.executed).toBe(0);
+    expect(s.ledger.has(KEY)).toBe(false);
+    expect(r.ops[0].outcome).toBe("held");
+  });
+
+  it("dry run predicts the hold (never 'planned' for an entry the real run would not replay)", async () => {
+    const s = new Server();
+    const r = await replayExport(exportOf({ staged: null, attempts: 0 }), { target: ORIGIN, anonKey: "anon", accessToken: "t", fetchImpl: s.fetch, dryRun: true });
+    expect(r.ops[0].outcome).toBe("held");
+    expect(exitCodeFor(r)).toBe(4);
+    expect(s.calls).toHaveLength(0);
+  });
+
+  it("dry run against ANOTHER backend predicts what the real run does: a UUIDv7 executor sale is held even with --confirm-host; a UUIDv4 one is held without it, planned with it (never sent either way)", async () => {
+    const s = new Server();
+    const opts = { target: ORIGIN, anonKey: "anon", accessToken: "t", fetchImpl: s.fetch, dryRun: true };
+    const v7 = exportOf({ status: "pending", staged: true, backendOrigin: "https://old.example.test" });
+    expect((await replayExport(v7, opts)).ops[0].outcome).toBe("held");
+    expect((await replayExport(v7, { ...opts, otherBackendConfirmed: true })).ops[0].outcome).toBe("held");
+    const V4 = "11111111-1111-4111-8111-111111111111";
+    const v4 = exportOf({ status: "pending", staged: true, backendOrigin: "https://old.example.test", idempotencyKey: V4,
+      payload: { p_shop_id: "shop-1", p_shift_id: "shift-1", p_items: [{ product_id: "p1", qty: 1 }], p_idempotency_key: V4 } });
+    expect((await replayExport(v4, opts)).ops[0].outcome).toBe("held");
+    const planned = (await replayExport(v4, { ...opts, otherBackendConfirmed: true })).ops[0];
+    expect(planned.outcome).toBe("planned");
+    expect(planned.detail).toMatch(/only if signed in as cash-a/);              // the creator, known only to the real run's server
+    expect(s.calls).toHaveLength(0);
   });
 
   it("set aside while being sent (no in-doubt flag): a skipped entry that is NOT decided keeps the recovery from succeeding", async () => {

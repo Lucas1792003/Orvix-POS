@@ -23,6 +23,7 @@ import { ReconcileDialog } from "../components/sync/ReconcileDialog";
 import { desktopVerifyDeps, verifyReconciledEntries } from "../stores/data/reconcile";
 import { isReconcilableStatus } from "../lib/reconcile/policy";
 import { useTranslation } from "../hooks/useTranslation";
+import { useUnresolvedOnlineOperations } from "../hooks/useUnresolvedOnlineOperations";
 
 const RPC_LABELS: Record<string, string> = {
   complete_sale: "POS Sale",
@@ -119,6 +120,7 @@ export const SyncConflictsPage = () => {
   // Owner = ADMIN from the server-verified app user (authStore); the outbox
   // functions check it again.
   const isOwner = useAuthStore((state) => Boolean(state.currentUserId) && state.currentRole === "ADMIN");
+  const unresolvedMoneyOps = useUnresolvedOnlineOperations(useAuthStore((state) => state.currentOrgId));
   const addToast = useToast();
   const [entries, setEntries] = useState<SyncOutboxEntry[]>([]);
   const [loadedAt, setLoadedAt] = useState(0);
@@ -271,7 +273,7 @@ export const SyncConflictsPage = () => {
       <div className="mt-4 flex items-center justify-between">
         <span className="text-sm text-slate-500">{summary}</span>
         <div className="flex gap-2">
-          <Button variant="secondary" size="sm" onClick={() => setExportOpen(true)} disabled={entries.length === 0 || busy}>
+          <Button variant="secondary" size="sm" onClick={() => setExportOpen(true)} disabled={(entries.length === 0 && unresolvedMoneyOps === 0) || busy} data-testid="sync-export-open">
             {t("queueExport", "buttonLong")}
           </Button>
           <Button variant="secondary" size="sm" onClick={() => void refresh()} disabled={locked}>

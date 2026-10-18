@@ -12,6 +12,7 @@ import { Input } from "../components/ui/Input";
 import { useTranslation } from "../hooks/useTranslation";
 import { LanguageSwitcher } from "../components/layout/LanguageSwitcher";
 import { ExportQueueDialog } from "../components/sync/ExportQueueDialog";
+import { useUnresolvedOnlineOperations } from "../hooks/useUnresolvedOnlineOperations";
 import { localDb } from "../lib/localDb";
 
 export const LoginPage = () => {
@@ -30,6 +31,8 @@ export const LoginPage = () => {
   // the queue is kept, and its encrypted export stays reachable here because
   // signing in needs the server (docs/selfhost-migration/phase-f/queue-export.md).
   const [queuedCount, setQueuedCount] = useState(0);
+  // Online-only money operations of unknown outcome (no sign-in: the whole till).
+  const unresolvedMoneyOps = useUnresolvedOnlineOperations(null);
   const [quarantinedCount, setQuarantinedCount] = useState(0);
   // On screen only (per-till verification); never sent in any request.
   const tillId = useMemo(() => getTillId(), []);
@@ -201,6 +204,15 @@ export const LoginPage = () => {
               <div role="alert" className="mt-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-900" data-testid="login-quarantine">
                 {quarantinedCount} {quarantinedCount === 1 ? "transaction was" : "transactions were"} recorded on this till by an older
                 app version for a different server and will not be sent from here. Export them and give the file to the owner.
+              </div>
+            )}
+            {unresolvedMoneyOps > 0 && (
+              <div role="alert" className="mt-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-900" data-testid="login-online-ops-export">
+                {unresolvedMoneyOps} {unresolvedMoneyOps === 1 ? "payment or money operation" : "payments or money operations"} on this till
+                may already have been applied on the server (the outcome is unknown). Do not enter {unresolvedMoneyOps === 1 ? "it" : "them"} again.{" "}
+                <button type="button" className="font-medium underline" onClick={() => setExportOpen(true)}>
+                  {t("queueExport", "loginLink")}
+                </button>
               </div>
             )}
             {queuedCount > 0 && (

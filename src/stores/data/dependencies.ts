@@ -59,7 +59,9 @@ export function resourcesOf(e: DependencySubject, ctx: DependencyContext = PLAIN
   const both = (ns: string, pid: string) => { k.add(`${ns}:${pid}`); const real = ctx.resolve(pid); if (real !== "*" && real !== pid) k.add(`${ns}:${real}`); };
   for (const p of e.provisional ?? []) for (const pid of p.ids) both("made", pid);
   for (const r of e.refs ?? []) both("ref", r.provisionalId);
-  if (e.actorId) k.add(`actor:${e.actorId}`);
+  // (rows of older builds carry their actor only in the stamped argument)
+  const actor = e.actorId ?? str(a.p_expected_actor_id);
+  if (actor) k.add(`actor:${actor}`);
 
   switch (e.name) {
     case "complete_sale":
@@ -81,7 +83,7 @@ export function resourcesOf(e: DependencySubject, ctx: DependencyContext = PLAIN
       // One open shift per CASHIER (any shop): ordered after a close of any
       // shift of that cashier — whoever queued the close (a manager may).
       for (const p of e.provisional ?? []) if (p.table === "shifts") for (const pid of p.ids) both("shift", pid);
-      k.add(`cashieropen:${e.actorId ?? "*"}`);
+      k.add(`cashieropen:${actor ?? "*"}`);
       return k;
     case "close_shift": {
       add("shift", a.p_shift_id);

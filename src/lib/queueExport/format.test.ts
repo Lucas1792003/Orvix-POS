@@ -185,7 +185,7 @@ describe("format version 2 (migration 086 final pass)", () => {
     expect(env.formatVersion).toBe(2);
     expect(env.header.summary).toMatchObject({ total: 1, onlineOperations: 1 });
     const back = await decryptQueueExport(JSON.stringify(env), PASS);
-    expect(back.onlineOperations).toEqual([online]);
+    expect(back.onlineOperations).toEqual([{ ...online, orgId: null }]);   // files without an organisation read as null
   });
 
   it("still reads a genuine version-1 file written by the HEAD build (ae51e69): 086 fields default to null, no online operations", async () => {

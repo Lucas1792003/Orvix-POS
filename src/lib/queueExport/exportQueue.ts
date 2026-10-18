@@ -6,7 +6,7 @@
 // browser (second terminal / dev) the encrypted file is offered as a
 // download instead. The passphrase is never stored or logged.
 // ----------------------------------------------------------------------
-import { localDb } from "../localDb";
+import { localDb, SYNC_STATE_KEYS } from "../localDb";
 import { backendHost } from "../supabase";
 import { getTillId } from "../tillId";
 import { APP_VERSION } from "../clientInfo";
@@ -79,6 +79,12 @@ export async function exportPendingQueue(passphrase: string): Promise<ExportQueu
   const contents = JSON.stringify(envelope, null, 1);
   const fileName = defaultExportFileName(tillId, now);
   const summary = summarize(payload.entries, payload.onlineOperations.length);
+  // Durable BEFORE the file leaves the till: every entry in it was queued
+  // before this time, and once it may be replayed elsewhere none of them can
+  // prove it was never sent. (A failed write still leaves this session's
+  // in-memory record, recordQueueExport below.)
+  const markedAt = new Date().toISOString();
+  await localDb.syncState.put({ key: SYNC_STATE_KEYS.lastQueueExport, value: markedAt, updatedAt: markedAt }).catch(() => undefined);
 
   const api = window.electronAPI;
   if (api?.saveQueueExport) {

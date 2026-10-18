@@ -5,6 +5,7 @@ import { Input } from "../ui/Input";
 import { useTranslation } from "../../hooks/useTranslation";
 import { localDb } from "../../lib/localDb";
 import { countQueue } from "../../lib/queueExport/collect";
+import { useAuthStore } from "../../stores/authStore";
 import { exportPendingQueue, type ExportQueueResult } from "../../lib/queueExport/exportQueue";
 import { MIN_PASSPHRASE_LENGTH, type QueueExportSummary } from "../../lib/queueExport/format";
 
@@ -29,7 +30,7 @@ export const ExportQueueDialog = ({ open, onClose }: { open: boolean; onClose: (
     setConfirm("");
     setError("");
     setResult(null);
-    void countQueue(localDb).then((s) => { if (alive) setSummary(s); }).catch(() => undefined);
+    void countQueue(localDb, useAuthStore.getState().currentOrgId ?? null).then((s) => { if (alive) setSummary(s); }).catch(() => undefined);
     return () => { alive = false; };
   }, [open]);
 

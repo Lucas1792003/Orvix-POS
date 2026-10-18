@@ -10,7 +10,7 @@ vi.mock("../supabase", () => ({
   },
 }));
 
-import { localDb } from "../localDb";
+import { localDb, SYNC_STATE_KEYS } from "../localDb";
 import { drainOutbox, enqueueOutbox, recordIdMapping, registerOutboxReconciler } from "../../stores/data/outbox";
 import { useAuthStore } from "../../stores/authStore";
 import { collectQueueExport } from "./collect";
@@ -37,13 +37,16 @@ function memoryStorage(seed: Record<string, string> = {}): Storage {
   } as Storage;
 }
 
-/** Everything the queue consists of, as stored (raw rows, primary-key order). */
+/** Everything the queue consists of, as stored (raw rows, primary-key order).
+ *  The one thing an export adds is its own durable time mark (post-checkpoint
+ *  pass: queued entries no longer prove they were never sent) — never a queue row. */
 async function rawQueueState(): Promise<string> {
   const [outbox, idMap, syncState, authCache] = await Promise.all([
     localDb.syncOutbox.toArray(), localDb.provisionalIdMap.toArray(), localDb.syncState.toArray(), localDb.authCache.toArray(),
   ]);
-  return JSON.stringify({ outbox, idMap, syncState, authCache });
+  return JSON.stringify({ outbox, idMap, syncState: syncState.filter((r) => r.key !== SYNC_STATE_KEYS.lastQueueExport), authCache });
 }
+const exportMark = async () => (await localDb.syncState.get(SYNC_STATE_KEYS.lastQueueExport))?.value ?? null;
 
 const saveQueueExport = vi.fn();
 
@@ -154,6 +157,7 @@ describe("exportPendingQueue (read-only, encrypted, no secrets)", () => {
     // a second export (e.g. a retry) changes nothing either
     await exportPendingQueue(PASS);
     expect(await rawQueueState()).toBe(before);
+    expect(await exportMark()).toMatch(/^\d{4}-\d\d-\d\dT/);
 
     // the exported keys are what the drain sends, in the same order
     const { contents } = saveQueueExport.mock.calls[0][0] as { contents: string };
@@ -205,6 +209,7 @@ describe("exportPendingQueue (read-only, encrypted, no secrets)", () => {
     saveQueueExport.mockResolvedValue({ ok: false, canceled: true });
     await expect(exportPendingQueue(PASS)).resolves.toEqual({ status: "canceled" });
     expect(await rawQueueState()).toBe(before);
+    expect(await exportMark()).not.toBeNull();       // conservative: marked before the file could leave
   });
 
   it("refuses a weak passphrase before anything is written", async () => {
