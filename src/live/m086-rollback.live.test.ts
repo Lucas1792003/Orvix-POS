@@ -10,7 +10,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { signedInClient, makeClient } from "./liveHelpers";
 import { runSql } from "../../e2e/helpers/db";
 import { liveCfg } from "../../e2e/helpers/env";
-import { fingerprint, ledgerRowText, snapshot, snapDiff, sql1, lit, delay } from "./p086-lib";
+import { apply086, apply086Recorded, fingerprint, ledgerRowText, rollback086, snapshot, snapDiff, sql1, lit, delay } from "./p086-lib";
 
 const enabled = process.env.M086_LIVE === "1";
 // These tests apply and roll back migration 086: ONLY the disposable loopback
@@ -37,16 +37,17 @@ describe.skipIf(!enabled)("086 Stage 1 rollback", () => {
     Promise.resolve(c.rpc("op_execute", { p_key: key, p_rpc: rpc, p_args: args, p_actor_id: A.ids.cashA }));
   const sales = () => Number(sql1(`SELECT count(*) FROM sales WHERE shift_id = ${lit(st.shiftA)}`));
   const waitPgrst = async (fn: () => Promise<boolean>) => { for (let i = 0; i < 80; i++) { if (await fn()) return; await delay(250); } throw new Error("PostgREST schema cache did not change"); };
-  const stateOf = (key: string) => sql1(`SELECT state || '/' || coalesce(outcome_code, '') FROM idempotency_keys WHERE key = ${lit(key)}::uuid`);
+  // organisation A's row (R.5 uses some of A's keys in organisation B: their own operations)
+  const stateOf = (key: string) => sql1(`SELECT state || '/' || coalesce(outcome_code, '') FROM idempotency_keys WHERE key = ${lit(key)}::uuid AND org_id = ${lit(A.ids.org)}`);
 
   afterAll(() => writeFileSync(process.env.P086_EVIDENCE ?? "/dev/null", JSON.stringify({ at: new Date().toISOString(), results }, null, 2)));
 
   T("R.0", "database RESTART (container restart, clean shutdown): every outcome survives; executor and lookup work afterwards", async () => {
     cashA = await signedInClient(cfg, A.emails.cashA, st.pw);
-    const before = sql1("SELECT md5(string_agg(k::text, '|' ORDER BY key)) || ' ' || count(*) FROM idempotency_keys k");
+    const before = sql1("SELECT md5(string_agg(k::text, '|' ORDER BY org_id, key)) || ' ' || count(*) FROM idempotency_keys k");
     execFileSync("docker", ["restart", "phf-iso-db"], { stdio: "ignore" });
     for (let i = 0; i < 120; i++) { try { if (sql1("SELECT 'up'") === "up") break; } catch { /* starting */ } await delay(500); }
-    expect(sql1("SELECT md5(string_agg(k::text, '|' ORDER BY key)) || ' ' || count(*) FROM idempotency_keys k")).toBe(before);
+    expect(sql1("SELECT md5(string_agg(k::text, '|' ORDER BY org_id, key)) || ' ' || count(*) FROM idempotency_keys k")).toBe(before);
     let st1: any;
     for (let i = 0; i < 120; i++) { st1 = await Promise.resolve(cashA.rpc("op_status", { p_key: st.keep.b2.key, p_rpc: "complete_sale", p_fence: false, p_expected_actor_id: null })); if (!st1.error) break; await delay(500); }
     expect(st1.data).toMatchObject({ status: "rejected", code: "P0001" });
@@ -58,7 +59,26 @@ describe.skipIf(!enabled)("086 Stage 1 rollback", () => {
   T("R.1", "functions-only rollback: op_* gone; columns, tombstones, safe prune and search_path hardening KEPT", async () => {
     cashA = cashA ?? await signedInClient(cfg, A.emails.cashA, st.pw);
     const tombstones = Number(sql1("SELECT count(*) FROM idempotency_keys WHERE state IN ('rejected','abandoned')"));
-    runSql(readFileSync(process.env.M086_ROLLBACK!, "utf8"));
+    const rb = readFileSync(process.env.M086_ROLLBACK!, "utf8");
+    const ops = () => sql1("SELECT count(*) FROM pg_proc WHERE pronamespace='public'::regnamespace AND proname LIKE 'op\\_%'");
+    const ops0 = ops();
+    // the runner records 086 (this stack's db part applied it directly)
+    apply086Recorded();
+    // without the runner's owner gate (or outside a transaction) the preflight refuses; nothing changes
+    expect(() => runSql(rb)).toThrow(/no owner confirmation/);
+    expect(() => runSql(`BEGIN;\n${rb}\nCOMMIT;`)).toThrow(/no owner confirmation/);
+    // a gate set by hand for the session is not the runner's transaction
+    expect(() => runSql(`SET orvix.rollback_gate = 'till-queues-empty-confirmed-by-owner';\n${rb}`)).toThrow(/not inside the runner's transaction/);
+    expect(() => runSql(`BEGIN;\nSET LOCAL orvix.rollback_gate = 'till-queues-empty-confirmed-by-owner';\n${rb}\nCOMMIT;`)).toThrow(/not inside the runner's transaction/);
+    expect(ops()).toBe(ops0);
+    expect(sql1("SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '086'")).toBe("1");
+    // as apply-migrations.sh --rollback 086 --owner-confirmed-till-queues-empty runs it: one transaction, gate set
+    const ledger0 = sql1("SELECT count(*) || ' ' || md5(string_agg(k::text, '|' ORDER BY org_id, key)) FROM idempotency_keys k");
+    rollback086(rb);
+    expect(sql1("SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '086'")).toBe("0");
+    expect(sql1("SELECT count(*) || ' ' || md5(string_agg(k::text, '|' ORDER BY org_id, key)) FROM idempotency_keys k")).toBe(ledger0);
+    // a second rollback refuses in its preflight (086 is no longer applied)
+    expect(() => rollback086(rb)).toThrow(/086 is not applied here/);
     expect(sql1("SELECT count(*) FROM pg_proc WHERE pronamespace='public'::regnamespace AND proname LIKE 'op\\_%'")).toBe("0");
     expect(Number(sql1("SELECT count(*) FROM idempotency_keys WHERE state IN ('rejected','abandoned')"))).toBe(tombstones);
     expect(sql1("SELECT count(*) FROM pg_proc WHERE pronamespace='public'::regnamespace AND proconfig = '{search_path=public}'")).toBe("0");
@@ -66,7 +86,8 @@ describe.skipIf(!enabled)("086 Stage 1 rollback", () => {
     // idem_begin is the 085 behaviour on the per-organisation ledger: the 086
     // body WITHOUT the UUIDv7 guard (the 085 key-only body would read another
     // organisation's row); its md5 is the one the generated rollback checks
-    const rollbackMd5 = /md5\(prosrc\) FROM pg_proc WHERE oid = 'public\.idem_begin\(uuid,text,text\)'::regprocedure\) <> '([0-9a-f]{32})'/.exec(readFileSync(process.env.M086_ROLLBACK!, "utf8"))![1];
+    // (the post-check's md5; the preflight's is the 086 body)
+    const rollbackMd5 = /<> '([0-9a-f]{32})' THEN\n {4}RAISE EXCEPTION 'rollback post-check: idem_begin is not the per-organisation body/.exec(readFileSync(process.env.M086_ROLLBACK!, "utf8"))![1];
     expect(sql1("SELECT md5(prosrc) || ' ' || array_to_string(proconfig, ',') FROM pg_proc WHERE oid = 'public.idem_begin(uuid,text,text)'::regprocedure"))
       .toBe(`${rollbackMd5} search_path=public, pg_temp`);
     expect(sql1("SELECT prosrc LIKE '%OP_EXECUTOR_REQUIRED%' FROM pg_proc WHERE oid = 'public.idem_begin(uuid,text,text)'::regprocedure")).toBe("f");
@@ -84,7 +105,7 @@ describe.skipIf(!enabled)("086 Stage 1 rollback", () => {
     expect(Number(sql1("SELECT count(*) FROM idempotency_keys WHERE state IN ('rejected','abandoned')"))).toBe(tombstones + 1);
     await waitPgrst(async () => (await X(cashA, randomUUID(), "complete_sale", {})).error?.code === "PGRST202");
     const gone = await X(cashA, randomUUID(), "complete_sale", {});
-    return { tombstonesKept: tombstones, hardenedKept: Number(hardened), idemBegin: "085 body restored", pruneAfterRollback: `inert: ${pruned.data} deleted (a 14-month-old v7 tombstone kept)`, executorCall: `${gone.error.code} (an 086 client falls back / holds)` };
+    return { gate: "refused without the owner gate / outside the runner transaction", ledgerRow086: "removed by the rollback", operationLedger: "byte-identical", secondRollback: "refused (086 not applied)", tombstonesKept: tombstones, hardenedKept: Number(hardened), idemBegin: "086 per-organisation body without the UUIDv7 guard (not the 085 key-only body)", pruneAfterRollback: `inert: ${pruned.data} deleted (a 14-month-old v7 tombstone kept)`, executorCall: `${gone.error.code} (an 086 client falls back / holds)` };
   });
 
   T("R.2", "after rollback: rejected and abandoned keys still cannot execute through the 085 direct path", async () => {
@@ -120,9 +141,58 @@ describe.skipIf(!enabled)("086 Stage 1 rollback", () => {
     return { preReplay: "identical", executorCommittedReplay: "identical", newDirectSale: "committed (state default committed)", directRefusal: "no row (B2 for legacy path, as at 085)" };
   });
 
+  T("R.5", "after rollback: organisations stay separate on the rolled-back idem_begin — one key in two organisations is two operations, each replayed only in its own; a refused key of A runs nothing in A; a pre-074 key stays refused everywhere", async () => {
+    const B = st.B.st;
+    const mgrA = await signedInClient(cfg, A.emails.mgr, st.pw);
+    const mgrB = await signedInClient(cfg, B.emails.mgr, st.pw);
+    const adj = (t: any, delta = 1) => ({
+      p_shop_id: t.ids.shop, p_product_id: t.ids.prod1, p_adjustment_type: "ADJUSTMENT", p_quantity_delta: delta, p_reason: "m086 R.5",
+      p_product_unit_id: null, p_unit_qty: null, p_created_at: null, p_expected_actor_id: t.ids.mgr,
+    });
+    const moves = (org: string) => Number(sql1(`SELECT count(*) FROM inventory_movements WHERE shop_id IN (SELECT id FROM shops WHERE org_id = ${lit(org)})`));
+    const rowsOf = (key: string) => sql1(`SELECT coalesce(string_agg(org_id || '=' || state, ',' ORDER BY org_id), '<none>') FROM idempotency_keys WHERE key = ${lit(key)}::uuid`);
+    // one key, two organisations
+    const k = randomUUID();
+    const a0 = moves(A.ids.org), b0 = moves(B.ids.org);
+    const ra = await direct(mgrA, "adjust_stock", adj(A), k);
+    const rb = await direct(mgrB, "adjust_stock", adj(B, 2), k);
+    expect(ra.error).toBeNull();
+    expect(rb.error).toBeNull();
+    expect(moves(A.ids.org)).toBe(a0 + 1);
+    expect(moves(B.ids.org)).toBe(b0 + 1);
+    expect(rowsOf(k)).toBe([`${A.ids.org}=committed`, `${B.ids.org}=committed`].sort().join(","));
+    const reA = await direct(mgrA, "adjust_stock", adj(A), k);
+    const reB = await direct(mgrB, "adjust_stock", adj(B, 2), k);
+    expect(reA.data).toEqual(ra.data);
+    expect(reB.data).toEqual(rb.data);
+    expect(JSON.stringify(reB.data)).not.toContain(A.ids.shop);
+    expect(moves(A.ids.org)).toBe(a0 + 1);
+    expect(moves(B.ids.org)).toBe(b0 + 1);
+    // B using A's REJECTED key: B's own operation at most — nothing runs in A, A's tombstone unchanged, no A data
+    const tomb = ledgerRowText(st.keep.b2.key, A.ids.org);
+    const a1 = moves(A.ids.org);
+    const steal = await direct(mgrB, "adjust_stock", adj(B), st.keep.b2.key);
+    expect(moves(A.ids.org)).toBe(a1);
+    expect(ledgerRowText(st.keep.b2.key, A.ids.org)).toBe(tomb);
+    expect(JSON.stringify(steal.data ?? steal.error ?? {})).not.toContain(A.ids.shop);
+    // a pre-074 key (no organisation) stays refused in every organisation
+    const k0 = randomUUID();
+    runSql(`INSERT INTO idempotency_keys (key, rpc, actor_id, org_id, request_hash) VALUES (${lit(k0)}, 'adjust_stock', NULL, '!unattributed', md5('pre-074'))`);
+    try {
+      const u1 = await direct(mgrA, "adjust_stock", adj(A), k0);
+      const u2 = await direct(mgrB, "adjust_stock", adj(B), k0);
+      expect(u1.error?.message ?? "").toMatch(/^IDEMPOTENCY_MISMATCH/);
+      expect(u2.error?.message ?? "").toMatch(/^IDEMPOTENCY_MISMATCH/);
+      expect(rowsOf(k0)).toBe("!unattributed=committed");
+    } finally {
+      runSql(`DELETE FROM idempotency_keys WHERE org_id = '!unattributed' AND key = ${lit(k0)}::uuid`);
+    }
+    return { sameKeyTwoOrgs: "two operations, each replayed in its own organisation", bWithARejectedKey: steal.error ? `refused: ${steal.error.code}` : "B's own operation; nothing in A", pre074: "refused in A and B" };
+  });
+
   T("R.4", "forward re-apply after the rollback: preflight accepts the kept columns; outcomes intact (codes kept); executor serves them", async () => {
     const sql = readFileSync(process.env.M086_MIGRATION!, "utf8");
-    runSql(`BEGIN;\n${sql}\nCOMMIT;`);
+    apply086(sql);
     await waitPgrst(async () => !(await X(cashA, randomUUID(), "complete_sale", {})).error?.code?.startsWith("PGRST"));
     expect(fingerprint()).toEqual(st.keep.fp086);
     expect(stateOf(st.keep.b2.key)).toBe("rejected/P0001");

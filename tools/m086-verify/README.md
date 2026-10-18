@@ -14,10 +14,18 @@ Supabase, Vercel or any real server, and nothing is ever applied to production.
 | `recovery` | the emergency recovery tool against 086 and (after the reviewed rollback) 085 | `src/live/m086-recovery.live.test.ts` |
 | `legacy2a` | the Batch 2A client (`LEGACY_COMMIT`, default `ae51e69`) against 086 | `legacy/legacy-2a.spec-src.ts` (copied into the legacy checkout) |
 | `legacy2b` | the money-RPC suite on the legacy direct path against 086 | `legacy/legacy-2b.spec-src.ts` (copied into the legacy checkout) |
-| `rollback` | the reviewed rollback (functions only), restart survival, re-apply | `src/live/m086-rollback.live.test.ts` |
+| `rollback` | the reviewed rollback (functions only; refused without the runner's owner gate; removes the `086` ledger row; operation ledger byte-identical), restart survival, re-apply | `src/live/m086-rollback.live.test.ts` |
 | `client` | the real client modules (outbox, online-only payments, recovery) against the real server; financial effects asserted in PostgreSQL (`supplier_payments`, ledger, balances) | `src/live/m086-client.live.test.ts` |
-| `e2e` | real Chromium (persistent profile, real IndexedDB / Web Locks, crash + restart, two windows, zero-queue payment export) | `e2e/m086-chromium.e2e.ts`, `playwright.m086.config.ts` |
+| `e2e` | real Chromium (persistent profile, real IndexedDB / Web Locks, crash + restart, two windows, zero-queue payment export; a refused lump sum stays final) | `e2e/m086-chromium.e2e.ts`, `e2e/m086-lumpsum.e2e.ts`, `playwright.m086.config.ts` |
 | `audit` | the organisation-isolation audit at 086 (its own fresh stack), incl. `op_execute` / `op_status` authorization and tenant isolation | `tools/security-audit/suites/ops.ts` |
+
+The live parts apply and roll back 086 the way `deploy/lucashome/apply-migrations.sh`
+does (one transaction; the ledger row; the rollback's owner gate — `src/live/p086-lib.ts`
+`apply086` / `rollback086`). The runner ITSELF is tested by
+`deploy/lucashome/tests/migration-plan-test.py` (planner, no database) and
+`deploy/lucashome/tests/apply-migrations-test.sh [--stack]` (the real script against a
+local PostgreSQL container, and with `--stack` the real 083 → 085 → 086 → rollback →
+re-apply cycle on a fresh audit stack).
 
 ## Prerequisites
 

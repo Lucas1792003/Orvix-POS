@@ -9,9 +9,8 @@ import { describe, it, expect, afterAll } from "vitest";
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { signedInClient } from "./liveHelpers";
-import { runSql } from "../../e2e/helpers/db";
 import { liveCfg } from "../../e2e/helpers/env";
-import { sql1, lit, delay, v7 } from "./p086-lib";
+import { apply086, apply086Recorded, rollback086, sql1, lit, delay, v7 } from "./p086-lib";
 import { replayExport, exitCodeFor } from "../../tools/queue-recovery/replay";
 import type { QueueExportEntry, QueueExportPayload } from "../lib/queueExport/format";
 
@@ -303,10 +302,11 @@ describe.skipIf(!enabled)("086 stabilization — queue-recovery tool (H3)", () =
   });
 
   T("P.0", "rollback to the 085 functions (the reviewed rollback script, disposable only)", async () => {
-    runSql(readFileSync(process.env.M086_ROLLBACK!, "utf8"));
+    apply086Recorded();
+    rollback086(readFileSync(process.env.M086_ROLLBACK!, "utf8"));
     await waitExecutor(false);
     expect(sql1("SELECT count(*) FROM pg_proc WHERE pronamespace='public'::regnamespace AND proname LIKE 'op\\_%'")).toBe("0");
-    return "op_* gone; idem_begin = 085 body";
+    return "op_* gone; idem_begin = the 086 per-organisation body without the UUIDv7 guard";
   });
 
   T("P.1", "085: no executor detected; a UUIDv4 entry and an own UUIDv7 entry use the direct path (as the till does on 085); a re-run replays them", async () => {
@@ -351,7 +351,7 @@ describe.skipIf(!enabled)("086 stabilization — queue-recovery tool (H3)", () =
   });
 
   T("P.3", "re-apply 086 after the rollback (disposable): executor back", async () => {
-    runSql(`BEGIN;\n${readFileSync(process.env.M086_MIGRATION!, "utf8")}\nCOMMIT;`);
+    apply086(readFileSync(process.env.M086_MIGRATION!, "utf8"));
     await waitExecutor(true);
     const r = await replay([entry("complete_sale", sale(), v7(), { actorId: A.ids.cashA })], "cashA");
     expect(r.executor).toBe("available");

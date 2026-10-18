@@ -6,10 +6,13 @@ import { useToast } from "../ui/Toast";
 import { MoneyInput } from "../forms/MoneyInput";
 import { formatMmk } from "../../lib/utils";
 import { getErrorMessage } from "../../lib/errors";
+import { mayAlreadyBeRecorded, outcomeToast } from "../../lib/outcomeToast";
+import { isUnresolvedOperation } from "../../stores/data/operationPrompt";
 import { useDataStore } from "../../stores/dataStore";
 import { useTranslation } from "../../hooks/useTranslation";
 import { getPurchaseOrderBalanceMmk } from "../../features/suppliers/debt";
 import { supplierPaymentMethods } from "../../features/suppliers/uiConstants";
+import { inDoubtPoPayments, pendingLumpSumState, type PendingState } from "../../features/suppliers/lumpSumOutcome";
 import type { PurchaseOrder, SupplierPaymentMethod } from "../../types";
 
 interface SupplierPaymentModalProps {
@@ -58,6 +61,39 @@ export const SupplierPaymentModal = ({ purchaseOrder, onClose }: SupplierPayment
     // payment update, which is what we want anyway since the modal closes.
   }, [purchaseOrder, balance]);
 
+  // A lump sum to this supplier whose outcome is unknown may already have paid
+  // this PO: no payment here until the server has answered for it (it is
+  // checked in the lump-sum dialog or on the Sync page). Read on every
+  // opening and again at submit; an unreadable store blocks too.
+  // Likewise an earlier payment of THIS purchase order whose outcome is
+  // unknown (in doubt in the queue, any amount): it may have paid what is
+  // shown as owed.
+  const [lumpPending, setLumpPending] = useState<PendingState | null>(null);
+  const [poInDoubt, setPoInDoubt] = useState<number | null>(null);
+  const poId = purchaseOrder?.id ?? null;
+  const poSupplierId = purchaseOrder?.supplierId ?? null;
+  const poShopId = purchaseOrder?.shopId ?? null;
+  const readGuards = async (id: string, supplierId: string, shopId: string) => {
+    const [lump, own] = await Promise.all([
+      pendingLumpSumState(supplierId, shopId),
+      inDoubtPoPayments([id]).catch(() => 1),                // unreadable queue: fail closed
+    ]);
+    return { lump, own };
+  };
+  useEffect(() => {
+    setLumpPending(null);
+    setPoInDoubt(null);
+    if (!poId || !poSupplierId || !poShopId) return;
+    let live = true;
+    void readGuards(poId, poSupplierId, poShopId).then(({ lump, own }) => {
+      if (!live) return;
+      setLumpPending(lump);
+      setPoInDoubt(own);
+    });
+    return () => { live = false; };
+  }, [poId, poSupplierId, poShopId]);
+  const blockedByLumpSum = lumpPending === null || lumpPending.kind !== "none" || poInDoubt === null || poInDoubt > 0;
+
   const requestClose = () => {
     if (submitting) return;
     setError(null);
@@ -76,8 +112,13 @@ export const SupplierPaymentModal = ({ purchaseOrder, onClose }: SupplierPayment
       setError(t("suppliers", "amountRange", { max: formatMmk(balance) }));
       return;
     }
+    if (blockedByLumpSum) return;
     setSubmitting(true);
     try {
+      const { lump, own } = await readGuards(purchaseOrder.id, purchaseOrder.supplierId, purchaseOrder.shopId);
+      setLumpPending(lump);
+      setPoInDoubt(own);
+      if (lump.kind !== "none" || own > 0) return;
       await recordSupplierPayment({
         purchaseOrderId: purchaseOrder.id,
         amountMmk: form.amountMmk,
@@ -92,6 +133,15 @@ export const SupplierPaymentModal = ({ purchaseOrder, onClose }: SupplierPayment
       });
       onClose();
     } catch (err) {
+      if (mayAlreadyBeRecorded(err) || isUnresolvedOperation(err)) {
+        // Unknown outcome / an earlier attempt still undecided / recorded
+        // meanwhile: never "payment failed", and the form is not left filled
+        // in — the dialog closes; re-opened, it is blocked while a payment of
+        // this purchase order is in doubt.
+        toast(outcomeToast(err, t, t("suppliers", "paymentFailed"), t("suppliers", "couldNotRecord")));
+        onClose();
+        return;
+      }
       const message = getErrorMessage(err, t("suppliers", "couldNotRecord"));
       setError(message);
       toast({ variant: "error", title: t("suppliers", "paymentFailed"), description: message });
@@ -183,6 +233,17 @@ export const SupplierPaymentModal = ({ purchaseOrder, onClose }: SupplierPayment
             />
           </label>
 
+          {lumpPending !== null && lumpPending.kind !== "none" && lumpPending.kind !== "po-pending" && (
+            <div role="alert" data-testid="po-blocked-by-lump-sum" className="rounded-2xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              {t("suppliers", "poBlockedByLumpSum")}
+            </div>
+          )}
+          {poInDoubt !== null && poInDoubt > 0 && (
+            <div role="alert" data-testid="po-payment-unknown" className="rounded-2xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              <div className="font-semibold">{t("suppliers", "lumpUnknownTitle")}</div>
+              <div>{t("suppliers", "poPaymentUnknown")}</div>
+            </div>
+          )}
           {error && (
             <div className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
               {error}
@@ -195,7 +256,7 @@ export const SupplierPaymentModal = ({ purchaseOrder, onClose }: SupplierPayment
             </Button>
             <Button
               onClick={handleSubmit}
-              disabled={submitting || form.amountMmk <= 0 || form.amountMmk > balance}
+              disabled={submitting || blockedByLumpSum || form.amountMmk <= 0 || form.amountMmk > balance}
             >
               {submitting ? t("suppliers", "recording") : t("suppliers", "recordPayment")}
             </Button>

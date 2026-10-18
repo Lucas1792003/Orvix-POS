@@ -25,6 +25,25 @@ export function sql1(q: string): string {
   return runSql(q).trim();
 }
 
+/** As `apply-migrations.sh --from 086 --to 086` runs it: one transaction,
+ *  the migration and its ledger row (the disposable stack's ledger has only
+ *  `version`). Fails if 086 is already recorded, as the runner refuses. */
+export function apply086(sql: string): string {
+  return runSql(`BEGIN;\n${sql}\nINSERT INTO supabase_migrations.schema_migrations (version) VALUES ('086');\nCOMMIT;`);
+}
+
+/** The db part applied 086 directly; the runner would have recorded it. */
+export function apply086Recorded(): void {
+  runSql("INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('086') ON CONFLICT DO NOTHING");
+}
+
+/** As `apply-migrations.sh --rollback 086 --owner-confirmed-till-queues-empty`
+ *  runs the reviewed rollback: one transaction, the owner gate set first.
+ *  The rollback removes the 086 ledger row itself (it must be recorded). */
+export function rollback086(sql: string): string {
+  return runSql(`BEGIN;\nSET LOCAL lock_timeout = '5s';\nSET LOCAL statement_timeout = '120s';\nSELECT set_config('orvix.runner_txid', txid_current()::text, true);\nSELECT set_config('orvix.rollback_gate', 'till-queues-empty-confirmed-by-owner', true);\n${sql}\nCOMMIT;`);
+}
+
 /** A long-lived psql session (needed for open transactions, held locks,
  *  session settings and backend pids). Errors are returned, not thrown. */
 export class Psql {

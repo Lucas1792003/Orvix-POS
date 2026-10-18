@@ -374,7 +374,10 @@ export interface PurchaseState {
    *  payment voided. Throws on failure so the caller can surface it. */
   voidSupplierPayment: (input: { paymentId: string; reason: string }) => Promise<void>;
   /** Pay a supplier a single amount, auto-allocated across its outstanding POs
-   *  (oldest-first) for the given shop. Throws on failure. */
+   *  (oldest-first) for the given shop. Resolves when the server RECORDED it
+   *  (`replyAvailable: false`: committed, but its reply could not be read —
+   *  the server's rows are reloaded). Throws on a refusal, and a
+   *  PendingConfirmationError when the outcome is unknown. */
   paySupplierLumpSum: (input: {
     supplierId: string;
     shopId: string;
@@ -382,7 +385,7 @@ export interface PurchaseState {
     paymentMethod: SupplierPaymentMethod;
     referenceNo?: string;
     notes?: string;
-  }) => Promise<void>;
+  }) => Promise<{ replyAvailable: boolean }>;
   /** Internal — called by the outbox drain once a queued receive/payment
    *  actually runs server-side. Not for direct UI use. */
   reconcileReceivePurchaseOrder: (data: unknown, provisional: ProvisionalRef, ackId?: string) => void;

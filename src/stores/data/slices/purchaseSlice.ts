@@ -9,6 +9,8 @@ import { useAuthStore, assertOfflineWriteEligible } from "../../authStore";
 import { deleteLocalRows, putLocalRows } from "../localWrites";
 import { beginOperation, newIdempotencyKey, ONLINE_ONLY_RETRIES, type OperationContext } from "../idempotentRpc";
 import { callOnlineOnly } from "../onlineOnly";
+import { PendingConfirmationError } from "../operationPrompt";
+import { verifiedReload } from "../verifiedReload";
 import { Stage, submitOfflineCapable } from "../writeAhead";
 import { serverStockRows } from "../stockLedger";
 
@@ -434,7 +436,7 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
   },
 
   paySupplierLumpSum: async ({ supplierId, shopId, amountMmk, paymentMethod, referenceNo, notes }) => {
-    const { data, error } = await callOnlineOnly("pay_supplier_lump_sum", {
+    const outcome = await callOnlineOnly("pay_supplier_lump_sum", {
       p_supplier_id: supplierId,
       p_shop_id: shopId,
       p_amount_mmk: amountMmk,
@@ -443,8 +445,19 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
       p_notes: notes ?? null,
       p_idempotency_key: newIdempotencyKey(),
     }, { retries: ONLINE_ONLY_RETRIES });
+    const { data, error } = outcome;
     if (error) throw error;
-    if (!data) throw new Error("Lump-sum supplier payment returned no data.");
+    if (!data) {
+      if (outcome.responseUnavailable) {
+        // COMMITTED on the server (its ledger says so) but the reply cannot be
+        // read here (purged / withheld): a recorded payment — never "failed".
+        // The operation is settled as applied; the server's rows are reloaded.
+        void verifiedReload();
+        return { replyAvailable: false };
+      }
+      // No reply and no recorded outcome: never reported as a failure.
+      throw new PendingConfirmationError("The server did not return this payment's result. Its status is unknown: it may already be recorded — check it before entering anything again.");
+    }
     const result = data as {
       supplierPayments: SupplierPayment[];
       purchaseOrders: PurchaseOrder[];
@@ -457,6 +470,7 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
       supplierPayments: [...result.supplierPayments, ...s.supplierPayments],
       auditLogs: [...result.auditLogs, ...s.auditLogs],
     }));
+    return { replyAvailable: true };
   },
 
   voidSupplierPayment: async ({ paymentId, reason }) => {

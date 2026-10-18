@@ -58,13 +58,59 @@ exceeds total outstanding balance", a recorded definitive refusal through the
 executor) and rolls back entirely — never silently reduced.
 `record_supplier_payment` (one purchase order) already checks under the row
 lock and is unchanged.
-*Open decision (pre-existing classification):* a lump-sum refusal
-("Payment amount exceeds total outstanding balance") is a recorded, FINAL
-refusal through the executor; the single-PO "can only be recorded against
-received purchase orders" is a retried dependency. A lump sum entered while
-its purchase-order receipt is still queued on another till is therefore
-refused for good and must be re-entered (no money effect). Whether it should
-be a dependency is an owner decision (not changed here).
+*Owner decision (2026-10-18): insufficient-balance refusals stay FINAL.* A
+lump-sum refusal ("Payment amount exceeds total outstanding balance", or "This
+supplier has no outstanding balance in this shop" when it was paid elsewhere
+meanwhile) is a recorded definitive refusal through the executor (a rejected
+tombstone; on an 085 server the client settles it as refused, with no server
+row) and is **never retried automatically** — not after a delayed
+purchase-order receipt raises the balance, not after a restart, not from
+another window (the till's record is settled `refused`; its key is never sent
+again; the single-PO "can only be recorded against received purchase orders"
+stays a retried dependency). The payment dialog says the payment was **NOT
+recorded** and will not be sent again, reloads the balance from the server,
+clears the amount, and enables a new attempt only after that reload and an
+explicit confirmation ("I checked the current balance. Record this as a NEW
+payment."); the new attempt is a new operation with a new key. The refusal is
+kept on the till (IndexedDB, per organisation, supplier and shop): closing and
+re-opening the dialog, a restart or another window start from it again until a
+new payment for that supplier and shop is recorded. If the reload keeps
+failing, nothing can be paid from the dialog (fail closed; Sync / the owner).
+Tested: `src/stores/data/lumpSumRefusal.test.ts` (both server paths, the kept
+refusal) and `e2e/m086-lumpsum.e2e.ts` (real Chromium: two windows of one till,
+another device paying meanwhile, close + re-open, a delayed receipt, a crash +
+restart; per-PO amounts in PostgreSQL).
+*Lump sums whose outcome is unknown (2026-10-18).* A lump sum the server
+committed but whose reply this till cannot read (lost, then purged or
+withheld) is a **recorded** payment, never "failed": the store reports it as
+recorded and reloads the server's rows. A lump sum whose reply was lost keeps
+its key and stays unresolved on the till; while one exists for a supplier and
+shop, the lump-sum dialog says **"Payment status unknown"** and every new
+payment to that supplier and shop is blocked — the lump-sum dialog AND the
+single-purchase-order dialog, on every opening and again at submit, in every
+window and after a restart (the operation lives in IndexedDB; only this
+organisation's records count). It is resolved only by the server's answer for
+its own key: **Check with server** (a read-only lookup, never a fence, nothing
+sent) or, for the person who entered it, **Send the same payment again** (the
+same key; never executed twice). Committed → "Payment recorded" and the balance
+is reloaded; rejected → the actual rejection (a balance refusal stays final, as
+above); stopped → it can be entered again; anything else → still unknown,
+still blocked. No key is ever created for it automatically, and a changed
+balance is never taken as proof. Only its creator or the owner can check it;
+only its creator can resend it, and only within the retry window, on its own
+backend. When it stays unknown (another user's, too old, a record without its
+backend, a server without 086), the owner checks it and **marks it verified on
+the Sync page** (on 086 that first decides or stops the key on the server). A
+single-purchase-order payment whose outcome is unknown is handled the same way:
+never "failed", the dialog closes, and while it is in doubt in the queue both
+the purchase-order dialog and the lump-sum dialog for that supplier and shop are
+blocked until the queue confirms it by its own key. If the server can never
+answer for it (a server without 086, or a row queued for another backend), the
+block does not lift by itself and "Confirm with server" cannot decide it: the
+owner exports the pending data and reconciles that row with
+`tools/queue-recovery` (export → reconcile), which is the documented way out.
+Dialogs re-read these blocks when opened, not while they stay open. Tested: `src/stores/data/lumpSumOutcome.test.ts`
+and `e2e/m086-lumpsum.e2e.ts` (M-LU, M-LU2, M-PO).
 
 1. **Ledger** (`idempotency_keys`): `state` (`committed` default | `rejected` | `abandoned`),
    `outcome_code`, `outcome_message`, `decided_at` (server clock at insert —
@@ -435,52 +481,117 @@ operation (and those block the desktop updater) until 086 is there.
    the ledger's primary key — `(key)` before 086 — and the number of ledger
    rows, and of rows with `org_id IS NULL`: those move to the `!unattributed`
    namespace and keep refusing their key).
-2. Apply with `apply-migrations.sh` (`psql -U supabase_admin --single-transaction`)
+2. Apply with `deploy/lucashome/apply-migrations.sh --from 086 --to 086`
+   (`--dry-run` first: it plans and checks without changing anything)
    **outside** the e-mail backup window: the migration waits at most 3 s for
    the `idempotency_keys` lock and then aborts with nothing changed. Once it
    has the lock it HOLDS it (ACCESS EXCLUSIVE) until COMMIT — backfills, the
    CHECK validation, index builds, the primary-key rebuild and all function
    DDL — so every idempotent RPC waits for the whole apply. At the current
    ledger size that is seconds; measure it on the size the preflight
-   reports before choosing the window. The runner
-   fails closed: if psql exits non-zero it prints `APPLY FAILED`, exits 1 and
-   records **no** version (before this pass a failed apply was hidden by
-   `|| true` and its versions were recorded as applied). A `/tmp/mig` left in
-   the container by an interrupted run is removed before the copy (and on
-   every exit) — `docker compose cp` would otherwise nest the new files and run
-   the stale ones — and each copied file is verified against the repo by
-   sha256. A lost connection is reported as outcome unknown, and a failure
-   while recording versions as "applied but not recorded"; never as done.
+   reports before choosing the window. The runner (`migration_plan.py`) plans
+   from a snapshot of the ledger and **refuses**: a version already recorded;
+   one older than the newest recorded (never 062–085 once 086 is recorded);
+   a gap (an earlier version neither recorded nor held — 084 is the held one;
+   `--allow-skipped` applies it, never after a newer one); a recorded file whose
+   sha256 no longer matches; a ledger version it does not know, or one without
+   a repo file; the 086 lineage (`op_execute` or the `(org_id, key)` identity)
+   without 086 recorded — then only 086 itself may run; a statement that
+   cannot run inside one transaction. It then runs ONE `psql --single-transaction`:
+   a guard (one runner at a time — a second one fails `RUNNER_BUSY`; bounded
+   `lock_timeout`; the ledger locked and re-checked against the plan —
+   `LEDGER_CHANGED`/`SCHEMA_CHANGED` otherwise), the migrations, and their
+   ledger rows with `ARRAY['sha256:<file hash>']` in `statements`. After every
+   migration a check file re-asserts the `lock_timeout` (086 itself ends with
+   `RESET lock_timeout`) and verifies the transaction is still the runner's
+   (`RUNNER_TRANSACTION_BROKEN` otherwise: a migration ended it — reported,
+   nothing recorded, owner review). Ledger rows whose `statements` are anything
+   but empty or one checksum, and gaps in the file numbering, are refused. Applied and
+   recorded are one commit: a failure records nothing, and after a lost
+   connection the ledger itself says whether it committed. Each run copies its
+   files to its own `/tmp/mig-*` directory in the container (verified by
+   sha256, removed on exit). Ledger rows recorded before this runner have no
+   checksum; they are reported, never rewritten.
 3. Do **not** schedule `prune_idempotency_keys` or call `op_purge_responses` in Stage 1.
 
 ## Rollback
 
 Reviewed script: `supabase/rollbacks/086_operation_outcomes.rollback.sql`
-(generated with the migration; **owner-approved use only**; never run by
-`apply-migrations.sh`, which only reads `supabase/migrations/`). Functions
-only: it drops every `public.op_*` function and installs `idem_begin`
+(generated with the migration; **owner-approved use only**), run ONLY through
+the runner, which never applies it as a migration:
+
+```
+mac$ deploy/lucashome/apply-migrations.sh --rollback 086 --owner-confirmed-till-queues-empty --dry-run
+mac$ deploy/lucashome/apply-migrations.sh --rollback 086 --owner-confirmed-till-queues-empty
+```
+
+`--owner-confirmed-till-queues-empty` is the owner's operational gate: every
+till's queue is empty **and** no till holds an unresolved online-only operation
+(supplier payments awaiting confirmation) — or both were exported and
+reconciled by an owner **with the current build** (see "Client rollback /
+downgrade" below). The server cannot prove that. The runner refuses without the
+gate, **and** it also refuses unless 086 is recorded, is the newest recorded
+version and carries the checksum of this repo's 086 file (a checksum mismatch
+on ANY recorded version blocks the rollback too — owner review first).
+
+**What a rollback does to the tills.** A current-build till that has seen 086
+on this backend treats a missing executor as a stale schema cache: after the
+rollback it **holds every executor operation** (sales, shifts, payments) and
+cannot check or close unresolved online operations, until 086 is re-applied. A
+rollback is therefore a short maintenance window, not a fallback mode: stop the
+API for its duration (no new requests may arrive mid-rollback), and plan the
+re-apply.
+
+The script is ONE statement (a single `DO` block, no `BEGIN`/`COMMIT`): atomic
+in any client mode — with or without `ON_ERROR_STOP`, inside or outside a
+transaction. It runs only inside the runner's transaction: the guard sets
+`lock_timeout` (5 s), `statement_timeout` (120 s), the gate and the
+transaction's own id (`orvix.runner_txid`), all for that transaction only. Run
+any other way (plain `psql -f`, a gate set by hand for a session) its preflight
+refuses and **nothing changes** (tested both ways). Preflight: the gate, the
+runner's transaction, a bounded `lock_timeout`, `op_execute` present, 086
+recorded and no newer version, `idem_begin` exactly the 086 body. It then
+write-locks `idempotency_keys` (bounded) and fingerprints it (row count and two
+sums of per-row hashes — no size limit).
+
+Functions only: it drops every `public.op_*` function and installs `idem_begin`
 WITHOUT the UUIDv7 guard — the 085 behaviour on the per-organisation ledger
 ((org_id, key) lookups and locks; md5 in the script's post-check). The 085
 key-only body is deliberately NOT restored: once a key is used in two
 organisations it would read another organisation's row. A post-check aborts
-the transaction unless `idem_begin` is that body, `idem_finish` and
-`pay_supplier_lump_sum` are still the corrected 086 bodies, the ledger
-identity is still `(org_id, key)`, no `op_*` function is left, no function is
-pinned to `search_path=public` and the kept prune is the inert 086 body.
-**Keep** the per-organisation identity, the columns, constraint, indexes,
-every tombstone, the 086 `prune_idempotency_keys` (inert without the
-executor) and the hardened search paths. Forward recovery: re-apply 086 — its
-preflight accepts the rollback's `idem_begin` and the corrected bodies
-(idempotent; outcome codes kept). Tested: apply → re-apply → rollback →
-re-apply on a disposable stack (`tools/m086-verify`, `rollback` part).
+unless `idem_begin` is that body, `idem_finish` and `pay_supplier_lump_sum` are
+still the corrected 086 bodies, the ledger identity is still `(org_id, key)`,
+no `op_*` function is left, no function is pinned to `search_path=public`, the
+kept prune is the inert 086 body and the operation ledger (`idempotency_keys`:
+every committed row, every rejected/abandoned tombstone) has the same
+fingerprint. Only then, last, it removes the `086` row from
+`supabase_migrations.schema_migrations` (exactly one row, or it aborts). Any
+failure — lock or statement timeout, a post-check, the ledger delete itself —
+rolls back everything: 086 stays applied and recorded. **Keep** the
+per-organisation identity, the columns, constraint, indexes, every tombstone,
+the 086 `prune_idempotency_keys` (inert without the executor) and the hardened
+search paths. The rollback is not itself recorded in the database: the
+runner's output and `migration-checkpoints.txt` are its record. Forward
+recovery: `apply-migrations.sh --from 086 --to 086` — the runner allows exactly
+086 while the 086 lineage is present unrecorded; its preflight accepts the
+rollback's `idem_begin` and the corrected bodies (idempotent; outcome codes
+kept). Tested (`deploy/lucashome/tests/apply-migrations-test.sh --stack`,
+through the real runner): 083 → 085 (084 held) → 086 → rollback refused without
+the gate, as plain psql with and without `ON_ERROR_STOP`, with a gate set by
+hand, failing on a write-locked ledger (bounded wait) and failing at its last
+statement (injected) — each with nothing changed → rollback → re-apply, twice;
+concurrent rollbacks (one wins); 062–085 and 084 refused at every step. Also
+rollback → re-apply with live clients and two organisations (`tools/m086-verify`,
+`rollback` part: R.5 — one key in two organisations stays two operations,
+a pre-074 key stays refused everywhere, on the rolled-back `idem_begin`).
 
 **Never:** restore 062's prune body (it deletes tombstones and re-opens
 refused keys); re-run ANY migration 062–085 once 086 is applied — their
 key-only `idem_begin` / `idem_finish` over the per-organisation ledger would
 mix organisations' rows of one key (062's would hand one organisation's
 stored reply to another; 063/070 would also revert the lump-sum correction
-and re-pin search paths). `apply-migrations.sh` does not enforce this yet
-(proposal §4): a range must never END before 086 after 086 is applied. Never
+and re-pin search paths). `apply-migrations.sh` refuses it (already recorded /
+out of order / 086 lineage present). Never
 restore a pre-086
 backup/PITR without re-checking every till's held operations (it loses every
 rejected/abandoned decision); re-run 085 after 086 (it re-pins one function to

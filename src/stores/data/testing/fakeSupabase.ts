@@ -166,6 +166,8 @@ function createFakeSupabase() {
   // Migration 086 emulation.
   let executor = false;
   let caller = { id: "user-1", admin: false };
+  // the server's message for a definitive refusal ("permanent-error")
+  let rejectionMessage = "Insufficient stock for Tea Mix";
   const executing = new Set<string>(); // keys whose execution has not returned (hang modes)
   const serverNow = (): string => new Date(Date.now() + serverClockOffsetMs).toISOString();
   const channels: FakeRealtimeChannel[] = [];
@@ -297,8 +299,8 @@ function createFakeSupabase() {
     }
     if (mode === "dependency-error") return fail("Shift not found", "P0001", "op_not_recorded:dependency");
     if (mode === "permanent-error") {
-      server.idempotency.set(key, { rpc: rpcName, hash: `R:${hash}`, response: null, state: "rejected", actor: caller.id, code: "P0001", message: "Insufficient stock for Tea Mix" });
-      return ok({ outcome: "rejected", replayed: false, code: "P0001", message: "Insufficient stock for Tea Mix" }, false);
+      server.idempotency.set(key, { rpc: rpcName, hash: `R:${hash}`, response: null, state: "rejected", actor: caller.id, code: "P0001", message: rejectionMessage });
+      return ok({ outcome: "rejected", replayed: false, code: "P0001", message: rejectionMessage }, false);
     }
     const result = execute(rpcName, full, true);
     return ok({ outcome: "committed", replayed: false, response: result.data }, false);
@@ -356,7 +358,7 @@ function createFakeSupabase() {
         return { ...NETWORK_FAILURE, replayed: result.replayed };
       }
       case "permanent-error":
-        return { data: null, status: 400, replayed: false, error: { message: "Insufficient stock for Tea Mix", code: "P0001", details: null, hint: null } };
+        return { data: null, status: 400, replayed: false, error: { message: rejectionMessage, code: "P0001", details: null, hint: null } };
       case "dependency-error":
         return { data: null, status: 400, replayed: false, error: { message: "Shift not found", code: "P0001", details: null, hint: null } };
       case "jwt-expired":
@@ -566,6 +568,8 @@ function createFakeSupabase() {
     enableExecutor: (on = true) => { executor = on; },
     /** Who the server believes is calling (086 visibility / fence rules). */
     setCaller: (id: string, admin = false) => { caller = { id, admin }; },
+    /** The message of the executor's definitive refusals (permanent-error). */
+    setRejectionMessage: (message: string) => { rejectionMessage = message; },
     /** Finish a hung execution's lock (op_status stops saying in_flight). */
     releaseExecuting: () => { executing.clear(); },
     /** 086 op_purge_responses for one key. */
@@ -604,6 +608,7 @@ function createFakeSupabase() {
       channels.length = 0;
       executor = false;
       caller = { id: "user-1", admin: false };
+      rejectionMessage = "Insufficient stock for Tea Mix";
       executing.clear();
     },
   };

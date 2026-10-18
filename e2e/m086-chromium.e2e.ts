@@ -457,8 +457,12 @@ test("M8 an UNREADABLE payment record on the till: warned, the same payment cann
       open.onerror = () => reject(open.error);
     }));
     await expect(T.page.getByTestId("online-ops-unreadable")).toBeVisible({ timeout: 30_000 });
-    await paySupplier(T, 1000);
-    await expect(T.page.getByText(/cannot read/).first()).toBeVisible({ timeout: 20_000 });
+    // the payment dialog refuses before anything is sent: warned, Record payment disabled
+    await T.navigate(`/app/suppliers/${st.ids.sup}`);
+    await T.page.getByRole("button", { name: "Pay supplier" }).click();
+    const modal = T.page.locator(".fixed.inset-0.z-50");
+    await expect(modal.getByRole("alert").filter({ hasText: /cannot read/ })).toBeVisible({ timeout: 20_000 });
+    await expect(modal.getByRole("button", { name: "Record payment" })).toBeDisabled();
     await T.page.waitForTimeout(2000);
     expect(supplierPayments()).toBe(p0);                                       // nothing sent
     expect(T.rpcBodies.filter((b) => b.name === "op_execute")).toHaveLength(0);

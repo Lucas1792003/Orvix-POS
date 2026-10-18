@@ -17,6 +17,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { createAuthUser, randomPassword, signedInClient } from "./liveHelpers";
 import { runSql, runSqlFile } from "../../e2e/helpers/db";
 import { buildQaState, liveCfg } from "../../e2e/helpers/env";
+import { apply086, apply086Recorded, rollback086 } from "./p086-lib";
 
 const enabled = process.env.M086_LIVE === "1";
 // These tests apply and roll back migration 086: ONLY the disposable loopback
@@ -184,7 +185,8 @@ describe.skipIf(!enabled)("086 Stage 1 client (real modules, real server)", () =
     runSqlFile("supabase/tests/phase-d/live/seed.sql", { ts, auth_admin: ids.admin, auth_mgr: ids.mgr, auth_casha: ids.cashA, auth_cashb: ids.cashB });
     st = buildQaState(ts, ids);
     // Part A: the server WITHOUT the 086 functions (documented rollback).
-    runSql(readFileSync(process.env.M086_ROLLBACK!, "utf8"));
+    apply086Recorded();
+    rollback086(readFileSync(process.env.M086_ROLLBACK!, "utf8"));
     const c = await signedInClient(cfg, st.emails.cashA, pw);
     const os = await c.rpc("open_shift", { p_shop_id: st.ids.shop, p_opening_cash_mmk: 0, p_created_at: null, p_expected_actor_id: st.ids.cashA, p_idempotency_key: randomUUID() });
     if (os.error) throw new Error(os.error.message);
@@ -253,7 +255,7 @@ describe.skipIf(!enabled)("086 Stage 1 client (real modules, real server)", () =
 
   // ============================ PART B: 086 re-applied ============================
   T("B", "B0", "086 re-applied (forward recovery after the rollback)", async () => {
-    runSql(`BEGIN;\n${readFileSync(process.env.M086_MIGRATION!, "utf8")}\nCOMMIT;`);
+    apply086(readFileSync(process.env.M086_MIGRATION!, "utf8"));
     for (let i = 0; i < 80; i++) {
       const r = await app.idem.lookupOperation("complete_sale", randomUUID());
       if (!r.absent && !r.error) return "op_status reachable";
