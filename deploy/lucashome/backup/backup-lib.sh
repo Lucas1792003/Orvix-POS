@@ -208,6 +208,10 @@ COUNTS_SQL="select json_build_object(
   'tables_storage',  (select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'storage' and c.relkind in ('r','p')),
   'roles',           (select count(*) from pg_roles where rolname not like 'pg\\_%'),
   'extensions',      (select count(*) from pg_extension),
+  'rows',            (select json_object_agg(n.nspname || '.' || c.relname,
+                        (xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', n.nspname, c.relname), false, true, '')))[1]::text::bigint)
+                        from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                       where n.nspname in ('public','auth','storage','supabase_migrations') and c.relkind in ('r','p')),
   'db_size_bytes',   pg_database_size(current_database()),
   'captured_at',     to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
 );"

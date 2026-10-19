@@ -122,6 +122,7 @@ fail_record() {  # MESSAGE — status + alert (no data in either)
 
 cleanup() {
   local rc=$?
+  trap '' TERM INT HUP   # a second signal must not abort the cleanup halfway
   trap - EXIT
   if [[ -n "$STAGE" && -d "$STAGE" ]]; then rm -rf -- "$STAGE"; fi
   [[ -d "$BUILD.partial" ]] && rm -rf -- "$BUILD.partial"
@@ -132,6 +133,8 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT
+# a kill (TERM/INT/HUP) exits through cleanup too: the partial output is removed and the run recorded as failed
+trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 
 # ---------------------------------------------------------------------------
 # preflight: recipient key, transport, recipients, inputs

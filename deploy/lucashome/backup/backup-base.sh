@@ -57,6 +57,7 @@ PSQL_IN=""; PSQL_OUT=""; PSQL_PID=""
 # ---------------------------------------------------------------------------
 cleanup() {
   local rc=$?
+  trap '' TERM INT HUP   # a second signal must not abort the cleanup halfway
   trap - EXIT
   # close the backup session if still open
   if [[ -n "$PSQL_IN" ]]; then exec {PSQL_IN}>&- 2>/dev/null || true; fi
@@ -78,6 +79,8 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT
+# a kill (TERM/INT/HUP) exits through cleanup too: the partial output is removed and the run recorded as failed
+trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 
 # ---------------------------------------------------------------------------
 # Method 1: pg_basebackup (socket first, then TCP with the stack password)

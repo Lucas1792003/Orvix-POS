@@ -1,0 +1,48 @@
+# deploy-manifest.txt — every file deploy.sh delivers to lucashome:/srv/supabase/backup/bin/.
+# deploy.sh stages the package locally, then REFUSES to deploy when a listed file is missing or
+# empty, or when the filter picks up a file not listed here (add it here first). The staged
+# bin/MANIFEST.sha256 is re-verified on the server after the copy.
+# The migration source the restore gate needs (--migrations) is delivered next to bin/ as
+# migrations/ (supabase/migrations/NNN_*.sql at the deployed commit) and checked separately.
+# One path per line; '#' comments.
+
+# scheduled jobs and their libraries
+backup-base.sh
+backup-lib.sh
+backup-logical.sh
+backup-prune.sh
+backup-status.sh
+pitr-test.sh
+restore-test.sh
+secrets-bundle.sh
+offsite-lib.sh
+offsite-restore-test.sh
+offsite-status.sh
+offsite-sync.sh
+
+# email tier
+email-archive.sh
+email-lib.sh
+email-mime.py
+email-report.py
+email-report.sh
+email-report.sql
+email-secrets.sh
+email-status.sh
+email-unpack.py
+gmail-oauth-mint.py
+
+# storage sweep (G5 follow-up, not scheduled)
+sweep-abandoned-uploads.sh
+sweep-abandoned-uploads.sql
+sweep-protected-objects.sha256
+
+# disaster recovery: the gate, its SQL, the post-restore fix-ups, the API guard, the drill
+dr-verify-restore.sh
+dr-drill-fingerprint.sql
+dr-schema-fingerprint.sql
+dr-drill-consistency.sql
+dr-financial-checks.sql
+dr-restore-fixups.sql
+restore-api-guard.sh
+dr-drill.sh
