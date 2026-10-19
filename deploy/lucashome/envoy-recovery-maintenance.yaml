@@ -1,0 +1,58 @@
+# PREPARED, NOT APPLIED. Migration 087 "API guard" for restores and the 087 install/rollback window
+# (docs/selfhost-migration/phase-g/migration-087.md, "Deployment" and "Rollback").
+#
+# A complete Envoy bootstrap (envoyproxy/envoy:v1.39.1) that answers EVERY request without reaching any upstream:
+#   - CORS preflight (OPTIONS): 204 with allow-origin / allow-methods and an EXPLICIT allow-headers list
+#     (under the Fetch spec a wildcard '*' does not cover Authorization; the Chromium tested in tools/m087-verify
+#     (browser B3) accepted it anyway, but other engines and versions may not, and a failed preflight would make the
+#     tills fall back to offline selling, so every header the clients send is listed);
+#   - everything else: HTTP 429 with the same fixed ASCII JSON contract the database uses for recovery holds
+#     ({"code":"PT429",...,"message":"ORG_SUSPENDED: server recovery in progress [API_GUARD]"}) and CORS on the reply,
+#     so every client generation shows an error at the counter instead of a network failure
+#     (verified: tools/m087-verify x2 E5-E5d, browser part, legacy-client harness).
+# The allowed headers cover supabase-js / postgrest-js (authorization, apikey, content-type, x-client-info, prefer,
+# accept-profile, content-profile, range, x-retry-count, x-supabase-api-version), storage uploads (x-upsert, cache-control)
+# and the 087 epoch header (x-orvix-epoch).
+# Use: swap it in for the api-gw bootstrap for the window (owner step), then restore the normal gateway.
+static_resources:
+  listeners:
+  - name: recovery_maintenance
+    address: { socket_address: { address: 0.0.0.0, port_value: 8000 } }
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          '@type': type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: recovery_maintenance
+          route_config:
+            virtual_hosts:
+            - name: all
+              domains: ['*']
+              routes:
+              - match: { prefix: /, headers: [ { name: ':method', string_match: { exact: OPTIONS } } ] }
+                direct_response: { status: 204 }
+                response_headers_to_add:
+                - header: { key: access-control-allow-origin, value: '*' }
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                - header: { key: access-control-allow-methods, value: 'GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD' }
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                - header:
+                    key: access-control-allow-headers
+                    value: 'authorization,apikey,content-type,x-client-info,x-orvix-epoch,prefer,accept-profile,content-profile,range,x-retry-count,x-supabase-api-version,x-upsert,cache-control'
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                - header: { key: access-control-max-age, value: '600' }
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+              - match: { prefix: / }
+                direct_response:
+                  status: 429
+                  body: { inline_string: '{"code":"PT429","details":null,"hint":null,"message":"ORG_SUSPENDED: server recovery in progress [API_GUARD]"}' }
+                response_headers_to_add:
+                - header: { key: content-type, value: application/json }
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                - header: { key: access-control-allow-origin, value: '*' }
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                - header: { key: cache-control, value: no-store }
+                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config: { '@type': type.googleapis.com/envoy.extensions.filters.http.router.v3.Router }
