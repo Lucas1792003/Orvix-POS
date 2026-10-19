@@ -38,6 +38,8 @@ Phases from [`../selfhost-migration/MIGRATION-PLAN.md`](../selfhost-migration/MI
 - [ ] Owner TOTP login test (A8).
 - [ ] Review the 7 unlinked auth accounts (A7).
 - [ ] Version handshake decision (A9).
+- [ ] Migration 086 (operation outcomes; committed 2026-10-17/18, verified on disposable stacks) — apply only with approval, after its own readiness gates ([`migration-086.md`](../selfhost-migration/phase-g/migration-086.md)).
+- [ ] Migration 087 (recovery hold; committed `e170794` 2026-10-19, verified on disposable stacks only) — **not before** every till runs the v87 client and the witness authority runs on a second device; deployment window and preconditions in [`migration-087.md`](../selfhost-migration/phase-g/migration-087.md) "Deployment".
 - [ ] Email tier enablement: owner key + Google setup → self-tests → restore from email → first archive → schedules (B3–B7; [`owner-setup-checklist.md`](../selfhost-migration/phase-f/owner-setup-checklist.md)).
 - [ ] Remote-access decision for the two shops (C1–C3; [`remote-access-architecture.md`](../selfhost-migration/phase-f/remote-access-architecture.md)).
 - [ ] Host hardening after Gate R, then the controlled reboot / G3 persistence test; restart `tailscaled` to clear the stale 443 listener (D1–D6; [`host-hardening-staged.md`](../selfhost-migration/phase-f/host-hardening-staged.md)).

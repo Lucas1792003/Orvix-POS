@@ -58,9 +58,15 @@ export type FailureClass =
   /** 086: the server refused it but did NOT record the refusal (an
    *  unexpected / unaudited error, or an actor-less legacy entry): nothing
    *  ran, nothing is decided — never shown as final; held and retried. */
-  | "NOT_RECORDED";
+  | "NOT_RECORDED"
+  /** 087: refused by the recovery hold (HTTP 429, PT429, "ORG_SUSPENDED:
+   *  server recovery in progress [CODE]"), or the 087 maintenance listener
+   *  answered (API_GUARD). Nothing ran and nothing was recorded. Never a
+   *  network failure: no offline fallback, no automatic resend while the
+   *  till is in recovery mode (stores/data/recoveryState.ts). */
+  | "RECOVERY";
 
-export type HoldReason = "reauth" | "suspended" | "edge" | "backend-version" | "actor" | "dependency" | "not-recorded";
+export type HoldReason = "reauth" | "suspended" | "edge" | "backend-version" | "actor" | "dependency" | "not-recorded" | "recovery";
 
 export interface FailureInfo {
   klass: FailureClass;
@@ -112,6 +118,8 @@ const info = (klass: FailureClass, retryAfterMs?: number): FailureInfo => {
       return { klass, mayHaveCommitted: false, retryable: true, hold: "dependency", retryAfterMs };
     case "NOT_RECORDED":
       return { klass, mayHaveCommitted: false, retryable: true, hold: "not-recorded", retryAfterMs };
+    case "RECOVERY":
+      return { klass, mayHaveCommitted: false, retryable: true, hold: "recovery", retryAfterMs };
     case "REJECTED":
     case "CONTRACT":
     case "ABANDONED":
@@ -122,6 +130,15 @@ const info = (klass: FailureClass, retryAfterMs?: number): FailureInfo => {
 
 /** The fixed meaning of a class (for outcomes the server states itself). */
 export const failureInfo = (klass: FailureClass, retryAfterMs?: number): FailureInfo => info(klass, retryAfterMs);
+
+/** The fixed prefix of every 087 refusal message (migration 087, recovery.refuse). */
+export const RECOVERY_MESSAGE_PREFIX = "ORG_SUSPENDED: server recovery in progress";
+
+/** The [CODE] of an 087 refusal message, or null when it is not one. */
+export function recoveryCodeOf(message: string | null | undefined): string | null {
+  const m = /^ORG_SUSPENDED: server recovery in progress \[([A-Z0-9_]+)\]/.exec(message ?? "");
+  return m ? m[1] : null;
+}
 
 const lower = (s: unknown): string => (typeof s === "string" ? s.toLowerCase() : "");
 
@@ -170,6 +187,9 @@ export function classifyFailure(signal: FailureSignal): FailureInfo {
 
   if (signal.notSent) return info("NOT_SENT", retryAfterMs);
 
+  // 087 recovery refusals (and the 087 maintenance listener) win over everything:
+  // PT429 / the fixed ASCII message, whatever status they ride on.
+  if (code === "PT429" || message.startsWith(RECOVERY_MESSAGE_PREFIX)) return info("RECOVERY", retryAfterMs);
   // Suspension and contract violations win over the status they ride on.
   if (code === "PT503" || message.startsWith("ORG_SUSPENDED") || text.includes("rule=org_suspended")) {
     return info("ORG_SUSPENDED", retryAfterMs);
@@ -295,6 +315,7 @@ export function holdBackoffMs(hold: HoldReason | null): number {
     case "actor": return 5 * 60_000;
     case "dependency": return 5 * 60_000;
     case "not-recorded": return 15 * 60_000;
+    case "recovery": return 5 * 60_000;
     default: return 0;
   }
 }

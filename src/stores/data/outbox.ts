@@ -8,9 +8,14 @@ import { isNetworkError } from "../../lib/errors";
 import { classifyFailure, holdBackoffMs } from "../../lib/failureClass";
 import { isPrimaryKeyDuplicate, runTableWrite } from "./tableWrite";
 import {
-  callRpc, currentActorId, IDEMPOTENCY_KEY_ARG, lookupOperation, newIdempotencyKey, RPC_TIMEOUT_MS, RpcError, setActorSource,
-  stampOperationArgs, type RpcOutcome,
+  callRpc, currentActorId, IDEMPOTENCY_KEY_ARG, LEGACY_OPERATION, legacyOperationError, lookupOperation, newIdempotencyKey, RPC_TIMEOUT_MS,
+  RpcError, setActorSource, stampOperationArgs, v87Routing, type RpcOutcome,
 } from "./idempotentRpc";
+import { recoveryCodeOf } from "../../lib/failureClass";
+import {
+  currentOpEpoch, recoveryBlocksSending, recoveryCapability, recoveryMessage, recoveryView, setRecoveryOrgSource, verifiedSinceStart,
+} from "./recoveryState";
+import { runRecoveryCheck } from "./recovery87";
 import { replyProblem } from "./replyShapes";
 import { flushStockCommit, releaseEntry, stagedStockInTransaction } from "./stockLedger";
 import { deleteLocalRows, localRowTables, putLocalRowsInTransaction, recordCommittedPut, type LocalRowBatch } from "./localWrites";
@@ -21,16 +26,18 @@ import { useAuthStore } from "../authStore";
 import { useSyncStore } from "../syncStore";
 import { touchAuthCache } from "../authCache";
 import {
-  continuityWarning, journalCommitted, journalDecided, journalOwner, journalQueued, journalReconciliationRequired, journalRowChanged, journalSent,
-  type JournalEvidence,
+  continuityWarning, journalCommitted, journalDecided, journalOwner, journalQueued, journalReconciliationRequired, journalRecoveryRefusal, journalRowChanged,
+  journalSent, type JournalEvidence,
 } from "./opJournal";
 
 // The acting user for p_expected_actor_id (idempotentRpc.stampOperationArgs).
 setActorSource(() => useAuthStore.getState().currentUserId ?? null);
+// 087: recovery state applies only to the organisation it was loaded for (recoveryState.ts).
+setRecoveryOrgSource(() => useAuthStore.getState().currentOrgId ?? null);
 
 type EnqueueInput = Pick<
   SyncOutboxEntry,
-  "kind" | "name" | "args" | "shopId" | "provisional" | "refs" | "table" | "op" | "row" | "id" | "idempotencyKey"
+  "kind" | "name" | "args" | "shopId" | "provisional" | "refs" | "table" | "op" | "row" | "id" | "idempotencyKey" | "opEpoch"
 >;
 
 // Queue position, assigned inside the enqueue transaction. `createdAt` has
@@ -202,6 +209,10 @@ export function buildOutboxRow(entry: EnqueueInput, overrides: Partial<SyncOutbo
     // Which backend this entry is for (blocker D-d): the drain sends it only
     // to this origin; anywhere else it is quarantined (lib/backendOrigin.ts).
     backendOrigin: currentBackendOrigin(),
+    // 087: the epoch the operation is created under — the caller's (stamped at
+    // beginOperation) or, for a write created right here, the current one.
+    // Never re-stamped later (a requeue keeps its row's own value).
+    opEpoch: "opEpoch" in entry ? entry.opEpoch ?? null : currentOpEpoch(),
     localId: newId("outbox"),
     createdAt: new Date().toISOString(),
     status: "pending",
@@ -401,6 +412,7 @@ function endMappingCapture(): IdMapping[] {
 export async function acknowledgeEntry(
   localId: string, mappings: IdMapping[],
   evidence: Omit<JournalEvidence, "at"> = { source: "reply" },
+  signedReply?: { signed: unknown; sig: string } | null,
 ): Promise<void> {
   await localDb.transaction("rw", localDb.syncOutbox, localDb.provisionalIdMap, localDb.syncState, async () => {
     if (mappings.length) await localDb.provisionalIdMap.bulkPut(mappings);
@@ -409,7 +421,7 @@ export async function acknowledgeEntry(
     // if the journal cannot be written, the row is NOT deleted (it is resent
     // with its key later and answered from the server's ledger).
     const row = await localDb.syncOutbox.get(localId);
-    if (row) await journalCommitted(row, evidence);
+    if (row) await journalCommitted(row, evidence, signedReply);
     await localDb.syncOutbox.delete(localId);
   });
 }
@@ -931,6 +943,32 @@ async function runDrainPass(): Promise<DrainResult> {
     useSyncStore.getState().setStatus({ lastTransientError: `Automatic sync paused: ${warning.reason} An owner must review it on the Sync page.` });
     return "backoff";
   }
+  // Migration 087: while this till is in recovery mode (or its backend's 087
+  // status is unknown) the server is asked first — recovery_epoch is the only
+  // way out of a recovery mode; reconnecting is not. Nothing is sent, looked
+  // up or stopped automatically while it holds.
+  // (after every start: the server authorises the till before anything is sent)
+  if (recoveryBlocksSending() || recoveryCapability() === "unknown" || (recoveryCapability() === "present" && !verifiedSinceStart())) {
+    await runRecoveryCheck().catch(() => undefined);
+  }
+  if (recoveryCapability() === "present" && !verifiedSinceStart() && !recoveryBlocksSending()) {
+    useSyncStore.getState().setStatus({ lastTransientError: "Automatic sync paused: the server has not confirmed this till since it started. Retried automatically." });
+    return "network";
+  }
+  if (recoveryCapability() === "unknown") {
+    // whether this server has 087 is not known (it could not be asked): nothing is sent on a guess
+    useSyncStore.getState().setStatus({ lastTransientError: "Automatic sync paused: the server could not be asked whether it is in a recovery hold. Retried automatically." });
+    return "network";
+  }
+  if (recoveryBlocksSending()) {
+    const view = recoveryView();
+    useSyncStore.getState().setStatus({ lastTransientError: `Automatic sync paused: ${recoveryMessage(view.mode === "legacy-server" ? "normal" : view.mode, view.code)}` });
+    return "backoff";
+  }
+  // The server verified the till again: entries kept during the recovery are
+  // due now (each keeps its own epoch; an old one is then held for review).
+  await localDb.syncOutbox.filter((e) => e.heldReason === "recovery" && Boolean(e.nextAttemptAt))
+    .modify((e) => { e.nextAttemptAt = undefined; }).catch(() => undefined);
   // An online attempt is in flight (here or in another window): let it
   // finish first (its reply decides whether dependent queued work can go).
   if ((await rowsInFlightAnywhere()).size > 0) return "backoff";
@@ -945,6 +983,7 @@ async function runDrainPass(): Promise<DrainResult> {
 
   for (;;) {
     await renewLease();
+    if (recoveryBlocksSending()) return "backoff";     // a reply in this pass put the till in recovery mode
     const pending = await pendingInQueueOrder();
 
     // Strict queue order: the first entry that is not provably finished on
@@ -1044,6 +1083,15 @@ async function runDrainPass(): Promise<DrainResult> {
       continue;
     }
 
+    // 087 (before anything else touches it — never re-keyed or reclassified): an entry created without a recovery epoch (an older build's queue,
+    // or queued while the server had no 087) is never sent to an 087 server:
+    // it would be refused, and replaying it automatically is never allowed.
+    // It keeps its key and arguments and waits for an owner's review.
+    if (v87Routing() && !entry.opEpoch) {
+      await holdForOwnerReview(entry, LEGACY_OPERATION, legacyOperationError(entry.kind === "rpc" ? entry.name : entry.name).message);
+      continue;
+    }
+
     // Entries queued before Phase D carry no key (the Dexie v2 upgrade
     // assigns one, but be safe) — mint it now so that from this attempt on
     // every retry is idempotent.
@@ -1106,8 +1154,8 @@ async function runDrainPass(): Promise<DrainResult> {
     notifyQueueChanged();
 
     let outcome: RpcOutcome = entry.kind === "table_write"
-      ? await runTableWrite(entry.table!, entry.op!, entry.row, entry.id!)
-      : await callRpc(entry.name, resolvedArgs ?? {}, { actorId: actorOf(entry) });
+      ? await runTableWrite(entry.table!, entry.op!, entry.row, entry.id!, entry.opEpoch ?? null)
+      : await callRpc(entry.name, resolvedArgs ?? {}, { actorId: actorOf(entry), opEpoch: entry.opEpoch ?? null });
     if (entry.kind === "rpc" && outcome.via) {
       await localDb.syncOutbox.update(entry.localId, { protocol: outcome.via });
     }
@@ -1123,6 +1171,35 @@ async function runDrainPass(): Promise<DrainResult> {
     if (outcome.error && (outcome.serverOutcome === "rejected" || outcome.serverOutcome === "abandoned")) {
       await markFinal(entry, outcome.serverOutcome, outcome.error.message);
       continue;
+    }
+    // 087 recovery refusal: nothing ran, nothing was recorded. A refusal of
+    // THIS operation (created under an older epoch, or without one) waits for
+    // an owner — never resent, re-stamped or stopped automatically; anything
+    // else put the till in recovery mode (recoveryState): the pass stops and
+    // the entry keeps its key, arguments and epoch.
+    if (outcome.error?.failure.klass === "RECOVERY") {
+      const code = recoveryCodeOf(outcome.error.message) ?? outcome.error.code ?? "RECOVERY";
+      if (code === "ORG_UNRESOLVED") {
+        // a row that resolves to no organisation, while another organisation is held: this one waits (5 min)
+        await park(entry, "recovery", outcome.error.message, 5 * 60_000);
+        return "backoff";
+      }
+      if (code === "PRE_EPOCH_OPERATION" || code === "CLIENT_UPGRADE_REQUIRED" || code === LEGACY_OPERATION) {
+        await holdForOwnerReview(entry, code, `Not executed: the server treats it as an operation from before its current recovery epoch (${code}). It keeps its original key, arguments and epoch, is never resent or stopped automatically, and waits for an owner's review (Sync).`);
+        continue;
+      }
+      await localDb.transaction("rw", localDb.syncOutbox, localDb.syncState, async () => {
+        await localDb.syncOutbox.update(entry.localId, {
+          status: keptStatus(entry, entry.fenceRequired === true ? "conflict" : "pending"), syncingSince: undefined, failureKind: "transient",
+          heldReason: "recovery", lastError: outcome.error!.message, inDoubt: entry.inDoubt === true || entry.fenceRequired === true,
+          nextAttemptAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+        });
+        const row = await localDb.syncOutbox.get(entry.localId);
+        if (row) await journalRecoveryRefusal(row, code, outcome.error!.message);
+      });
+      notifyQueueChanged(entry);
+      useSyncStore.getState().setStatus({ lastTransientError: outcome.error.message });
+      return "backoff";
     }
     // Not executed and not recorded: belongs to another user, or waits for
     // a prerequisite another till has not synchronised yet. Kept, same key.
@@ -1208,14 +1285,16 @@ async function runDrainPass(): Promise<DrainResult> {
     // the original response, which is reconciled exactly like a first-time
     // success (contract: "treat the stored response as a first-time success").
     if (entry.kind === "table_write") void touchAuthCache();
-    if ((await applyServerReply(entry, outcome.data)) === "network") return "network";
+    if ((await applyServerReply(entry, outcome.data, "reply", outcome.signedReply)) === "network") return "network";
   }
 }
 
 /** Reconcile a committed reply and acknowledge the entry (exactly once:
  *  the entry and its mappings go in one transaction). "network" when the
  *  reconciler failed — the entry is kept and asked about again later. */
-async function applyServerReply(entry: SyncOutboxEntry, data: unknown, source: "reply" | "lookup" = "reply"): Promise<"ok" | "network"> {
+async function applyServerReply(
+  entry: SyncOutboxEntry, data: unknown, source: "reply" | "lookup" = "reply", signedReply?: { signed: unknown; sig: string } | null,
+): Promise<"ok" | "network"> {
   const reconcile = reconcilers[entry.name];
   if (reconcile) {
     // A reconciler that throws must not take the queue down with it, and
@@ -1243,7 +1322,7 @@ async function applyServerReply(entry: SyncOutboxEntry, data: unknown, source: "
   }
   // Acknowledge: the id mappings the reconciler produced and the removal
   // of the entry commit together, or not at all (Batch 2A item 7).
-  await acknowledgeEntry(entry.localId, endMappingCapture(), { source, response: data });
+  await acknowledgeEntry(entry.localId, endMappingCapture(), { source, response: data }, signedReply);
   notifyQueueChanged(entry);
   useSyncStore.getState().setStatus({ lastTransientError: null });
   return "ok";
@@ -1331,7 +1410,30 @@ export const RECONCILIATION_REQUIRED_TEXT =
 
 /** Waiting for an owner's decision (the server has no record of it): not due again yet. */
 const awaitsReconciliation = (e: SyncOutboxEntry): boolean =>
-  e.heldReason === "reconciliation-required" && !e.serverOutcome && Boolean(e.nextAttemptAt) && Date.parse(e.nextAttemptAt!) > Date.now();
+  // 087 owner review: never resent automatically, whatever its time (an owner acts: retry, set aside, reconcile)
+  (e.heldReason === OWNER_REVIEW && !e.serverOutcome)
+  || (e.heldReason === "reconciliation-required" && !e.serverOutcome && Boolean(e.nextAttemptAt) && Date.parse(e.nextAttemptAt!) > Date.now());
+
+/** 087: an operation the server will not run under its own epoch (created
+ *  before the current one, or without one): it waits for an owner — 088 /
+ *  an owner-approved decision settles it. */
+export const OWNER_REVIEW = "awaiting-owner-review";
+
+/** Hold an entry for an owner's review (087), with its journal event, in one transaction.
+ *  Its key, arguments and epoch are kept; it is never resent automatically (an owner sets it aside or reconciles it). */
+async function holdForOwnerReview(entry: SyncOutboxEntry, code: string, lastError: string): Promise<void> {
+  await localDb.transaction("rw", localDb.syncOutbox, localDb.syncState, async () => {
+    await localDb.syncOutbox.update(entry.localId, {
+      status: keptStatus(entry, entry.fenceRequired === true ? "conflict" : "pending"),
+      syncingSince: undefined, failureKind: "transient", heldReason: OWNER_REVIEW, lastError,
+      inDoubt: entry.inDoubt === true || entry.fenceRequired === true,
+      nextAttemptAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
+    });
+    const row = await localDb.syncOutbox.get(entry.localId);
+    if (row) await journalRecoveryRefusal(row, code, lastError);
+  });
+  notifyQueueChanged(entry);
+}
 
 /** Hold an entry for an owner's decision, with its journal record, in one transaction. */
 async function holdForReconciliation(entry: SyncOutboxEntry, lastError: string, delayMs: number): Promise<void> {
@@ -1367,7 +1469,7 @@ async function resolveByLookup(entry: SyncOutboxEntry, resolvedArgs: Record<stri
   }
   const actorId = actorOf(entry);
   const { absent, status, error } = await lookupOperation(entry.name, entry.idempotencyKey, {
-    fence: false, actorId, args: resolvedArgs ?? entry.args ?? null,
+    fence: false, actorId, args: resolvedArgs ?? entry.args ?? null, opEpoch: entry.opEpoch ?? null,
   });
   await localDb.syncOutbox.update(entry.localId, { protocol: "lookup" });
   if (absent) {
@@ -1730,7 +1832,7 @@ export async function settleBeforeReplacement(
       // one was lost by a restore of the server.
       const fence = opts.fence ? opts.fence(subject) : true;
       const { absent, status, error } = await lookupOperation(subject.name, subject.idempotencyKey, {
-        fence, actorId: actorOf(subject), args: (row ? await resolveArgs(row) : null) ?? subject.args ?? null,
+        fence, actorId: actorOf(subject), args: (row ? await resolveArgs(row) : null) ?? subject.args ?? null, opEpoch: subject.opEpoch ?? null,
       });
       if (absent || error || !status) return "blocked";
       if (status.status === "committed") {

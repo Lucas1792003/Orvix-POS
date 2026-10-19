@@ -23,6 +23,16 @@
 - **Publication branch lags** — `publish/selfhost-support` was last synced 2026-10-16 04:30 UTC; anything pushed from it today would miss the validated desktop upload and the D300 fix. Re-sync and re-scan before E6.
 - **Repository visibility**: checklist E4 records a sanitized publication branch (0 private identifiers) as the path that avoids pushing the private branch; the owner dashboard steps (Vercel disconnect, branch protection) are still open (E5).
 
+## Found 2026-10-19 — v87 client (migration 087), decisions before release
+Details: [`../selfhost-migration/phase-g/v87-client.md`](../selfhost-migration/phase-g/v87-client.md) "Limits".
+- **Order is fixed: v87 client on every till first, then 087 on the server.** 087 refuses every older build (`CLIENT_UPGRADE_REQUIRED`); a pre-v87 queue on a till becomes "awaiting owner review" after 087 is installed. Drain queues before the cutover.
+- **First start after updating blocks selling until the till reaches its server once** (also offline) — fail closed by design; needs the owner's acceptance or a different rule.
+- **Journal size vs the server quota**: a till uploads every record within 200 days; a busy till can exceed the 50 MB per-organisation quota (upload stops, nothing deleted, owner raises the quota).
+- **Till secret stored in plain text** on the till (IndexedDB), as 087 intends (the till is the credential).
+- **Owner actions with no automatic way out**: `WITNESS_BEHIND` (server behind what the till saw), a rollback of 087, and every re-apply of 087 (tills that held a witness end in `WITNESS_BEHIND`).
+- **Not exercised**: `staff-admin` passing a 429 through (today it returns 500, migration-087.md), multi-window behaviour in a real browser (unit tests only), storage uploads and service-role edge functions carry no epoch (087 does not guard them).
+- **Phase 0 local selling while online** (migration-087.md "Client contract") applies to pre-v87 builds only; the v87 client refuses at the counter instead.
+
 ## Found 2026-10-13 — repository visibility and deploy triggers (release blocker)
 - **The GitHub repo `Lucas1792003/ShwePhaLa` is PUBLIC** (`gh api repos/...` → `visibility: public`, checked 2026-10-13). The local feature branch contains ~60 files naming the tailnet host, its IP, server paths, access procedures and the owner's email (ops docs, evidence, deploy tooling, live tests). **Do not push the branch while the repo is public**: either make the repo private first (owner, GitHub settings) or restructure the branch so ops/evidence material stays out of git. Public `main` today only carries the hosted project ref (also embedded in the shipped app).
 - **Vercel auto-deploys every push**: `main` → public production domain built against hosted; other branches → previews. Merging would put the 1.0.16 client in front of hosted. Details and a safe push/PR/merge order: [`../selfhost-migration/phase-g/deployment-automation-audit.md`](../selfhost-migration/phase-g/deployment-automation-audit.md).

@@ -5,12 +5,14 @@ import type { InventoryMovement } from "../../types";
 import { classifyFailure, failureInfo } from "../../lib/failureClass";
 import { appliedLedger, flushStockCommit, noteStagedStock, snapshotStock } from "./stockLedger";
 import {
-  acknowledgeEntry, buildOutboxRow, clearWriteAheadInFlight, discardWriteAhead, drainOutbox, markWriteAheadInFlight,
+  acknowledgeEntry, buildOutboxRow, clearWriteAheadInFlight, discardWriteAhead, drainOutbox, markWriteAheadInFlight, OWNER_REVIEW,
   blockingEarlierWork, NOT_YET_CONFIRMED_TEXT, notifyQueueChanged, persistStaged, settleBeforeReplacement,
 } from "./outbox";
-import { callRpc, currentActorId, RpcError, stampOperationArgs, type OperationContext } from "./idempotentRpc";
+import { callRpc, currentActorId, RpcError, stampOperationArgs, v87Routing, type OperationContext } from "./idempotentRpc";
 import { replyProblem } from "./replyShapes";
 import { getJournalRecord, journalReplacement } from "./opJournal";
+import { gateNewOperation, recoveryRefusalError } from "./recoveryGate";
+import { RecoveryBlockedError } from "./recoveryState";
 import type { LocalRowBatch } from "./localWrites";
 import {
   askAboutUnresolved, PendingConfirmationError, UnresolvedOperationError, type UnresolvedOperationInfo,
@@ -189,6 +191,9 @@ export const describeEntry = (entry: SyncOutboxEntry): UnresolvedOperationInfo =
 
 /** Run an offline-capable operation through the write-ahead lifecycle. */
 export async function submitOfflineCapable<T>(spec: OfflineCapableSpec<T>): Promise<T> {
+  // 087: nothing is saved or sent unless the till may create a financial
+  // operation now (verified epoch, not in recovery mode) — online or offline.
+  await gateNewOperation(spec.op);
   const args = deepFreeze(stampOperationArgs(spec.name, spec.args, spec.op.idempotencyKey));
   const intent = intentOf(spec.name, args);
   const running = inFlightByIntent.get(intent);
@@ -286,9 +291,17 @@ async function stageAndCommit<T>(
 
 async function run<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>): Promise<T> {
   const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+  // 087: earlier work this may depend on that waits for an OWNER (held for review, or a legacy entry the
+  // server will not run): this operation could never be sent behind it — refused at the counter, nothing saved.
+  const earlier = await blockingEarlierWork({ kind: "rpc", name: spec.name, args, shopId: spec.shopId, actorId: currentActorId() });
+  const review = earlier.filter((r) => !r.serverOutcome && (r.heldReason === OWNER_REVIEW || (v87Routing() && !r.opEpoch)));
+  if (review.length) {
+    throw new RecoveryBlockedError("hold", "AWAITING_OWNER_REVIEW",
+      `Operation awaiting owner review: ${review.length} earlier ${review.length === 1 ? "operation on this till waits" : "operations on this till wait"} for the owner's review after a server recovery, and this one may depend on ${review.length === 1 ? "it" : "them"}. Nothing was saved or sent. Ask the owner to review the Sync page.`);
+  }
   if (offline || spec.needsProvisionalRefs) {
     return stageAndCommit(spec, "offline", (entry) => ({
-      put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey }, { staged: true }),
+      put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey, opEpoch: spec.op.opEpoch }, { staged: true }),
     }));
   }
   // An online operation never overtakes an unsent entry of this till that it
@@ -300,7 +313,7 @@ async function run<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>
     let result: T;
     try {
       result = await stageAndCommit(spec, "offline", (entry) => ({
-        put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey }, { staged: true }),
+        put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey, opEpoch: spec.op.opEpoch }, { staged: true }),
       }));
     } catch (err) {
       throw new Error(`Not sent: earlier entries on this till have not reached the server yet, and this cannot be queued behind them (${
@@ -315,7 +328,7 @@ async function run<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>
   //    window's recovery can pick the row up while it is being sent.
   const sentAt = new Date().toISOString();
   const row = buildOutboxRow(
-    { kind: "rpc", name: spec.name, args, idempotencyKey: spec.op.idempotencyKey, shopId: spec.shopId },
+    { kind: "rpc", name: spec.name, args, idempotencyKey: spec.op.idempotencyKey, shopId: spec.shopId, opEpoch: spec.op.opEpoch },
     { status: "syncing", writeAhead: true, syncingSince: sentAt, sentAt },
   );
   await markWriteAheadInFlight(row.localId);
@@ -337,7 +350,7 @@ const notConfirmed = (detail: string) => new PendingConfirmationError(
 
 async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>, localId: string): Promise<T> {
   // 2. One attempt, bounded; the reply must have the expected shape.
-  const outcome = await callRpc(spec.name, args);
+  const outcome = await callRpc(spec.name, args, { opEpoch: spec.op.opEpoch });
   let error: RpcError | null = outcome.error;
   if (!error && outcome.responseUnavailable) {
     // Committed on the server, but this till cannot read the reply (086
@@ -363,7 +376,7 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
     await flushStockCommit(localId).catch((err) => console.error(`[sync] ${spec.name}: stock mirror write failed:`, err));
     try {
       // The queue row goes and the journal keeps the server's reply — together.
-      await acknowledgeEntry(localId, [], { source: "reply", response: outcome.data });
+      await acknowledgeEntry(localId, [], { source: "reply", response: outcome.data }, outcome.signedReply);
     } catch (err) {
       // The server committed it (its reply is applied above); the till could
       // not record that durably (e.g. storage full). The queue row stays: it
@@ -383,9 +396,13 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
   // NOT_RECORDED: the server refused it without recording the refusal —
   // nothing ran, the reply arrived (no copy is in flight): shown, not
   // staged, and never presented as a final refusal.
+  // 087 RECOVERY: refused by the recovery hold — nothing ran, nothing was
+  // recorded, and it is NEVER turned into an offline sale: the till is in
+  // recovery mode, and the cashier is told so.
   if (!failure.retryable || failure.hold === "suspended" || failure.hold === "reauth" || failure.hold === "backend-version"
-      || failure.klass === "DEPENDENCY" || failure.klass === "WRONG_ACTOR" || failure.klass === "NOT_RECORDED") {
+      || failure.klass === "DEPENDENCY" || failure.klass === "WRONG_ACTOR" || failure.klass === "NOT_RECORDED" || failure.klass === "RECOVERY") {
     await discardWriteAhead(localId, failure.klass, { serverOutcome: outcome.serverOutcome ?? null, code: error.code ?? null, message: error.message });
+    if (failure.klass === "RECOVERY") throw recoveryRefusalError(error.message);
     throw error;
   }
 

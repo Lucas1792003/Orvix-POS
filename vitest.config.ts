@@ -11,7 +11,8 @@ export default defineConfig((env) =>
       setupFiles: ["./src/test/setup.ts"],
       // tools/m086-verify/results/<run>/legacy-app: a full checkout of an older
       // build, run only by tools/m086-verify/run.sh inside that checkout.
-      exclude: [...configDefaults.exclude, "tools/m086-verify/results/**"],
+      // tools/m087-verify/browser: Playwright specs run by tools/m087-verify/run.sh, not unit tests.
+      exclude: [...configDefaults.exclude, "tools/m086-verify/results/**", "tools/m087-verify/browser/**", "tools/m087-verify/results/**"],
     },
   }),
 );

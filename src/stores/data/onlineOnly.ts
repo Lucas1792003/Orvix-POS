@@ -2,7 +2,7 @@ import { localDb } from "../../lib/localDb";
 import { newId } from "../../lib/id";
 import { classifyFailure } from "../../lib/failureClass";
 import {
-  callRpc, executorCapability, executorDemonstrated, IDEMPOTENCY_KEY_ARG, keepUnknown, lookupOperation, newIdempotencyKey, ONLINE_ONLY_RETRIES, RpcError, stampOperationArgs,
+  callRpc, executorCapability, executorDemonstrated, IDEMPOTENCY_KEY_ARG, keepUnknown, lookupOperation, newIdempotencyKey, ONLINE_ONLY_RETRIES, recoveryModeError, RpcError, stampOperationArgs,
   type OperationStatus, type RpcOutcome,
 } from "./idempotentRpc";
 import { replyProblem } from "./replyShapes";
@@ -14,6 +14,8 @@ import { wasExported } from "../../lib/queueExport/exportRecord";
 import { classifyOnlineRecord, UNREADABLE_SET_ASIDE_PREFIX, unreadableInScope, type UnreadableOnlineRecord } from "../../lib/onlineOpRecord";
 export { classifyOnlineRecord, type UnreadableOnlineRecord };
 import { currentBackendOrigin } from "../../lib/backendOrigin";
+import { currentOpEpoch, recoveryBlocksSending } from "./recoveryState";
+import { gateNewOperation } from "./recoveryGate";
 import { continuityWarning, journalKeyReconciliationRequired, journalOnline, journalReplacement, type JournalEvidence } from "./opJournal";
 
 // ----------------------------------------------------------------------
@@ -79,6 +81,8 @@ export interface OnlineOperation {
    *  BEFORE every request; a stored operation is treated as uncertain
    *  whether or not it carries the flag (payment-safety pass). */
   uncertain?: boolean;
+  /** 087: the server-issued epoch it was created under (never replaced). */
+  opEpoch?: string | null;
   /** The backend this operation was created for (origin). Missing on records
    *  of older builds: those are never looked up with a fence, retried or
    *  replaced here — only a read-only Check, or an owner's verification. */
@@ -328,6 +332,8 @@ async function send(op: OnlineOperation, retries: number, fresh = false): Promis
   if (isForeignOperation(op)) {
     return { data: null, error: pendingError(op, null, "it was made against another server (or by an older version that did not record its server); it can only be verified there or by an owner.") };
   }
+  // 087: nothing is sent while the till is in recovery mode (it keeps its key and epoch)
+  if (recoveryBlocksSending()) return { data: null, error: recoveryModeError() };
   // Claim the attempt on the STORED record (atomic): never a stale copy, and
   // never a resend of an operation already settled.
   let claim: Awaited<ReturnType<typeof claimAttempt>>;
@@ -353,7 +359,14 @@ async function send(op: OnlineOperation, retries: number, fresh = false): Promis
   const uncertainBefore = !fresh || myAttempt !== 1 || op.uncertain === true;
   // Executed only in its creator's session (the server checks p_actor_id),
   // with the STORED frozen arguments and key.
-  let outcome = await callRpc(claimed.name, claimed.args, { retries, actorId: claimed.userId });
+  let outcome = await callRpc(claimed.name, claimed.args, { retries, actorId: claimed.userId, opEpoch: claimed.opEpoch ?? null });
+  // 087 recovery refusal of a fresh first attempt: nothing ran and nothing was
+  // recorded. It stays unresolved with its key and epoch — never stopped
+  // (fenced), replaced or resent automatically; the cashier is told why.
+  if (!uncertainBefore && outcome.error?.failure.klass === "RECOVERY" && !outcome.serverOutcome) {
+    await reopen(claimed, outcome.error.message);
+    return { data: null, status: outcome.status, error: outcome.error };
+  }
   if (uncertainBefore) outcome = keepUnknown(outcome);
   const keepPending = async (detail: string, cause: RpcError | null) => {
     const r = await reopen(claimed, cause?.message ?? detail);
@@ -422,7 +435,7 @@ async function decideOnServer(
   }
   const key = op.args[IDEMPOTENCY_KEY_ARG];
   if (typeof key !== "string") return keepPending("it has no key to confirm on the server.", outcome.error);
-  const { status, error } = await lookupOperation(op.name, key, { fence: true, actorId: op.userId, args: op.args });
+  const { status, error } = await lookupOperation(op.name, key, { fence: true, actorId: op.userId, args: op.args, opEpoch: op.opEpoch ?? null });
   if (!error && status?.status === "abandoned") {
     // a fresh first attempt proven not applied: stopping its key is safe (nothing could have run)
     await settle(op, "abandoned", "server", undefined, { source: "lookup", recordedOnServer: true, fencedByTill: status.fenced === true, fencedFor: "new-separate-operation" });
@@ -459,7 +472,7 @@ export async function callOnlineOnly(
   const scope = scopeOf(name, args);
 
   if (LOGS.has(name)) {
-    return callRpc(name, stampOperationArgs(name, { ...args, [IDEMPOTENCY_KEY_ARG]: newIdempotencyKey() }), { retries });
+    return callRpc(name, stampOperationArgs(name, { ...args, [IDEMPOTENCY_KEY_ARG]: newIdempotencyKey() }), { retries, opEpoch: currentOpEpoch() });
   }
 
   // A double click acts once.
@@ -477,6 +490,10 @@ async function run(
   name: string, args: Record<string, unknown>, fingerprint: string, scope: string, retries: number, now: number,
 ): Promise<RpcOutcome> {
   const { orgId, userId } = identity();
+  // 087: a new operation only with a verified epoch and outside recovery mode
+  // (an earlier unresolved one is never resent here while the till is held).
+  const created = { opEpoch: currentOpEpoch() };
+  await gateNewOperation(created);
   // Never ahead of an unsent entry of this till it may depend on (a payment
   // against a receipt still queued, a cancel of a PO whose receipt is
   // queued, …) — entries being sent included. Independent ones do not hold
@@ -553,6 +570,7 @@ async function run(
     v: 2, id: newId("op"), name, orgId, userId, fingerprint, scope,
     args: stampOperationArgs(name, { ...args, [IDEMPOTENCY_KEY_ARG]: newIdempotencyKey() }),
     status: "unresolved", createdAt, updatedAt: createdAt, attempts: 0, backendOrigin: currentBackendOrigin(),
+    opEpoch: created.opEpoch,
   };
   try {
     await save(op);
@@ -580,7 +598,7 @@ async function settleEarlier(ops: OnlineOperation[]): Promise<"clear" | "applied
     if (isForeignOperation(op)) return "blocked";
     const key = op.args[IDEMPOTENCY_KEY_ARG];
     if (typeof key !== "string") return "blocked";
-    const { absent, status, error } = await lookupOperation(op.name, key, { fence: true, actorId: op.userId, args: op.args });
+    const { absent, status, error } = await lookupOperation(op.name, key, { fence: true, actorId: op.userId, args: op.args, opEpoch: op.opEpoch ?? null });
     if (absent || error || !status) return "blocked";
     if (status.status === "committed") {
       await settle(op, "applied");
@@ -705,7 +723,7 @@ export async function markOnlineOperationVerified(id: string): Promise<void> {
   }
   const key = op.args[IDEMPOTENCY_KEY_ARG];
   if (isUnresolved(op) && !isForeignOperation(op) && typeof key === "string") {
-    const { absent, status, error } = await lookupOperation(op.name, key, { fence: true, actorId: op.userId, args: op.args });
+    const { absent, status, error } = await lookupOperation(op.name, key, { fence: true, actorId: op.userId, args: op.args, opEpoch: op.opEpoch ?? null });
     // A key the server says can never execute any more (too old: outside the
     // executor window) cannot be stopped, but cannot run either: the owner's
     // word closes it, as the server's own records direct ("a person verifies it").

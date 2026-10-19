@@ -32,6 +32,8 @@ import {
 import { hasShopPermission } from "../lib/permissions";
 import { getErrorMessage, reportError } from "../lib/errors";
 import { isPendingConfirmation, isUnresolvedOperation } from "../stores/data/operationPrompt";
+import { isRecoveryBlocked } from "../stores/data/recoveryState";
+import { journalReceiptPrint } from "../stores/data/opJournal";
 import { useUnresolvedSales } from "../hooks/useUnresolvedSales";
 import { printReceipt as triggerPrint } from "../lib/print";
 import { getEffectiveShopId } from "../lib/utils";
@@ -520,6 +522,9 @@ export const PosPage = () => {
         setCartDiscountPct(0);
         setPaymentOpen(false);
         toast({ title: t("unresolved", "pendingTitle"), description: t("unresolved", "pendingSaleBody"), variant: "warning" });
+      } else if (isRecoveryBlocked(error)) {
+        // 087: nothing was recorded or queued; the cart stays so nothing is lost.
+        toast({ title: "Sale not recorded — server recovery", description: error.message, variant: "error" });
       } else if (isUnresolvedOperation(error)) {
         toast({ title: t("unresolved", "cancelledTitle"), description: getErrorMessage(error, t("pos", "couldNotComplete")), variant: "info" });
       } else {
@@ -576,11 +581,16 @@ export const PosPage = () => {
         return;
       }
       printedSaleIdsRef.current.add(saleId);
-      void triggerPrint();
+      // 087: the receipt number printed goes into the till's journal FIRST (088 never reuses a printed
+      // number); if that cannot be recorded, nothing is printed (fail closed) — reprint from Sales History.
+      void journalReceiptPrint(printReceipt.sale).then(() => triggerPrint(), (err) => {
+        console.error("[journal] printed receipt not recorded:", err);
+        toast({ title: "Receipt not printed", description: "This till could not record the receipt number in its journal. The sale is recorded; reprint it from Sales History.", variant: "error" });
+      });
       setPrintSaleId(null);
     }, 500);
     return () => window.clearTimeout(timeout);
-  }, [printReceipt]);
+  }, [printReceipt, toast]);
 
   // Resolve the price for the override modal's currently picked level.
   // Returns null while the modal is closed or the cart's product unit

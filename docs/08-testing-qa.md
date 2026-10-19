@@ -21,7 +21,10 @@ commands: [`runbooks/README.md`](./runbooks/README.md).
 
 | Suite | Command | Runs against | Last result |
 | --- | --- | --- | --- |
-| Unit / flow | `npx vitest run` | Mac | 971 pass (after the D300 fix) |
+| Unit / flow | `npx vitest run` | Mac | 1594 pass / 228 skipped (2026-10-19, branch `g1/batch-2a` + uncommitted v87 client); earlier 971 (after the D300 fix) |
+| v87 client against 087 (fake server's 087 emulation; every finding of the 2026-10-19 independent reviews) | `npx vitest run src/stores/data/recovery087.client.test.ts` | Mac | 44/44 (2026-10-19) |
+| Migration 087: real migration through the real runner, restores (physical, PITR, logical, reload), witness authority + gate, Chromium CORS, legacy clients, 086 compatibility | `UPSTREAM_ENVOY_DIR=<dir> bash tools/m087-verify/run.sh <tag>` — [`tools/m087-verify/README.md`](../tools/m087-verify/README.md) | Mac, disposable stack `phf-iso-*` | all parts passed (2026-10-19, `e170794`): x2 248/0, browser 6/0, legacy 11/11, compat 19/1 (the one intended FS.10 refusal), x3 23/0, x1 117/0 |
+| v87 client e2e: real app in real Chromium (persistent profile, crash + restart) and the real Electron app against the committed 087 | `bash tools/m087-client-verify/run.sh <tag>` | Mac, disposable stack `phf-iso-*` | 5/5 (2026-10-19) |
 | Edge functions (mocked email, no network) | `bash supabase/tests/functions/run.sh` | Mac (Deno) | 81 (G10) |
 | DB harness: migrations, RLS, idempotency, org isolation, 082–085 guards | `bash supabase/tests/phase-d/run.sh` (`POS_TEST_MAX_MIGRATION=NNN` to cap) | Mac, disposable Postgres | 710/0 (G10) |
 | **Org-isolation security audit** (real GoTrue/PostgREST/storage/edge-runtime, two synthetic orgs + attacker/orphan/platform admin, coverage gate) | `tools/security-audit/run.sh [--max-migration NNN]`; production model `PHF_ISO_SKIP_MIGRATIONS=84 … --max-migration 085`; schema parity `PHF_ISO_PARITY_SSH=<alias> … --parity` | Mac, disposable stack (parity = read-only on live) | 083: 446/0/2 low GAP, coverage 120/120, parity PASS ([`org-isolation-security-audit.md`](./selfhost-migration/phase-f/org-isolation-security-audit.md)) |

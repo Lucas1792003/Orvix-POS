@@ -3,6 +3,8 @@ import { localDb } from "../../lib/localDb";
 import { classifyFailure } from "../../lib/failureClass";
 import { enqueueOutbox } from "./outbox";
 import { RpcError, runRequest, toRpcError, type RpcOutcome } from "./idempotentRpc";
+import { EPOCH_HEADER } from "../../lib/epochHeader";
+import { assertNewOperationAllowed, currentOpEpoch, isRecoveryBlocked } from "./recoveryState";
 
 // Tables this helper knows how to mirror locally. Deliberately narrow — the
 // multi-row/batch catalog writes (product barcodes, product units, supplier
@@ -54,8 +56,16 @@ interface WriteTableRowInput {
 export async function writeTableRow(
   { table, op, row, appRow, id }: WriteTableRowInput,
 ): Promise<{ error: { message: string } | null }> {
+  // 087: created now, under the current epoch — or not at all (recovery mode).
+  const opEpoch = currentOpEpoch();
+  try {
+    assertNewOperationAllowed(opEpoch);
+  } catch (err) {
+    if (isRecoveryBlocked(err)) return { error: { message: err.message } };
+    throw err;
+  }
   const queueForLater = async () => {
-    await enqueueOutbox({ kind: "table_write", name: `${table}.${op}`, table, op, row, id, shopId: null });
+    await enqueueOutbox({ kind: "table_write", name: `${table}.${op}`, table, op, row, id, shopId: null, opEpoch });
     await mirrorLocally(table, op, appRow, id);
     return { error: null };
   };
@@ -72,9 +82,10 @@ export async function writeTableRow(
   // Anything that may not have reached the database, or whose outcome is
   // unknown, is queued and resent; a definitive refusal — including an
   // update/delete that matched no row — is returned to the caller.
-  const outcome = await runTableWrite(table, op, row, id);
+  const outcome = await runTableWrite(table, op, row, id, opEpoch);
   if (outcome.error) {
     const { failure } = outcome.error;
+    // (a recovery refusal holds — it is never queued for later)
     if (failure.retryable && failure.hold === null) return queueForLater();
     return { error: { message: outcome.error.message } };
   }
@@ -102,11 +113,13 @@ async function mirrorLocally(
  *  204 (P0-E, until migration 087's apply_catalog_write). `row` is always
  *  the snake_case payload, never the app-shape mirror copy. */
 export function replayTableWrite(
-  table: string, op: "insert" | "update" | "delete", row: Record<string, unknown> | undefined, id: string,
+  table: string, op: "insert" | "update" | "delete", row: Record<string, unknown> | undefined, id: string, opEpoch: string | null = null,
 ) {
-  return op === "insert" ? supabase.from(table).insert(row ?? {}).select("id")
+  const q = op === "insert" ? supabase.from(table).insert(row ?? {}).select("id")
     : op === "update" ? supabase.from(table).update(row ?? {}).eq("id", id).select("id")
     : supabase.from(table).delete().eq("id", id).select("id");
+  // 087: the write carries the epoch it was CREATED under (lib/epochHeader.ts never overrides it)
+  return opEpoch && typeof (q as { setHeader?: unknown }).setHeader === "function" ? q.setHeader(EPOCH_HEADER, opEpoch) : q;
 }
 
 const rejected = (message: string, code: string): RpcError =>
@@ -142,11 +155,11 @@ export function evaluateTableWrite(op: "insert" | "update" | "delete", id: strin
 
 /** Send one table write, bounded and classified; never rejects. */
 export async function runTableWrite(
-  table: string, op: "insert" | "update" | "delete", row: Record<string, unknown> | undefined, id: string,
+  table: string, op: "insert" | "update" | "delete", row: Record<string, unknown> | undefined, id: string, opEpoch: string | null = null,
 ): Promise<RpcOutcome> {
   let outcome: RpcOutcome;
   try {
-    outcome = await runRequest(replayTableWrite(table, op, row, id), `${table}.${op}`);
+    outcome = await runRequest(replayTableWrite(table, op, row, id, opEpoch), `${table}.${op}`);
   } catch (err) {
     outcome = { data: null, error: toRpcError(err) };
   }

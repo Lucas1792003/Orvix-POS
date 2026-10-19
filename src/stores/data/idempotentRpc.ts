@@ -1,11 +1,15 @@
 import { supabase } from "../../lib/supabase";
 import { EXECUTOR_RPCS } from "../../lib/executorRpcs";
 import { isNetworkError } from "../../lib/errors";
-import { classifyFailure, failureInfo, signalOf, type FailureInfo } from "../../lib/failureClass";
+import { classifyFailure, failureInfo, recoveryCodeOf, signalOf, type FailureInfo } from "../../lib/failureClass";
 import { retryAfterRemainingMs } from "../../lib/retryAfter";
 import { touchAuthCache } from "../authCache";
 import { localDb, SYNC_STATE_KEYS } from "../../lib/localDb";
 import { currentBackendOrigin } from "../../lib/backendOrigin";
+import {
+  currentOpEpoch, noteEpochStale, noteRecoveryRefusal, noteWitness, recoveryBlocksSending, recoveryCapability, recoveryMessage,
+  recoveryView, storedEpoch, v87Context,
+} from "./recoveryState";
 
 // ----------------------------------------------------------------------
 // Idempotent RPC calls — client half of
@@ -98,10 +102,14 @@ export function newIdempotencyKey(now: number = Date.now()): string {
 export interface OperationContext {
   idempotencyKey: string;
   createdAt: string;
+  /** Migration 087: the server-issued epoch the operation is created under
+   *  (null on a server without 087, or when the till has no usable epoch —
+   *  such an operation is refused before anything is saved). Never replaced. */
+  opEpoch: string | null;
 }
 
 export function beginOperation(): OperationContext {
-  return { idempotencyKey: newIdempotencyKey(), createdAt: new Date().toISOString() };
+  return { idempotencyKey: newIdempotencyKey(), createdAt: new Date().toISOString(), opEpoch: currentOpEpoch() };
 }
 
 export class RpcError extends Error {
@@ -144,6 +152,8 @@ export interface RpcOutcome {
   /** Committed, but its reply cannot be read here: it belongs to another
    *  user (withheld) or was purged. Reconcile by a verified reload. */
   responseUnavailable?: "withheld" | "purged";
+  /** 087: the server's signed binding of the reply, as received (journal evidence). */
+  signedReply?: { signed: unknown; sig: string };
 }
 
 // Loose view of what supabase-js resolves with — postgrest-js puts the HTTP
@@ -225,7 +235,12 @@ export async function runRequest(
       data: null,
       error: toRpcError(thrown),
     }));
-    return await Promise.race([call, timeout]);
+    const outcome = await Promise.race([call, timeout]);
+    // 087: any recovery refusal from any request puts the till in the mode it
+    // means (durably) — whoever made the request (recoveryState.ts).
+    const code = outcome.error?.failure.klass === "RECOVERY" ? recoveryCodeOf(outcome.error.message) : null;
+    if (code) await noteRecoveryRefusal(code, outcome.error!.message).catch(() => undefined);
+    return outcome;
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -386,6 +401,67 @@ async function viaExecutor(name: string, args: Record<string, unknown>, timeoutM
   return fromExecutorReply(name, outcome.data, outcome.status);
 }
 
+// ----------------------------------------------------------------------
+// Migration 087: on a backend that has shown 087, every executor RPC goes
+// through op_execute_v87 with the till context and the operation's OWN
+// creation epoch; fences through op_status_v87. Lookups stay read-only
+// (op_status). Nothing here ever creates, guesses or replaces an epoch.
+// ----------------------------------------------------------------------
+
+/** The 087 path is used once the backend has shown 087 (durable, per origin). */
+export const v87Routing = (): boolean => recoveryCapability() === "present";
+
+const RECOVERY_PREFIX = "ORG_SUSPENDED: server recovery in progress";
+
+/** An operation created without an epoch, on an 087 server: never sent automatically. */
+export const LEGACY_OPERATION = "LEGACY_OPERATION";
+export const legacyOperationError = (name: string): RpcError =>
+  new RpcError(
+    `This ${name} was created before this till had a recovery epoch from the server (an older version or queue). It is never sent or stopped automatically: it keeps its original key and an owner reviews it.`,
+    { code: LEGACY_OPERATION, failure: failureInfo("RECOVERY") },
+  );
+
+/** The till is in recovery mode: nothing is sent or stopped automatically. */
+export const recoveryModeError = (): RpcError => {
+  const view = recoveryView();
+  return new RpcError(`${RECOVERY_PREFIX} [${view.code ?? "TILL_RECOVERY_MODE"}] (this till is in recovery mode: ${recoveryMessage(view.mode === "legacy-server" ? "normal" : view.mode, view.code)})`,
+    { code: "PT429", failure: failureInfo("RECOVERY") });
+};
+
+/** The committed {outcome:'held'} reply of a v87 function: the server held the organisation; nothing ran. */
+const heldReplyError = (status?: number): RpcError =>
+  new RpcError(`${RECOVERY_PREFIX} [CONTINUITY_ROLLBACK] (the server held this organisation: this till had seen history the server no longer has)`,
+    { status, code: "PT429", failure: failureInfo("RECOVERY") });
+
+/** PRE_EPOCH_OPERATION for an operation stamped with OUR current epoch: our epoch is stale. */
+async function notePreEpoch(error: RpcError | null, opEpoch: string | null | undefined): Promise<void> {
+  if (recoveryCodeOf(error?.message) !== "PRE_EPOCH_OPERATION") return;
+  if (opEpoch && opEpoch === storedEpoch()?.epoch) await noteEpochStale(error!.message).catch(() => undefined);
+}
+
+async function viaExecutor87(name: string, args: Record<string, unknown>, timeoutMs: number, actorId: string | null, opEpoch: string | null | undefined): Promise<RpcOutcome> {
+  if (!opEpoch) return { data: null, via: "executor", error: legacyOperationError(name) };
+  const { [IDEMPOTENCY_KEY_ARG]: key, ...rest } = args;
+  const outcome = await runRequest(
+    supabase.rpc("op_execute_v87", { p_key: key, p_rpc: name, p_args: rest, p_actor_id: actorId, p_ctx: v87Context(opEpoch) }), name, timeoutMs,
+  );
+  if (outcome.error) {
+    if (isMissingFunction(outcome.error, "op_execute_v87")) return { data: null, status: outcome.status, via: "executor", error: staleSchemaError("op_execute_v87", outcome.status) };
+    await notePreEpoch(outcome.error, opEpoch);
+    return { ...outcome, via: "executor" };
+  }
+  const d = (outcome.data && typeof outcome.data === "object" && !Array.isArray(outcome.data) ? outcome.data : {}) as Record<string, unknown>;
+  if (d.outcome === "held") {
+    await noteRecoveryRefusal("CONTINUITY_ROLLBACK", "op_execute_v87 answered {outcome: held}").catch(() => undefined);
+    return { data: null, status: outcome.status, via: "executor", error: heldReplyError(outcome.status) };
+  }
+  noteCapability("available");
+  await noteWitness(d.witness);
+  const res = fromExecutorReply(name, d, outcome.status);
+  if (d.signed !== undefined && typeof d.sig === "string") res.signedReply = { signed: d.signed, sig: d.sig };
+  return res;
+}
+
 export interface OperationStatus {
   status: "committed" | "rejected" | "abandoned" | "in_flight" | "not_found" | "unavailable";
   response?: unknown;
@@ -418,19 +494,44 @@ const STATUSES = new Set(["committed", "rejected", "abandoned", "in_flight", "no
  */
 export async function lookupOperation(
   rpc: string, key: string,
-  opts: { fence?: boolean; actorId?: string | null; args?: Record<string, unknown> | null; timeoutMs?: number } = {},
+  opts: { fence?: boolean; actorId?: string | null; args?: Record<string, unknown> | null; timeoutMs?: number; opEpoch?: string | null } = {},
 ): Promise<LookupResult> {
   // p_args: the operation's own arguments (key removed), so the server can
   // verify from its own rows which organisation the operation belongs to.
   const { [IDEMPOTENCY_KEY_ARG]: _key, ...args } = opts.args ?? {};
   void _key;
+  // 087: a fence goes through op_status_v87 with the operation's OWN epoch —
+  // never while the till is in recovery mode, never for a legacy operation
+  // (an old operation is fenced only by an owner-approved decision).
+  const fence87 = opts.fence === true && v87Routing();
+  if (fence87 && recoveryBlocksSending()) return { absent: false, status: null, error: recoveryModeError() };
+  if (fence87 && !opts.opEpoch) return { absent: false, status: null, error: legacyOperationError(rpc) };
   const outcome = await runRequest(
-    supabase.rpc("op_status", {
-      p_key: key, p_rpc: rpc, p_fence: opts.fence === true, p_expected_actor_id: opts.actorId ?? null,
-      p_args: opts.args ? args : null,
-    }),
+    fence87
+      ? supabase.rpc("op_status_v87", {
+        p_key: key, p_rpc: rpc, p_fence: true, p_expected_actor_id: opts.actorId ?? null, p_args: opts.args ? args : null,
+        p_ctx: v87Context(opts.opEpoch ?? null),
+      })
+      : supabase.rpc("op_status", {
+        p_key: key, p_rpc: rpc, p_fence: opts.fence === true, p_expected_actor_id: opts.actorId ?? null,
+        p_args: opts.args ? args : null,
+      }),
     `${rpc} status`, opts.timeoutMs ?? RPC_TIMEOUT_MS,
   );
+  if (fence87 && !outcome.error) {
+    const d = (outcome.data ?? {}) as Record<string, unknown>;
+    if (d.outcome === "held") {
+      await noteRecoveryRefusal("CONTINUITY_ROLLBACK", "op_status_v87 answered {outcome: held}").catch(() => undefined);
+      return { absent: false, status: null, error: heldReplyError(outcome.status) };
+    }
+    await noteWitness(d.witness);
+  }
+  if (fence87 && outcome.error) {
+    await notePreEpoch(outcome.error, opts.opEpoch);
+    // FENCE_NOT_APPLIED: the key is in flight, decided or not this till's to stop:
+    // nothing changed — read what the server holds instead (read-only).
+    if (recoveryCodeOf(outcome.error.message) === "FENCE_NOT_APPLIED") return lookupOperation(rpc, key, { ...opts, fence: false });
+  }
   if (outcome.error) {
     if (isMissingFunction(outcome.error, "op_status")) {
       if (await executorDemonstrated()) return { absent: false, status: null, error: staleSchemaError("op_status", outcome.status) };
@@ -472,11 +573,16 @@ interface CallOptions {
   /** The app user who CREATED the operation (default: who acts now). Null
    *  only for a legacy queue entry recorded without one. */
   actorId?: string | null;
+  /** 087: the epoch the operation was created under (never replaced). */
+  opEpoch?: string | null;
 }
 
 /** One attempt: through the executor when the server has it, else direct.
  *  Each supabase-js builder is created and awaited exactly once. */
-async function attempt(name: string, args: Record<string, unknown>, timeoutMs: number, actorId: string | null): Promise<RpcOutcome> {
+async function attempt(name: string, args: Record<string, unknown>, timeoutMs: number, actorId: string | null, opEpoch?: string | null): Promise<RpcOutcome> {
+  // 087 backend: executor RPCs only through op_execute_v87 (legacy paths are closed there)
+  // (an operation that carries an epoch was created against an 087 server: always the v87 path)
+  if (EXECUTOR_RPCS.has(name) && (v87Routing() || opEpoch)) return viaExecutor87(name, args, timeoutMs, actorId, opEpoch);
   if (EXECUTOR_RPCS.has(name) && mayUseExecutor()) {
     const viaExec = await viaExecutor(name, args, timeoutMs, actorId);
     if (viaExec !== "absent") return viaExec;
@@ -510,16 +616,17 @@ export async function callRpc(
   // Same rule as the queue (stampOperationArgs): every in-scope caller mints
   // the key up front; the actor is stamped exactly as a queued replay is.
   args = stampOperationArgs(name, args);
-  let outcome = await attempt(name, args, timeoutMs, actorId);
+  let outcome = await attempt(name, args, timeoutMs, actorId, options.opEpoch);
   // An attempt whose outcome is unknown (timeout, lost reply) stays unknown
   // until the SERVER answers for this key: a later attempt that never
   // reached the operation (401, edge block, network, another session…) does
   // not prove the earlier one did not commit (stabilization C).
   let uncertain = Boolean(outcome.error?.failure.mayHaveCommitted);
-  for (let n = 0; n < retries && outcome.error?.transient; n++) {
+  // a recovery refusal is never retried automatically (the till is in recovery mode)
+  for (let n = 0; n < retries && outcome.error?.transient && outcome.error.failure.klass !== "RECOVERY"; n++) {
     if (typeof navigator !== "undefined" && navigator.onLine === false) break;
     await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[Math.min(n, RETRY_DELAYS_MS.length - 1)]));
-    outcome = await attempt(name, args, timeoutMs, actorId);
+    outcome = await attempt(name, args, timeoutMs, actorId, options.opEpoch);
     if (outcome.error?.failure.mayHaveCommitted) uncertain = true;
   }
   if (uncertain) outcome = keepUnknown(outcome);

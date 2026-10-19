@@ -15,6 +15,9 @@ import { supabase } from "../../lib/supabase";
 import { clearNeedsReauth, countPendingOutbox, drainOutbox, refreshSyncStatus } from "../../stores/data/outbox";
 import { subscribeInventoryRealtime, syncInventoryScope } from "../../stores/data/inventoryRealtime";
 import { ExportQueueDialog } from "../../components/sync/ExportQueueDialog";
+import { RecoveryBanner } from "../../components/sync/RecoveryBanner";
+import { loadRecoveryState, recoveryView } from "../../stores/data/recoveryState";
+import { runRecoveryCheck } from "../../stores/data/recovery87";
 import { useTranslation } from "../../hooks/useTranslation";
 
 const MIN_SUPPORTED_WIDTH = 768;
@@ -123,6 +126,22 @@ export const AppLayout = () => {
       window.clearInterval(interval);
     };
   }, [pullDeltas]);
+
+  // Migration 087: the till's durable recovery state for this organisation,
+  // then a check with the server (startup, sign-in, organisation change,
+  // reconnect, and every minute while the till is blocked). Reconnecting
+  // never clears a recovery state by itself: only an issued epoch does.
+  useEffect(() => {
+    let cancelled = false;
+    const check = () => {
+      if (!useConnectivityStore.getState().isOnline) return;
+      void runRecoveryCheck().catch((err) => console.error("[recovery] check failed:", err));
+    };
+    void loadRecoveryState(currentOrgId ?? null).then(() => { if (!cancelled) check(); });
+    const interval = window.setInterval(() => { if (!recoveryView().allowed) check(); }, 60_000);
+    window.addEventListener("online", check);
+    return () => { cancelled = true; window.clearInterval(interval); window.removeEventListener("online", check); };
+  }, [currentOrgId]);
 
   // Outbox drain triggers beyond the full load (stores/data/index.ts):
   //  - every 30 s while anything is queued (a sale queued because one
@@ -270,6 +289,8 @@ export const AppLayout = () => {
           </div>
         )}
         <div className="app-content">
+          {/* (inside the content column: .main is a row flexbox) */}
+          <RecoveryBanner />
           <Outlet />
         </div>
       </main>

@@ -183,3 +183,12 @@ describe("offline authorisation errors", () => {
     }
   });
 });
+
+describe("migration 087 recovery messages", () => {
+  it("a RecoveryBlockedError reaches the cashier as is; a raw PT429 refusal is shown as the recovery state", () => {
+    const blocked = Object.assign(new Error("Till reconciliation required [TILL_UNKNOWN]: this till is not registered with the server. An administrator with an authenticator app must register it before sales can resume."), { name: "RecoveryBlockedError" });
+    expect(getErrorMessage(blocked, "Failed")).toBe(blocked.message);
+    expect(getErrorMessage({ message: "ORG_SUSPENDED: server recovery in progress [RECOVERY_HOLD]", code: "PT429" }, "Failed"))
+      .toBe("Not recorded: server recovery in progress [RECOVERY_HOLD]. Nothing was applied; see Sync › Recovery.");
+  });
+});

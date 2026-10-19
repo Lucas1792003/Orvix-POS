@@ -11,7 +11,10 @@ desktop release is **v1.0.15** (2026-08-26, points at hosted Supabase); the
 backend is being moved to a self-hosted Supabase stack on `lucashome`
 (**2026-10-16:** server at schema 085, 1.0.16 not built, no real sales yet;
 remaining blockers in the
-[production-readiness checklist](./selfhost-migration/phase-f/production-readiness-checklist.md)) — see
+[production-readiness checklist](./selfhost-migration/phase-f/production-readiness-checklist.md);
+**2026-10-19:** recovery migrations 086 and 087 are committed on branch `g1/batch-2a` and the v87 till client that
+goes with 087 is implemented locally (uncommitted) — all verified only on disposable test stacks, nothing applied
+to `lucashome`) — see
 [Environments](#environments-ops-record) below and
 [`selfhost-migration/`](./selfhost-migration/MIGRATION-PLAN.md). Document 10
 covers the Windows updater history and stuck-installer recovery.
@@ -54,6 +57,8 @@ Full setup, env, Supabase, and deployment notes:
 | — | [Self-host migration](./selfhost-migration/MIGRATION-PLAN.md) | The hosted → `lucashome` migration: audit, risk register, runbook, gates, per-phase evidence. |
 | — | [Production-readiness checklist](./selfhost-migration/phase-f/production-readiness-checklist.md) | **Start here for what is left** before real trading on the self-hosted backend (owner/state/evidence per item). |
 | — | Phase F design notes ([`selfhost-migration/phase-f/`](./selfhost-migration/phase-f/)) | Security: [org-isolation audit](./selfhost-migration/phase-f/org-isolation-security-audit.md), [082](./selfhost-migration/phase-f/migration-082.md), [083 (G5)](./selfhost-migration/phase-f/migration-083-g5.md), [085 (PNG)](./selfhost-migration/phase-f/migration-085-png.md), [G5 follow-ups / 084](./selfhost-migration/phase-f/g5-followups.md), [till readiness for 084](./selfhost-migration/phase-f/till-readiness-084.md), [staff creation](./selfhost-migration/phase-f/staff-creation.md), [phone QR origin](./selfhost-migration/phase-f/phone-qr-origin.md), [rate limiting](./selfhost-migration/phase-f/rate-limiting.md), [Studio isolation](./selfhost-migration/phase-f/studio-isolation.md). Backups: [disaster recovery assessment (2026-10-18)](./selfhost-migration/phase-g/disaster-recovery.md), [email tier](./selfhost-migration/phase-f/email-backup-design.md), [restore from email](./selfhost-migration/phase-f/restore-from-email.md), [owner setup](./selfhost-migration/phase-f/owner-setup-checklist.md), [owner key](./selfhost-migration/phase-f/owner-recovery-key.md). Host/access: [remote access](./selfhost-migration/phase-f/remote-access-architecture.md), [free-tier compliance](./selfhost-migration/phase-f/free-tier-compliance.md), [WireGuard](./selfhost-migration/phase-f/wireguard-feasibility.md), [staged hardening](./selfhost-migration/phase-f/host-hardening-staged.md), [reboot](./selfhost-migration/phase-f/host-reboot-hardening.md), [cost](./selfhost-migration/phase-f/cost-research.md), [Vercel/GitHub](./selfhost-migration/phase-f/vercel-github-controls.md). App/data: [app bug fixes](./selfhost-migration/phase-f/app-bugfixes.md), [Electron compatibility](./selfhost-migration/phase-f/electron-compatibility.md), [queue export](./selfhost-migration/phase-f/queue-export.md), [QA inventory](./selfhost-migration/phase-f/qa-data-inventory.md), [QA cleanup](./selfhost-migration/phase-f/qa-cleanup-manifest.md). |
+
+| — | Phase G recovery (restore safety): [086 operation outcomes](./selfhost-migration/phase-g/migration-086.md), [087 recovery hold and rollback detection](./selfhost-migration/phase-g/migration-087.md), [v87 till client](./selfhost-migration/phase-g/v87-client.md), [disaster-recovery assessment](./selfhost-migration/phase-g/disaster-recovery.md) | Anything that touches restores, the operation ledger, recovery holds, the witness authority or how a till behaves during a server recovery. **None of it is applied to `lucashome` yet.** |
 
 ## Environments (ops record)
 

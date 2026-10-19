@@ -13,6 +13,9 @@ Release checklist and proposal for the items below (2026-10-13, not yet approved
 - [x] **2026-10-16** Desktop uploads through the validated session flow (`373682a`, merged `d490298`) — prerequisite for migration 084.
 - [x] **2026-10-16** D300: confirm-before-cancel on the QR modal + close diagnostics (`e467d21`, merged `967a941`).
 - [x] **2026-10-16** Sanitized publication branch `publish/selfhost-support` synced (16 commits, unpushed) — checklist E4. **Not re-synced since 04:30 UTC**; re-sync before any push.
+- [x] **2026-10-19** v87 till client for migration 087 implemented on branch `g1/batch-2a` (on top of `e170794`), **uncommitted, not built**: recovery epochs, durable recovery mode, owner-review holds, extended journal, recovery banner + `/app/sync/recovery` — [`v87-client.md`](../selfhost-migration/phase-g/v87-client.md). Evidence: vitest 1594/0 (44 v87 tests), real Chromium + Electron e2e against the committed 087 on a disposable stack 5/5; four independent reviews + two re-verification rounds, every CRITICAL/HIGH fixed (reports in the session's scratch area, summarised in the 2026-10-19 report).
+- [ ] Owner approval: one local checkpoint commit of the v87 client.
+- [ ] Owner decisions on the v87 limits ([`risks.md`](risks.md), "Found 2026-10-19").
 - [ ] Vercel Git integration off, GitHub Pages workflow absent, branch protection (owner dashboards, E5).
 - [ ] Updater guard: no install while sales are pending (decision, F3); version handshake (A9).
 - [ ] Owner approves push + PR of `feature/selfhost-supabase-migration` (via `Lucas1792003`, no direct push to `main`).

@@ -479,6 +479,10 @@ On success main returns the owner identity and `seal = HMAC-SHA-256(key, {localI
 
 RC3 needs neither.
 
+*Note 2026-10-19:* these two proposals were never written. The numbers **086** and **087** were later used for
+different migrations: [operation outcomes](../selfhost-migration/phase-g/migration-086.md) and
+[recovery hold and rollback detection](../selfhost-migration/phase-g/migration-087.md).
+
 **Server audit entry: not written.** The only client-callable audit RPC (`log_audit_event`, 070) allow-lists catalogue actions (`PRODUCT_*`, `CATEGORY_*`), and `audit_logs` has no INSERT grant for `authenticated` (065). Writing a reconciliation under a catalogue action type would be misleading. The audit trail today is:
 - the local log (`syncState` `reconcile-log:*`), included in every export and in `inspect`;
 - the record on the row;

@@ -8,6 +8,7 @@ import { beginOperation, newIdempotencyKey, ONLINE_ONLY_RETRIES, type OperationC
 import { callOnlineOnly } from "../onlineOnly";
 import { deleteLocalRows, putLocalRows } from "../localWrites";
 import { Stage, submitOfflineCapable } from "../writeAhead";
+import { rememberSaleOperation } from "../opJournal";
 import { assertStockKnown, serverStockRows } from "../stockLedger";
 import { assertOfflineWriteEligible } from "../../authStore";
 
@@ -341,13 +342,16 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
     // longer leave a committed sale without a durable record, and pressing
     // Confirm again while it is unresolved reuses it instead of a new key.
     const op = beginOperation();
-    return submitOfflineCapable({
+    const saleId = await submitOfflineCapable({
       set, name: "complete_sale", shopId: input.shopId, op,
       args: buildCompleteSaleArgs(input, get, op),
       needsProvisionalRefs: isProvisionalShift(input.shiftId),
       applyOnline: applyCompleteSale,
       stage: (stage) => stageSale(input, op, stage),
     });
+    // 087 journal: which operation a printed receipt belongs to (opJournal.journalPrinted)
+    rememberSaleOperation(saleId, op.idempotencyKey);
+    return saleId;
   },
 
   // Called by the outbox once a queued complete_sale actually runs — swaps

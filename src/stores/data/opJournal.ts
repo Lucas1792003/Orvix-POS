@@ -119,6 +119,21 @@ export interface JournalRecord {
   contradiction?: string;
   /** Written from an existing queue row / record (created before the journal existed). */
   backfilled?: true;
+  // ---- migration 087 (additive; absent on records of older builds) ----
+  /** The server-issued recovery epoch the operation was CREATED under (never
+   *  replaced). null: created without one (an older build, or a server
+   *  without 087) — a legacy operation on an 087 server: never executed or
+   *  fenced automatically. */
+  opEpoch?: string | null;
+  /** The receipt number this till printed for it, and when (first print). */
+  printedReceiptNo?: string;
+  printedAt?: string;
+  /** The server's signed v87 reply binding (org, key, rpc, request_hash,
+   *  actor, epoch_no, outcome, response_sha256) and its signature, as received. */
+  signedReply?: { signed: unknown; sig: string };
+  /** How many times the server acknowledged the decision (duplicates never
+   *  overwrite the first evidence). */
+  acks?: number;
   events: JournalEvent[];
 }
 
@@ -177,6 +192,19 @@ function transitionTo(rec: JournalRecord, next: JournalState, evidence: JournalE
       return;
     }
     // A weaker state after a decision (e.g. "unknown" on a resend): kept as an event only.
+  } else if (SERVER_DECIDED.has(rec.state) && rec.state === next && rec.evidence) {
+    // The same decision again (a duplicate acknowledgement, a replayed reply):
+    // the FIRST evidence stays; a reply that differs is recorded, never applied.
+    rec.acks = (rec.acks ?? 1) + 1;
+    if (evidence?.response !== undefined && rec.evidence.response !== undefined
+        && canonical(evidence.response) !== canonical(rec.evidence.response)) {
+      rec.contradiction ??= `a later ${next} acknowledgement carried a different reply (${at})`;
+      pushEvent(rec, "duplicate-ack-differs", detail, at);
+    } else {
+      pushEvent(rec, "duplicate-ack", detail, at);
+    }
+    rec.updatedAt = at;
+    return;
   } else if (rec.state === "owner-closed") {
     // an owner's closing stays; later observations are events
   } else if (rec.state === "reconciliation-required" && !SERVER_DECIDED.has(next)) {
@@ -228,6 +256,7 @@ function newFromRow(row: SyncOutboxEntry & { idempotencyKey: string }, backfille
     // current session's — a row of an older build stays unattributed (null)
     orgId: row.orgId ?? null, actorId: row.actorId ?? null, tillId: tillIdOrNull(), backendOrigin: row.backendOrigin ?? null,
     shopId: row.shopId ?? null, createdAt: at, updatedAt: now(), args: clone(row.args ?? null),
+    opEpoch: row.opEpoch ?? null,
     fingerprint: fingerprintOf(row.name, row.args), state: stateFromRow(row), sends: sending ? 1 : 0,
     ...(sending && row.sentAt ? { firstSentAt: row.sentAt, lastSentAt: row.sentAt } : {}),
     ...(backfilled ? { backfilled: true as const } : {}),
@@ -270,10 +299,72 @@ export async function journalSent(row: SyncOutboxEntry, sentAt: string): Promise
 }
 
 /** The server committed it: its reply (or why the reply is not readable). */
-export async function journalCommitted(row: SyncOutboxEntry, evidence: Omit<JournalEvidence, "at"> & { at?: string }): Promise<void> {
+export async function journalCommitted(
+  row: SyncOutboxEntry, evidence: Omit<JournalEvidence, "at"> & { at?: string }, signedReply?: { signed: unknown; sig: string } | null,
+): Promise<void> {
   if (!journaled(row)) return;
   const ev: JournalEvidence = { ...evidence, at: evidence.at ?? now(), response: clone(evidence.response) };
-  await upsert(row.idempotencyKey, () => newFromRow(row, true), (rec) => transitionTo(rec, "committed", ev, `committed (${ev.source})`));
+  await upsert(row.idempotencyKey, () => newFromRow(row, true), (rec) => {
+    if (signedReply && !rec.signedReply) rec.signedReply = clone(signedReply);
+    transitionTo(rec, "committed", ev, `committed (${ev.source})`);
+  });
+}
+
+/** 087: the server refused the operation with a recovery code (nothing ran, nothing recorded). An event, never a decision. */
+export async function journalRecoveryRefusal(row: SyncOutboxEntry, code: string, detail?: string): Promise<void> {
+  if (!journaled(row)) return;
+  await upsert(row.idempotencyKey, () => newFromRow(row, true), (rec) => {
+    pushEvent(rec, `recovery-refused:${code}`, detail);
+    rec.updatedAt = now();
+  });
+}
+
+/** Sale id -> the key of the operation that created it (this session; an
+ *  offline sale carries its key itself). Used to journal printed receipts. */
+const saleOperations = new Map<string, string>();
+export function rememberSaleOperation(saleId: string, key: string): void {
+  saleOperations.set(saleId, key);
+  if (saleOperations.size > 500) saleOperations.delete(saleOperations.keys().next().value as string);
+}
+/** Tests only: a restarted process has no sale->key map. */
+export function forgetSaleOperationsForTests(): void {
+  saleOperations.clear();
+}
+export function saleOperationKey(sale: { id: string; idempotencyKey?: string }): string | null {
+  return sale.idempotencyKey ?? saleOperations.get(sale.id) ?? null;
+}
+
+/**
+ * Before a receipt prints (first print or reprint): the printed number goes
+ * into the journal record of the operation that created the sale — found by
+ * its key, or (after a restart) by the sale id in the server's recorded reply.
+ * Throws when that record exists but cannot be written (the print must not
+ * happen: fail closed). A sale this till did not create (another till's, or
+ * one from before the journal) has no record here and prints as before.
+ */
+export async function journalReceiptPrint(sale: { id: string; idempotencyKey?: string; receiptNo: string }): Promise<"journaled" | "not-this-till"> {
+  let key = saleOperationKey(sale);
+  if (!key) {
+    const rows = await localDb.syncState.where("key").startsWith(JOURNAL_PREFIX).toArray();
+    for (const row of rows) {
+      const rec = parseJournal(row);
+      const s = (rec?.evidence?.response as { sale?: { id?: string } } | undefined)?.sale;
+      if (rec && rec.rpc === "complete_sale" && s?.id === sale.id) { key = rec.key; break; }
+    }
+  }
+  if (!key || !(await getJournalRecord(key))) return "not-this-till";
+  await journalPrinted(key, sale.receiptNo);
+  return "journaled";
+}
+
+/** The receipt number this till printed for an operation (first print kept; reprints are events). */
+export async function journalPrinted(key: string, receiptNo: string): Promise<void> {
+  await localDb.transaction("rw", localDb.syncState, () => upsert(key, () => null, (rec) => {
+    const at = now();
+    if (!rec.printedReceiptNo) { rec.printedReceiptNo = receiptNo; rec.printedAt = at; pushEvent(rec, "printed", receiptNo, at); }
+    else pushEvent(rec, "reprinted", receiptNo, at);
+    rec.updatedAt = at;
+  }));
 }
 
 /** The server decided it for good: refused, or stopped (fenced). */
@@ -324,6 +415,8 @@ export interface OnlineOpLike {
   outcome?: "applied" | "refused" | "not-applied" | "abandoned" | "verified-manually";
   createdAt: string; attempts: number; uncertain?: boolean; backendOrigin?: string;
   decidedBy?: "server" | "client" | "owner";
+  /** 087: the epoch it was created under (never replaced). */
+  opEpoch?: string | null;
 }
 
 const onlineState = (op: OnlineOpLike): JournalState => {
@@ -348,6 +441,7 @@ export async function journalOnline(op: OnlineOpLike, event: string, evidence?: 
     v: 1, key, rpc: op.name, source: "online-only", ref: op.id, orgId: op.orgId, actorId: op.userId, tillId: tillIdOrNull(),
     backendOrigin: op.backendOrigin ?? null, shopId: typeof op.args.p_shop_id === "string" ? op.args.p_shop_id : null,
     createdAt: op.createdAt, updatedAt: at, args: clone(op.args), fingerprint: fingerprintOf(op.name, op.args),
+    opEpoch: op.opEpoch ?? null,
     state: "never-sent", sends: 0, events: [{ at, event: "created" }],
   }), (rec) => {
     if (event === "attempt") {

@@ -297,6 +297,27 @@ Dexie table") contradicts those documents, the Phase D documents win.
 Tests: `stores/data/outbox.reliability.test.ts` (fake supabase-js client in
 `stores/data/testing/fakeSupabase.ts`).
 
+## Migration 087 — v87 client recovery mode (2026-10-19, uncommitted, not built)
+
+Against a backend with migration 087 the till behaves differently from everything above; the full description is
+[`selfhost-migration/phase-g/v87-client.md`](./selfhost-migration/phase-g/v87-client.md). In short:
+
+- Every new financial operation is stamped **once, at creation**, with the server-issued recovery epoch; without a
+  verified epoch it is refused before anything is saved — **offline too**. A till must reach its server once after
+  updating before it can sell.
+- A 429 `PT429` refusal is **never** a network failure: an online sale refused by a recovery hold is not turned into an
+  offline sale, and the till enters a durable recovery mode (survives restart, sign-out and reconnecting) that only the
+  server's `recovery_epoch` clears.
+- In recovery mode the outbox sends, looks up and fences nothing automatically. Queued operations keep their key,
+  payload and epoch; operations from before the current epoch (and pre-v87 queues) wait for the owner's review and
+  are never resent or re-keyed.
+- The operation journal keeps committed operations too, the signed v87 reply and the printed receipt number (written
+  before printing). Reconciliation = admin registers the till (authenticator app), a cashier uploads the journal, the
+  admin approves (`/app/sync/recovery`).
+- Against a backend **without** 087 nothing changes.
+
+Tests: `stores/data/recovery087.client.test.ts`; `tools/m087-client-verify/run.sh` (Chromium + Electron).
+
 ## ✅ Fixed — offline login (was: 🔴 critical bug)
 
 **`src/stores/authStore.ts`'s `restoreSession()`** used to always require the

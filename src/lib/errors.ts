@@ -27,6 +27,11 @@ export const ERROR_MESSAGES = {
 export const OFFLINE_AUTHORIZATION_ERROR = "OfflineAuthorizationError";
 // stores/data/operationPrompt.ts UnresolvedOperationError (same reason).
 export const UNRESOLVED_OPERATION_ERROR = "UnresolvedOperationError";
+// Migration 087: stores/data/recoveryState.ts RecoveryBlockedError (same reason: the
+// recovery state and what to do must reach the cashier, never "Something went wrong").
+export const RECOVERY_BLOCKED_ERROR = "RecoveryBlockedError";
+/** The fixed prefix of an 087 refusal (lib/failureClass.ts RECOVERY_MESSAGE_PREFIX). */
+const RECOVERY_PREFIX = "ORG_SUSPENDED: server recovery in progress";
 
 // Postgres SQLSTATE codes we care about.
 // 42501 - insufficient_privilege (RLS / RBAC deny)
@@ -305,6 +310,15 @@ export const getErrorMessage = (error: AnyError, fallback?: string): string => {
   // the reason must reach them — never replaced by a generic "could not record".
   if (error?.name === UNRESOLVED_OPERATION_ERROR && typeof error.message === "string" && error.message) {
     return error.message;
+  }
+  if (error?.name === RECOVERY_BLOCKED_ERROR && typeof error.message === "string" && error.message) {
+    return error.message;
+  }
+  // A raw 087 refusal from the server: shown as the recovery state, with its code (nothing ran).
+  const raw0 = rawMessage(error);
+  if (raw0 && raw0.startsWith(RECOVERY_PREFIX)) {
+    const code = /\[([A-Z0-9_]+)\]/.exec(raw0)?.[1];
+    return `Not recorded: server recovery in progress${code ? ` [${code}]` : ""}. Nothing was applied; see Sync › Recovery.`;
   }
 
   const mapped = mapSupabaseError(error);

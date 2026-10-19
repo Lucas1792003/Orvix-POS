@@ -69,6 +69,9 @@ const AuditLogPage = lazy(() =>
 const SyncConflictsPage = lazy(() =>
   import("../../pages/SyncConflictsPage").then((m) => ({ default: m.SyncConflictsPage })),
 );
+const RecoveryPage = lazy(() =>
+  import("../../pages/RecoveryPage").then((m) => ({ default: m.RecoveryPage })),
+);
 const MyUnresolvedOperationsPage = lazy(() =>
   import("../../pages/MyUnresolvedOperationsPage").then((m) => ({ default: m.MyUnresolvedOperationsPage })),
 );
@@ -340,6 +343,16 @@ export const AppRouter = () => (
           element={
             <RequireRole permission={ROUTE_PERMISSIONS.adminAudit}>
               <AuditLogPage />
+            </RequireRole>
+          }
+        />
+        <Route
+          path="sync/recovery"
+          element={
+            // Any signed-in user: migration 087 recovery state and the actions of
+            // each role (the server checks every action's role again).
+            <RequireRole>
+              <RecoveryPage />
             </RequireRole>
           }
         />

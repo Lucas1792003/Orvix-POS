@@ -138,6 +138,12 @@ export interface SyncOutboxEntry {
   fenceRequired?: boolean;
   /** The server's final decision on this key (086): never resent. */
   serverOutcome?: "rejected" | "abandoned";
+  /** Migration 087: the server-issued recovery epoch the operation was
+   *  CREATED under — sent as op_epoch / x-orvix-epoch on every attempt and
+   *  NEVER replaced. Absent: created by an older build or for a server
+   *  without 087; on an 087 server such an entry is a legacy operation:
+   *  never sent, never fenced automatically (owner review). */
+  opEpoch?: string | null;
   /** The path of the latest attempt. */
   protocol?: "executor" | "direct" | "lookup";
   /** A conflict the server has NOT decided (it could still run if retried):

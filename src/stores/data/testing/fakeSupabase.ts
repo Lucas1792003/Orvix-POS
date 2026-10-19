@@ -34,6 +34,18 @@
 //    not recorded. op_execute runs an operation only for its own actor
 //    (p_actor_id), requires it for UUIDv7 keys, and a UUIDv7 key sent to a
 //    legacy RPC is refused (OP_EXECUTOR_REQUIRED), as in migration 086.
+//  - migration 087 (off by default — recovery_epoch etc. answer PGRST202,
+//    like a server without 087): `enable087()` emulates the recovery hold as
+//    supabase/migrations/087_recovery_hold.sql defines it — the server gate
+//    (lease, state), till auth, witnesses (AHEAD commits a hold and answers
+//    {outcome:'held'}), per-organisation holds and epochs, the old-operation
+//    rule (op_epoch, quarantine), op_execute_v87 / op_status_v87 (fence),
+//    recovery_epoch, recovery_register_till (MFA admin), journal chunks
+//    (idempotent, conflict, quota, quarantine), recovery_approve_till
+//    (complete journal, not the submitter). Legacy paths (op_execute, a
+//    direct executor RPC) answer 429 CLIENT_UPGRADE_REQUIRED. Every refusal
+//    is HTTP 429 {code: PT429, message: "ORG_SUSPENDED: server recovery in
+//    progress [CODE]"}.
 //
 // No vitest imports here, so the module also type-checks in the app
 // build; it is only ever imported by tests.
@@ -165,7 +177,7 @@ function createFakeSupabase() {
   let serverClockOffsetMs = 0;
   // Migration 086 emulation.
   let executor = false;
-  let caller = { id: "user-1", admin: false };
+  let caller = { id: "user-1", admin: false, org: "org-1", aal2: false };
   // the server's message for a definitive refusal ("permanent-error")
   let rejectionMessage = "Insufficient stock for Tea Mix";
   const executing = new Set<string>(); // keys whose execution has not returned (hang modes)
@@ -333,9 +345,193 @@ function createFakeSupabase() {
     return ok({ status: "abandoned", fenced: true });
   };
 
-  const respond = (name: string, args: Record<string, unknown>, mode: RpcMode) => {
+  // ---- Migration 087 emulation ----------------------------------------------
+  type Org87 = { epochNo: number; epoch: string; held: boolean; chain: string[]; epochStartedAt: number };
+  type Till87 = { org: string; secret: string; reconciledEpochNo: number };
+  type Chunk87 = { payload: string; final: boolean; submittedBy: string; bytes: number };
+  const fresh87 = () => ({
+    enabled: false, lease: true, state: "open" as "open" | "hold", legacyOpen: false,
+    orgs: new Map<string, Org87>(), tills: new Map<string, Till87>(),
+    journal: new Map<string, Chunk87>(),                 // `${org}|${till}|${epochNo}|${chunk}`
+    quarantine: new Map<string, string>(),               // `${org}|${key}` -> till
+    quotaBytes: 52_428_800, seq: 0,
+  });
+  let r87 = fresh87();
+  const PT429 = (code: string) => ({
+    data: null, status: 429, replayed: false,
+    error: { message: `ORG_SUSPENDED: server recovery in progress [${code}]`, code: "PT429", details: null, hint: null },
+  });
+  const org87 = (org: string): Org87 => {
+    let o = r87.orgs.get(org);
+    if (!o) { o = { epochNo: 0, epoch: `epoch-${org}-0`, held: false, chain: [], epochStartedAt: Date.now() }; r87.orgs.set(org, o); }
+    return o;
+  };
+  const bump87 = (org: string) => {
+    const o = org87(org);
+    o.held = true; o.epochNo += 1; o.epoch = `epoch-${org}-${o.epochNo}-${++r87.seq}`; o.epochStartedAt = Date.now();
+  };
+  const mac87 = (org: string, epochNo: number, n: number, h: string) => `fake-mac:${org}:${epochNo}:${n}:${h}`;
+  const witness87 = (org: string) => {
+    const o = org87(org);
+    const n = o.chain.length;
+    const h = n ? o.chain[n - 1] : "00".repeat(32);
+    return { org, epoch_no: o.epochNo, n, h, mac: mac87(org, o.epochNo, n, h) };
+  };
+  const checkWitness87 = (org: string, w: unknown): null | "MISSING" | "INVALID" | "STALE" | "AHEAD" => {
+    const o = org87(org);
+    const x = (w && typeof w === "object" ? w : null) as Record<string, unknown> | null;
+    if (!x) return "MISSING";
+    if (x.org !== org || typeof x.n !== "number" || typeof x.epoch_no !== "number" || x.mac !== mac87(org, x.epoch_no, x.n, String(x.h))) return "INVALID";
+    if (x.epoch_no > o.epochNo) return "AHEAD";
+    if (x.epoch_no < o.epochNo) return "STALE";
+    if (x.n > o.chain.length) return "AHEAD";
+    if (x.n > 0 && o.chain[x.n - 1] !== x.h) return "AHEAD";
+    return null;
+  };
+  const serverGate87 = (): ReturnType<typeof PT429> | null =>
+    !r87.lease ? PT429("LEASE_INVALID") : r87.state !== "open" ? PT429("RECOVERY_HOLD") : null;
+  const tillAuth87 = (org: string, ctx: Record<string, unknown>): Till87 | null => {
+    const t = r87.tills.get(`${org}|${String(ctx?.till ?? "")}`);
+    return t && t.secret === String(ctx?.till_secret ?? "") ? t : null;
+  };
+  const isOld87 = (org: string, key: string, ctx: Record<string, unknown>): boolean => {
+    const o = org87(org);
+    if (String(ctx?.op_epoch ?? "") !== o.epoch) return true;
+    if (r87.quarantine.has(`${org}|${key.toLowerCase()}`)) return true;
+    if (isV7(key)) {
+      const ms = parseInt(key.replace(/-/g, "").slice(0, 12), 16);
+      if (ms < o.epochStartedAt - 5 * 60_000) return true;
+    }
+    return false;
+  };
+  /** v87_begin: null = proceed; otherwise the reply to return (refusal or committed hold). */
+  const begin87 = (key: string, ctx: Record<string, unknown>) => {
+    const org = caller.org;
+    const gate = serverGate87();
+    if (gate) return gate;
+    const till = tillAuth87(org, ctx);
+    if (!till) return PT429("TILL_UNKNOWN");
+    const o = org87(org);
+    const w = checkWitness87(org, ctx?.witness);
+    if (w === "AHEAD") {
+      if (!o.held) bump87(org);
+      return { data: { outcome: "held", code: "CONTINUITY_ROLLBACK", org, key, sig: "fake-sig" }, error: null, status: 200, replayed: false };
+    }
+    if (w === "INVALID") return PT429("WITNESS_INVALID");
+    if (o.held) return PT429("RECOVERY_HOLD");
+    if (w === "MISSING" || w === "STALE" || till.reconciledEpochNo !== o.epochNo) return PT429("TILL_NOT_RECONCILED");
+    if (isOld87(org, key, ctx)) return PT429("PRE_EPOCH_OPERATION");
+    return null;
+  };
+  const finish87 = (reply: { data: unknown; error: unknown; status: number; replayed: boolean }, key: string, rpc: string) => {
+    const org = caller.org;
+    const d = (reply.data ?? {}) as Record<string, unknown>;
+    if (!reply.error && d.outcome === "committed" && !d.replayed) org87(org).chain.push(`h-${org}-${org87(org).chain.length + 1}-${key}`);
+    if (!reply.error && (d.outcome === "rejected" && !d.replayed)) org87(org).chain.push(`h-${org}-${org87(org).chain.length + 1}-${key}`);
+    if (reply.error) return reply;
+    const signed = { org, key, rpc, epoch_no: org87(org).epochNo, outcome: d.outcome ?? d.status ?? null };
+    return { ...reply, data: { ...d, signed, sig: `fake-reply-sig:${key}`, witness: witness87(org) } };
+  };
+  const respond87 = (name: string, args: Record<string, unknown>, mode: RpcMode): ReturnType<typeof PT429> | { data: unknown; error: unknown; status: number; replayed: boolean } | null => {
+    const RECOVERY_FNS = new Set(["recovery_epoch", "recovery_register_till", "recovery_submit_journal", "recovery_approve_till", "op_execute_v87", "op_status_v87"]);
+    if (!r87.enabled) return RECOVERY_FNS.has(name) ? { ...MISSING_FUNCTION(name) } : null;
+    const org = caller.org;
+    const ok = (data: unknown) => ({ data, error: null, status: 200, replayed: false });
+    if (mode === "network-error" && RECOVERY_FNS.has(name)) return { ...NETWORK_FAILURE, replayed: false };
+    switch (name) {
+      case "recovery_epoch": {
+        const ctx = (args.p_ctx ?? {}) as Record<string, unknown>;
+        const till = tillAuth87(org, ctx);
+        if (!till) return PT429("TILL_UNKNOWN");
+        const o = org87(org);
+        if (till.reconciledEpochNo !== o.epochNo) return PT429("TILL_NOT_RECONCILED");
+        const gate = serverGate87();
+        if (gate) return gate;
+        if (o.held) return PT429("RECOVERY_HOLD");
+        return ok({ epoch: o.epoch, epoch_no: o.epochNo, witness: witness87(org) });
+      }
+      case "recovery_register_till": {
+        if (!caller.admin || !caller.aal2) return { data: null, status: 403, replayed: false, error: { message: "RECOVERY_ADMIN_MFA_REQUIRED", code: "42501", details: null, hint: null } };
+        const id = String(args.p_till);
+        if (r87.tills.has(`${org}|${id}`)) return { data: null, status: 409, replayed: false, error: { message: "duplicate key value violates unique constraint \"tills_pkey\"", code: "23505", details: null, hint: null } };
+        const secret = `secret-${id}-${++r87.seq}`;
+        r87.tills.set(`${org}|${id}`, { org, secret, reconciledEpochNo: -1 });
+        return ok({ till: id, till_secret: secret });
+      }
+      case "recovery_submit_journal": {
+        const ctx = (args.p_ctx ?? {}) as Record<string, unknown>;
+        const till = tillAuth87(org, ctx);
+        if (!till) return PT429("TILL_UNKNOWN");
+        const o = org87(org);
+        if (till.reconciledEpochNo === o.epochNo) return ok({ outcome: "not_required" });
+        const payload = canonical(args.p_chunk);
+        const bytes = JSON.stringify(args.p_chunk).length;
+        if (bytes > 262_144) return ok({ outcome: "chunk_too_large" });
+        const k = `${org}|${String(ctx.till)}|${o.epochNo}|${Number(args.p_chunk_no)}`;
+        const existing = r87.journal.get(k);
+        if (existing) return ok({ outcome: existing.payload === payload ? "already_stored" : "conflict" });
+        const used = [...r87.journal.entries()].filter(([kk]) => kk.startsWith(`${org}|`)).reduce((a, [, c]) => a + c.bytes, 0);
+        if (used + bytes > r87.quotaBytes) return ok({ outcome: "quota_exceeded", stored: false });
+        const recs = ((args.p_chunk as Record<string, unknown>)?.records ?? []) as Record<string, unknown>[];
+        for (const r of recs) {
+          if (r.key == null) continue;
+          if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(r.key))) {
+            return { data: null, status: 400, replayed: false, error: { message: "invalid input syntax for type uuid", code: "22P02", details: null, hint: null } };
+          }
+        }
+        r87.journal.set(k, { payload, final: args.p_final === true, submittedBy: caller.id, bytes });
+        for (const r of recs) if (r.key != null) r87.quarantine.set(`${org}|${String(r.key).toLowerCase()}`, String(ctx.till));
+        return ok({ outcome: "stored" });
+      }
+      case "recovery_approve_till": {
+        if (!caller.admin || !caller.aal2) return { data: null, status: 403, replayed: false, error: { message: "RECOVERY_ADMIN_MFA_REQUIRED", code: "42501", details: null, hint: null } };
+        const id = String(args.p_till);
+        const t = r87.tills.get(`${org}|${id}`);
+        const o = org87(org);
+        const chunks = [...r87.journal.entries()].filter(([kk]) => kk.startsWith(`${org}|${id}|${o.epochNo}|`))
+          .map(([kk, c]) => ({ n: Number(kk.split("|")[3]), ...c }));
+        const max = Math.max(0, ...chunks.map((c) => c.n));
+        if (!t || chunks.length === 0 || chunks.length !== max || !chunks.find((c) => c.n === max)?.final) {
+          return { data: null, status: 400, replayed: false, error: { message: "RECOVERY_JOURNAL_INCOMPLETE: chunks 1..n must all be stored and chunk n final", code: "22023", details: null, hint: null } };
+        }
+        if (chunks.some((c) => c.submittedBy === caller.id)) return { data: null, status: 403, replayed: false, error: { message: "RECOVERY_SELF_APPROVAL", code: "42501", details: null, hint: null } };
+        t.reconciledEpochNo = o.epochNo;
+        return ok({ till: id, reconciled_epoch_no: o.epochNo });
+      }
+      case "op_execute_v87": {
+        const key = String(args.p_key);
+        const stop = begin87(key, (args.p_ctx ?? {}) as Record<string, unknown>);
+        if (stop) return stop;
+        const inner = respond("op_execute", { p_key: args.p_key, p_rpc: args.p_rpc, p_args: args.p_args, p_actor_id: args.p_actor_id }, mode, true);
+        return finish87(inner, key, String(args.p_rpc));
+      }
+      case "op_status_v87": {
+        const key = String(args.p_key);
+        if (args.p_fence !== true) return respond("op_status", { ...args }, mode, true);
+        const stop = begin87(key, (args.p_ctx ?? {}) as Record<string, unknown>);
+        if (stop) return stop;
+        const inner = respond("op_status", { ...args, p_fence: true }, mode, true);
+        const d = (inner.data ?? {}) as Record<string, unknown>;
+        if (!inner.error && d.fenced !== true) return PT429("FENCE_NOT_APPLIED");
+        return finish87(inner, key, String(args.p_rpc));
+      }
+      case "op_execute":
+        return r87.legacyOpen ? null : PT429("CLIENT_UPGRADE_REQUIRED");
+      case "op_status":
+        return args.p_fence === true && !r87.legacyOpen ? PT429("CLIENT_UPGRADE_REQUIRED") : null;
+      default:
+        // a direct executor RPC (RC3 path) is closed too
+        return handlers[name] && !r87.legacyOpen ? PT429("CLIENT_UPGRADE_REQUIRED") : null;
+    }
+  };
+
+  const respond = (name: string, args: Record<string, unknown>, mode: RpcMode, inner87 = false): { data: unknown; error: unknown; status: number; replayed: boolean } => {
+    if (!inner87) {
+      const r = respond87(name, args, mode);
+      if (r) return r as { data: unknown; error: unknown; status: number; replayed: boolean };
+    }
     if (name === "op_execute" || name === "op_status") {
-      if (!executor) return MISSING_FUNCTION(name);
+      if (!executor && !(inner87 && r87.enabled)) return MISSING_FUNCTION(name);
       if (name === "op_status" && mode === "network-error") return { ...NETWORK_FAILURE, replayed: false };
       if (name === "op_status" && mode !== "jwt-expired") return statusRun(args);
       if (name === "op_status") return { data: null, status: 401, replayed: false, error: { message: "JWT expired", code: "PGRST301", details: null, hint: null } };
@@ -566,8 +762,32 @@ function createFakeSupabase() {
     setDefaultMode: (mode: RpcMode) => { defaultMode = mode; },
     /** Migration 086 on the fake server (op_execute / op_status). */
     enableExecutor: (on = true) => { executor = on; },
-    /** Who the server believes is calling (086 visibility / fence rules). */
-    setCaller: (id: string, admin = false) => { caller = { id, admin }; },
+    /** Who the server believes is calling (086 visibility / fence rules; 087 organisation and MFA level). */
+    setCaller: (id: string, admin = false, org = "org-1", aal2 = false) => { caller = { id, admin, org, aal2 }; },
+    /** Migration 087 on the fake server. */
+    enable087: (on = true) => { r87.enabled = on; },
+    /** 087 server gate: lease valid / server continuity state. */
+    set087Server: (opts: { lease?: boolean; state?: "open" | "hold"; legacyOpen?: boolean; quotaBytes?: number }) => {
+      if (opts.lease !== undefined) r87.lease = opts.lease;
+      if (opts.state !== undefined) r87.state = opts.state;
+      if (opts.legacyOpen !== undefined) r87.legacyOpen = opts.legacyOpen;
+      if (opts.quotaBytes !== undefined) r87.quotaBytes = opts.quotaBytes;
+    },
+    /** owner_hold_org: hold + new epoch. */
+    hold87Org: (org = "org-1") => { bump87(org); },
+    /** 088 stand-in (test only): release a hold WITHOUT an epoch change. */
+    release87Org: (org = "org-1") => { org87(org).held = false; },
+    /** Register a till directly (test setup) and optionally reconcile it for the current epoch. */
+    register87Till: (till: string, opts: { org?: string; reconciled?: boolean } = {}) => {
+      const org = opts.org ?? "org-1";
+      const secret = `secret-${till}-${++r87.seq}`;
+      r87.tills.set(`${org}|${till}`, { org, secret, reconciledEpochNo: opts.reconciled === false ? -1 : org87(org).epochNo });
+      return secret;
+    },
+    /** Reconcile a till for the current epoch (an admin's approval, test setup). */
+    reconcile87Till: (till: string, org = "org-1") => { const t = r87.tills.get(`${org}|${till}`); if (t) t.reconciledEpochNo = org87(org).epochNo; },
+    witness87: (org = "org-1") => witness87(org),
+    get r87() { return r87; },
     /** The message of the executor's definitive refusals (permanent-error). */
     setRejectionMessage: (message: string) => { rejectionMessage = message; },
     /** Finish a hung execution's lock (op_status stops saying in_flight). */
@@ -607,7 +827,8 @@ function createFakeSupabase() {
       serverClockOffsetMs = 0;
       channels.length = 0;
       executor = false;
-      caller = { id: "user-1", admin: false };
+      caller = { id: "user-1", admin: false, org: "org-1", aal2: false };
+      r87 = fresh87();
       rejectionMessage = "Insufficient stock for Tea Mix";
       executing.clear();
     },

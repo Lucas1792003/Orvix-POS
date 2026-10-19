@@ -1,6 +1,6 @@
 # Production-readiness checklist — Shwe Pha Lar POS on the self-hosted backend
 
-Private. Created 2026-10-15, updated 2026-10-16. One list; every item has an owner, a state and the evidence that closes it. **Nothing on this list is executed by the engineer without the owner's explicit approval for that item.** Supersedes the ordering in [`../next-phase/release-checklist.md`](../next-phase/release-checklist.md) where they differ; that file keeps the detailed release mechanics (version, rollback build, pre-release, promotion).
+Private. Created 2026-10-15, updated 2026-10-16 and 2026-10-19 (A10, A11, E7). One list; every item has an owner, a state and the evidence that closes it. **Nothing on this list is executed by the engineer without the owner's explicit approval for that item.** Supersedes the ordering in [`../next-phase/release-checklist.md`](../next-phase/release-checklist.md) where they differ; that file keeps the detailed release mechanics (version, rollback build, pre-release, promotion).
 
 States: **DONE** (verified, evidence linked) · **READY** (prepared and tested, waiting for approval) · **OWNER** (needs the owner's own action) · **OPEN** (work or decision outstanding).
 
@@ -21,6 +21,8 @@ States: **DONE** (verified, evidence linked) · **READY** (prepared and tested, 
 | A7 | Review 7 orphan auth accounts (no app user; can never be linked after 082) — keep or delete | OWNER | [qa-data-inventory.md C2](qa-data-inventory.md), migration-082.md |
 | A8 | Owner's own migrated TOTP factor tested on the self-hosted backend | OWNER | [owner-totp-test.md](../next-phase/owner-totp-test.md) |
 | A9 | Version handshake `app_backend_info()` (proposed; number TBD — 083 is now G5) so a client refuses writes on a wrong/older backend | OPEN — decision | [electron-compatibility.md](electron-compatibility.md) |
+| A10 | Migration 086 (operation outcomes: guarded executor, recorded refusals, fences) | READY — not applied; approval | [migration-086.md](../phase-g/migration-086.md) |
+| A11 | Migration 087 (recovery hold and rollback detection). Added 2026-10-19 | OPEN — committed `e170794`, verified on disposable stacks only (`tools/m087-verify` all parts passed); **not before** E7 is on every till, the witness authority runs on a second device with per-role `pg_hba` (D15) and owner decisions D1–D15 | [migration-087.md](../phase-g/migration-087.md) |
 
 ## B. Encrypted off-server backup and restoration
 | # | Item | State | Evidence |
@@ -61,6 +63,7 @@ States: **DONE** (verified, evidence linked) · **READY** (prepared and tested, 
 | E4 | Sanitized publication branch re-synced; full scan (incl. gitleaks) + fresh-clone tests | DONE 2026-10-16 (publish tip `ae046b6`, unpushed; 0 private identifiers in new commits; gitleaks 7 false positives in older commits; 0 private commits reachable; clone: vitest 1010, Deno 94, harness 740/0 without the private sweep query, 747/0 with it) | sync report |
 | E5 | Vercel Git integration disconnected; GitHub Pages workflow absent on the publication branch; main branch protection | OWNER (dashboards) | [vercel-github-controls.md](vercel-github-controls.md) |
 | E6 | Push branch / PR / merge (as Lucas1792003) | approval | release-checklist Phase 4 |
+| E7 | v87 till client (required by 087). Added 2026-10-19 | OPEN — implemented, uncommitted; vitest 1594/0, Chromium + Electron e2e 5/5 vs 087; checkpoint commit needs approval; limits need owner decisions | [v87-client.md](../phase-g/v87-client.md), [desktop-app risks](../../desktop-app/risks.md) |
 
 ## F. Desktop release and real-device canary
 | # | Item | State | Evidence |

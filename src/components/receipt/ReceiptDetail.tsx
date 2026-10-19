@@ -14,6 +14,7 @@ import { buildRefundState, planRefundRequest } from "../../features/sales/servic
 import { hasPermission } from "../../lib/permissions";
 import { formatDateTime } from "../../lib/utils";
 import { printReceipt } from "../../lib/print";
+import { journalReceiptPrint } from "../../stores/data/opJournal";
 import { useTranslation } from "../../hooks/useTranslation";
 
 interface ReceiptDetailProps {
@@ -133,9 +134,20 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
   const unconfirmed = sale.pendingConfirmation === true;
   const hasPrintableContent = saleItems.length > 0 && !unconfirmed;
 
+  // 087: the printed receipt number is journaled before anything prints (fail closed)
+  const journalThenPrint = async () => {
+    try {
+      await journalReceiptPrint(sale);
+    } catch (error) {
+      toast({ title: "Receipt not printed", description: `This till could not record the receipt number in its journal (${error instanceof Error ? error.message : String(error)}).`, variant: "error" });
+      return;
+    }
+    void printReceipt();
+  };
+
   const handlePrint = () => {
     if (!hasPrintableContent) return;
-    void printReceipt();
+    void journalThenPrint();
   };
 
   const handleReprint = async () => {
@@ -143,7 +155,7 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
     setReprintInFlight(true);
     try {
       if (currentUserId) await addReprintLog({ saleId: sale.id, actorId: currentUserId });
-      void printReceipt();
+      await journalThenPrint();
     } catch (error) {
       toast({
         title: "Reprint log failed",
