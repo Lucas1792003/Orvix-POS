@@ -382,13 +382,20 @@ describe("replayExport against an 086 server (H3)", () => {
     expect(exitCodeFor(r)).toBe(4);
   });
 
-  it("a HELD entry (fenceRequired) is never replayed: looked up and fenced; an earlier commit is reported instead", async () => {
+  it("a HELD entry (fenceRequired) is never replayed: looked up only (W10 Phase 0) — held, the run stops; with --fence-unfound fenced, and an earlier commit is reported instead", async () => {
     const b = new Fake086();
     b.ledger.set(v7(2), { state: "committed", response: { sale: { id: "sale-earlier" } }, actor: "cash-a" });
-    const r = await replayExport(q086([
+    const held = await replayExport(q086([
       { actorId: "cash-a", status: "conflict", fenceRequired: true },
       { actorId: "cash-a", status: "conflict", fenceRequired: true },
     ]), o086(b));
+    expect(held.ops[0].outcome).toBe("held");
+    expect(b.ledger.has(v7(1))).toBe(false);
+    expect(sent(b, "op_execute")).toHaveLength(0);
+    const r = await replayExport(q086([
+      { actorId: "cash-a", status: "conflict", fenceRequired: true },
+      { actorId: "cash-a", status: "conflict", fenceRequired: true },
+    ]), o086(b, { fenceUnfound: true }));
     expect(r.ops.map((o) => o.outcome)).toEqual(["abandoned", "already-applied"]);
     expect(r.ops[1].resultId).toBe("sale-earlier");
     expect(sent(b, "op_execute")).toHaveLength(0);

@@ -12,6 +12,7 @@ import { Table, THead, TBody, TR, TH, TD } from "../components/ui/Table";
 import { useToast } from "../components/ui/Toast";
 import {
   confirmWithServer, drainOutbox, isUndecided, listOutboxEntries, restoreSetAsideEntry, retryOutboxEntry, setAsideOutboxEntry,
+  STOP_STATEMENT_MIN, stopOnServer,
 } from "../stores/data/outbox";
 import { onQueueExported, wasExported } from "../lib/queueExport/exportRecord";
 import {
@@ -24,6 +25,7 @@ import { desktopVerifyDeps, verifyReconciledEntries } from "../stores/data/recon
 import { isReconcilableStatus } from "../lib/reconcile/policy";
 import { useTranslation } from "../hooks/useTranslation";
 import { useUnresolvedOnlineOperations } from "../hooks/useUnresolvedOnlineOperations";
+import { acknowledgeContinuity, continuityWarning, journalSummary, type ContinuityWarning, type JournalSummary } from "../stores/data/opJournal";
 
 const RPC_LABELS: Record<string, string> = {
   complete_sale: "POS Sale",
@@ -68,7 +70,7 @@ const describeEntry = (entry: SyncOutboxEntry): string => {
 // the same in the queue but mean very different things for the operator.
 type EntryKind =
   | "quarantined" | "refused-final" | "abandoned" | "conflict" | "not-recorded" | "verifying" | "other-user" | "reply-elsewhere"
-  | "unconfirmed" | "retrying" | "waiting" | "queued" | "blocking" | "refused-unrecorded";
+  | "unconfirmed" | "retrying" | "waiting" | "queued" | "blocking" | "refused-unrecorded" | "reconcile";
 
 const classify = (entry: SyncOutboxEntry): EntryKind => {
   if (entry.status === "quarantined") return "quarantined";
@@ -76,6 +78,8 @@ const classify = (entry: SyncOutboxEntry): EntryKind => {
   if (entry.serverOutcome === "rejected") return "refused-final";
   if (entry.serverOutcome === "abandoned") return "abandoned";
   if (entry.heldReason === "committed-verifying") return "verifying";
+  // W10 Phase 0: the server has no record of it; never stopped automatically.
+  if (entry.heldReason === "reconciliation-required") return "reconcile";
   // Never authorised offline, outcome unknown: asked about, never resent.
   if (entry.fenceRequired === true) return "not-recorded";
   if (entry.heldReason === "committed-reply-unavailable") return "reply-elsewhere";
@@ -100,6 +104,7 @@ const StatusBadge = ({ entry, now }: { entry: SyncOutboxEntry; now: number }) =>
   if (kind === "conflict") return <Badge tone="red">Needs action</Badge>;
   if (kind === "blocking") return <Badge tone="red">Needs action — not decided on the server; later entries that may depend on it wait behind it</Badge>;
   if (kind === "refused-unrecorded") return <Badge tone="red">Refused, but not recorded on the server — not final; needs a person (asked again later)</Badge>;
+  if (kind === "reconcile") return <Badge tone="red">Reconciliation required — the server has no record of it; an owner decides (never stopped automatically)</Badge>;
   if (kind === "not-recorded") return <Badge tone="amber">Not recorded on this till — being confirmed with the server, never resent</Badge>;
   if (kind === "verifying") return <Badge tone="sky">Applied on the server — confirming</Badge>;
   if (kind === "reply-elsewhere") return <Badge tone="sky">Applied on the server — its user or an administrator must confirm it here</Badge>;
@@ -134,6 +139,15 @@ export const SyncConflictsPage = () => {
   const [exportOpen, setExportOpen] = useState(false);
   // The entry the confirmation dialog is about, fixed when it opens.
   const [confirmEntry, setConfirmEntry] = useState<SyncOutboxEntry | null>(null);
+  // W10 Phase 0: the entry the "Stop on server" dialog is about, and the owner's statement.
+  const [stopEntry, setStopEntry] = useState<SyncOutboxEntry | null>(null);
+  const [stopStatement, setStopStatement] = useState("");
+  // W8 Phase 0: the server-continuity warning and the till's operation journal.
+  const [continuity, setContinuity] = useState<ContinuityWarning | null>(null);
+  const [journal, setJournal] = useState<JournalSummary | null>(null);
+  const [ackOpen, setAckOpen] = useState(false);
+  const [ackStatement, setAckStatement] = useState("");
+  const orgId = useAuthStore((state) => state.currentOrgId);
   // RC3: the entry the reconcile dialog is about.
   const [reconcileEntry, setReconcileEntry] = useState<SyncOutboxEntry | null>(null);
   const [, setExportTick] = useState(0);
@@ -146,11 +160,13 @@ export const SyncConflictsPage = () => {
       // Set aside (needs attention) before the list is shown.
       await verifyReconciledEntries(desktopVerifyDeps()).catch((err) => console.error("[sync] reconciliation check failed:", err));
       setEntries(await listOutboxEntries());
+      setContinuity(await continuityWarning());
+      setJournal(await journalSummary(orgId ?? null).catch(() => null));
       setLoadedAt(Date.now());
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [orgId]);
 
   useEffect(() => {
     void refresh();
@@ -222,7 +238,8 @@ export const SyncConflictsPage = () => {
     }
   });
 
-  // M3: establish the server's decision (stop it there if it never arrived)
+  // M3 / W10 Phase 0: ask the server (read-only; "not found" stops nothing —
+  // the owner decides with "Stop on server")
   // before an owner documents it as "recreated" / "cancelled".
   const handleConfirm = (entry: SyncOutboxEntry) => runAction(async () => {
     try {
@@ -230,12 +247,48 @@ export const SyncConflictsPage = () => {
       const text = {
         committed: "It reached the server and has now been recorded on this till.",
         rejected: "The server refused it (final). It never ran.",
-        abandoned: "It never ran and has been stopped on the server; it can never be applied. Export again, then reconcile it.",
+        abandoned: "The server records it as stopped before it ran; it can never be applied. Export again, then reconcile it.",
+        "not-found": "The server has no record of it. Nothing was stopped: it may never have arrived, or it may have been applied on a server that was later restored. Check your records (receipts, cash, the daily report), then decide — Stop on server, or reconcile.",
         undecided: "The server could not decide it right now (unreachable, still running, or another user's). Nothing changed; try again later.",
       }[r];
-      addToast({ variant: r === "undecided" ? "error" : "success", title: "Confirm with server", description: text });
+      addToast({ variant: r === "undecided" || r === "not-found" ? "error" : "success", title: "Confirm with server", description: text });
     } catch (err) {
       addToast({ variant: "error", title: "Confirm with server", description: err instanceof Error ? err.message : "Please try again." });
+    } finally {
+      await refresh();
+    }
+  });
+
+  const confirmStop = () => runAction(async () => {
+    const entry = stopEntry;
+    if (!entry) return;
+    try {
+      const r = await stopOnServer(entry.localId, stopStatement);
+      const text = {
+        committed: "It HAD been applied on the server: it is now recorded on this till, and nothing was stopped.",
+        rejected: "The server had refused it (final). Nothing else changed.",
+        abandoned: "Stopped on the server: it can never run under its key. Your statement is in the till's journal. Export again, then reconcile it.",
+        undecided: "The server could not decide it right now. Nothing changed; try again later.",
+      }[r];
+      addToast({ variant: r === "undecided" ? "error" : "success", title: "Stop on server", description: text });
+      setStopEntry(null);
+      setStopStatement("");
+    } catch (err) {
+      addToast({ variant: "error", title: "Stop on server", description: err instanceof Error ? err.message : "Please try again." });
+    } finally {
+      await refresh();
+    }
+  });
+
+  const confirmAcknowledge = () => runAction(async () => {
+    try {
+      await acknowledgeContinuity(useAuthStore.getState().currentUserId ?? null, ackStatement);
+      addToast({ variant: "success", title: "Acknowledged", description: "Automatic sync resumes. The records the server no longer has are kept on this till as evidence." });
+      setAckOpen(false);
+      setAckStatement("");
+      void drainOutbox().catch(() => undefined);
+    } catch (err) {
+      addToast({ variant: "error", title: "Not acknowledged", description: err instanceof Error ? err.message : "Please try again." });
     } finally {
       await refresh();
     }
@@ -269,6 +322,26 @@ export const SyncConflictsPage = () => {
           The server rejected this device's sign-in, so nothing is being sent. Sign in again (sidebar → Logout, then
           log in) — every entry below is kept and will sync afterwards.
         </div>
+      )}
+      {continuity && (
+        <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900" data-testid="continuity-warning">
+          <p className="font-semibold">Automatic sync is paused: the server may have been restored from an older backup.</p>
+          <p className="mt-1">{continuity.reason} (since {new Date(continuity.since).toLocaleString()}). Those records are kept on this till.
+            Nothing queued is sent or stopped automatically until an owner has checked what happened (export first).</p>
+          {isOwner && (
+            <Button className="mt-2" variant="danger" size="sm" disabled={locked} onClick={() => { setAckStatement(""); setAckOpen(true); }} data-testid="continuity-ack">
+              Acknowledge and resume…
+            </Button>
+          )}
+        </div>
+      )}
+      {journal && journal.total > 0 && (
+        <p className="mt-3 text-xs text-slate-500" data-testid="journal-summary">
+          Operation journal on this till: {journal.total} — {journal.byCategory["confirmed-committed"]} confirmed committed ·{" "}
+          {journal.byCategory["confirmed-not-applied"]} confirmed not applied · {journal.byCategory["never-sent"]} never sent ·{" "}
+          {journal.byCategory["unknown-outcome"]} outcome unknown · {journal.byCategory["reconciliation-required"]} reconciliation required ·{" "}
+          {journal.byCategory["owner-decided"]} decided by an owner{journal.contradictions ? ` · ${journal.contradictions} contradicting the server` : ""}{journal.damaged ? ` · ${journal.damaged} unreadable` : ""}. Kept after sync; included in every export.
+        </p>
       )}
       <div className="mt-4 flex items-center justify-between">
         <span className="text-sm text-slate-500">{summary}</span>
@@ -327,8 +400,14 @@ export const SyncConflictsPage = () => {
                         )}
 {isOwner && isUndecided(entry) && (
                           <Button variant="secondary" size="sm" disabled={locked} onClick={() => void handleConfirm(entry)} data-testid="outbox-confirm"
-                            title="Ask the server what happened to it; stop it there if it never arrived (never resent)">
+                            title="Ask the server what happened to it (read-only; never resent, never stopped)">
                             Confirm with server
+                          </Button>
+                        )}
+                        {isOwner && entry.heldReason === "reconciliation-required" && entry.fenceRequired === true && (
+                          <Button variant="danger" size="sm" disabled={locked} onClick={() => { setStopStatement(""); setStopEntry(entry); }} data-testid="outbox-stop"
+                            title="Owner decision: stop it on the server so it can never run (only after establishing it did not happen)">
+                            Stop on server…
                           </Button>
                         )}
                         {isOwner && (
@@ -398,7 +477,7 @@ export const SyncConflictsPage = () => {
                       <div className="flex justify-end gap-2">
 {isOwner && isUndecided(entry) && (
                           <Button variant="secondary" size="sm" disabled={locked} onClick={() => void handleConfirm(entry)} data-testid="set-aside-confirm"
-                            title="Ask the server what happened to it; stop it there if it never arrived (never resent)">
+                            title="Ask the server what happened to it (read-only; never resent, never stopped)">
                             Confirm with server
                           </Button>
                         )}
@@ -508,6 +587,65 @@ export const SyncConflictsPage = () => {
               The record on this till (e.g. the sale) stays as it is. If it was rung up for a customer, reconcile
               stock or the receipt manually.
             </p>
+          </>
+        )}
+      </Modal>
+      <Modal
+        open={ackOpen}
+        title="Acknowledge the server-continuity warning?"
+        description="Automatic sync resumes. The evidence stays on this till."
+        onClose={() => { if (!busy) setAckOpen(false); }}
+        size="sm"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" size="sm" disabled={busy} onClick={() => setAckOpen(false)}>Cancel</Button>
+            <Button variant="danger" size="sm" disabled={busy || ackStatement.trim().length < STOP_STATEMENT_MIN} onClick={() => void confirmAcknowledge()} data-testid="continuity-ack-confirm">
+              Acknowledge and resume
+            </Button>
+          </div>
+        }
+      >
+        <p className="text-xs text-slate-600">
+          Resume only once you know why the server no longer has these records (for example: the server was restored and
+          the lost operations have been reconciled, or the rows were removed on purpose). Queued operations will be sent
+          again with their original keys.
+        </p>
+        <label className="mt-3 block text-xs font-medium text-slate-700" htmlFor="ack-statement">What you established (kept on this till)</label>
+        <textarea id="ack-statement" data-testid="continuity-ack-statement" className="mt-1 w-full rounded-lg border border-slate-300 p-2 text-sm" rows={3} maxLength={500}
+          value={ackStatement} onChange={(e) => setAckStatement(e.target.value)} />
+      </Modal>
+      <Modal
+        open={stopEntry !== null}
+        title="Stop this operation on the server?"
+        description="An owner decision. It cannot be undone."
+        onClose={() => { if (!busy) setStopEntry(null); }}
+        size="sm"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" size="sm" disabled={busy} onClick={() => setStopEntry(null)}>
+              Cancel
+            </Button>
+            <Button variant="danger" size="sm" disabled={busy || stopStatement.trim().length < STOP_STATEMENT_MIN} onClick={() => void confirmStop()} data-testid="outbox-stop-confirm">
+              Stop on server
+            </Button>
+          </div>
+        }
+      >
+        {stopEntry && (
+          <>
+            <p className="text-sm font-semibold text-slate-800">{describeEntry(stopEntry)} · {shopName(stopEntry.shopId)} · {new Date(stopEntry.createdAt).toLocaleString()}</p>
+            <p className="mt-3 text-xs text-slate-600">
+              The server has no record of this operation. That does not prove it never happened: if the server was
+              restored from an older backup, it may have been applied and then lost. Once stopped, it can never be
+              recorded under its key. Stop it only after checking receipts, cash and the daily report — and enter it
+              again as a new operation if it did happen.
+            </p>
+            <label className="mt-3 block text-xs font-medium text-slate-700" htmlFor="stop-statement">What you established (kept in the till's journal)</label>
+            <textarea
+              id="stop-statement" data-testid="outbox-stop-statement"
+              className="mt-1 w-full rounded-lg border border-slate-300 p-2 text-sm" rows={3} maxLength={500}
+              value={stopStatement} onChange={(e) => setStopStatement(e.target.value)}
+            />
           </>
         )}
       </Modal>

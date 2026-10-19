@@ -132,6 +132,9 @@ describe("collectQueueExport", () => {
     expect(p.entries[4]).toMatchObject({ kind: "table_write", table: "categories", tableOp: "insert", rowId: "cat-1", lastErrorClass: "permanent" });
     expect(p.provisionalIdMap).toEqual([expect.objectContaining({ provisionalId: "old-prov", realId: "old-real" })]);
     expect(p.redactedFields).toBe(9); // 3 sales x (access_token, password, totp_secret)
+    // W8 Phase 0: a staff (CASHIER) export carries pending work only — no operation history
+    expect(p.journal).toHaveLength(0);
+    expect(p.vanished).toHaveLength(0);
   });
 
   it("orders by seq even when insertion / createdAt / localId order disagree", async () => {

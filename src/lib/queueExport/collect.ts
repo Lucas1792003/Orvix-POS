@@ -19,6 +19,7 @@ import {
   type QueueExportEntry, type QueueExportPayload, type QueueExportSummary, type UnreadableOnlineRecordExport,
 } from "./format";
 import { ONLINE_OP_PREFIX, UNREADABLE_SET_ASIDE_PREFIX, classifyOnlineRecord, setAsideRecord, unreadableInScope } from "../onlineOpRecord";
+import { JOURNAL_PREFIX, VANISHED_PREFIX, parseJournal } from "../../stores/data/opJournal";
 
 export interface QueueExportContext {
   appVersion: string;
@@ -90,18 +91,28 @@ export interface QueueExportSnapshot {
  *  status), in queue order, plus the id map needed to resolve `refs` and
  *  (RC3) the local reconciliation log. */
 export async function collectQueueExportSnapshot(db: LocalDb, ctx: QueueExportContext): Promise<QueueExportSnapshot> {
-  const [rows, idMap, logRows, opRows] = await db.transaction("r", db.syncOutbox, db.provisionalIdMap, db.syncState, async () => [
+  const [rows, idMap, logRows, opRows, journalRows] = await db.transaction("r", db.syncOutbox, db.provisionalIdMap, db.syncState, async () => [
     (await db.syncOutbox.toArray()) as StoredRow[],
     await db.provisionalIdMap.toArray(),
     await db.syncState.where("key").startsWith(RECONCILE_LOG_PREFIX).toArray(),
     await onlineRows(db),
+    [...await db.syncState.where("key").startsWith(JOURNAL_PREFIX).toArray(), ...await db.syncState.where("key").startsWith(VANISHED_PREFIX).toArray()],
   ] as const);
   const unreadable = parseUnreadableRecords(opRows, ctx.session.orgId);
+  const base = buildPayload(rows, idMap, logRows, ctx);
+  // The full operation history (the journal) and the continuity evidence go
+  // only into an OWNER's export of their own organisation — never from the
+  // sign-in screen (no session) and never in a staff export (row-level
+  // security would hide most of it from them). Pending work is in `entries`.
+  const owner = ctx.session.role === "ADMIN" && Boolean(ctx.session.orgId);
+  const { journal, vanished, redacted } = owner ? parseJournalRows(journalRows, ctx.session.orgId) : { journal: [], vanished: [], redacted: 0 };
   const payload: QueueExportPayload = {
-    ...buildPayload(rows, idMap, logRows, ctx),
+    ...base,
     ...(unreadable.length ? { formatVersion: QUEUE_EXPORT_FORMAT_VERSION_UNREADABLE } : {}),
     onlineOperations: parseOnlineOperations(opRows, ctx.session.orgId),
     unreadableOnlineRecords: unreadable,
+    journal, vanished,
+    redactedFields: base.redactedFields + redacted,
   };
   const digests = await Promise.all(rows.map(async (r) => ({ opId: r.localId, digest: await entryDigest(r) })));
   return { payload, digests };
@@ -155,6 +166,49 @@ function parseUnreadableRecords(rows: readonly { key: string; value?: string }[]
   return out;
 }
 
+/** The operation journal and the continuity evidence, scoped like the
+ *  queue: another organisation's records are never exported (one that names
+ *  none — e.g. vanished rows, an unreadable record — is kept). Credentials
+ *  are blanked like everywhere else in the file. */
+function parseJournalRows(rows: readonly { key: string; value?: string }[], orgId: string | null): Pick<QueueExportPayload, "journal" | "vanished"> & { redacted: number } {
+  const journal: QueueExportPayload["journal"] = [];
+  const vanished: QueueExportPayload["vanished"] = [];
+  const counter = { n: 0 };
+  for (const r of rows) {
+    let v: Record<string, unknown> | null = null;
+    try { v = JSON.parse(r.value ?? "null"); } catch { v = null; }
+    if (r.key.startsWith(VANISHED_PREFIX)) {
+      // only this organisation's evidence (rows recorded without one stay on the till)
+      if (!v || v.orgId !== orgId) continue;
+      if (v && typeof v.table === "string" && typeof v.detectedAt === "string") vanished.push(redactSecrets({ ...v, key: r.key }, counter) as QueueExportPayload["vanished"][number]);
+      continue;
+    }
+    const rec = parseJournal(r);
+    if (!rec) {
+      // a damaged record: exported only when it parses as this organisation's
+      // (redacted, without its fingerprint); otherwise only its key and size
+      const d = v as (Record<string, unknown> & { orgId?: unknown; fingerprint?: unknown }) | null;
+      if (d && typeof d === "object" && d.orgId === orgId) {
+        const { fingerprint: _f, ...rest } = d;
+        void _f;
+        journal.push({ key: r.key, rpc: String(d.rpc ?? ""), state: "unreadable", orgId, createdAt: String(d.createdAt ?? ""), raw: redactSecrets(rest, counter) });
+      } else if (!d) {
+        journal.push({ key: r.key, rpc: "", state: "unreadable", orgId: null, createdAt: "", rawLength: (r.value ?? "").length });
+      }
+      continue;
+    }
+    // this organisation's records, plus unattributed ones (older builds' rows) for its owner
+    if (rec.orgId !== orgId && rec.orgId !== null) continue;
+    // `fingerprint` is a free-text canonical form of the request: it would
+    // carry what redaction blanks in `args`. Never exported (it is derived
+    // from `args`, which is exported redacted).
+    const { fingerprint: _fp, ...exported } = JSON.parse(JSON.stringify(rec)) as typeof rec;
+    void _fp;
+    journal.push(redactSecrets(exported, counter) as QueueExportPayload["journal"][number]);
+  }
+  return { journal, vanished, redacted: counter.n };
+}
+
 /** Every online-operation record row, the owner's set-aside ones included. */
 const onlineRows = (db: LocalDb) => Promise.all([
   db.syncState.where("key").startsWith(ONLINE_OP_PREFIX).toArray(),
@@ -196,6 +250,8 @@ function buildPayload(
     reconciliationLog: parseLog(logRows),
     onlineOperations: [],
     unreadableOnlineRecords: [],
+    journal: [],
+    vanished: [],
   };
 }
 

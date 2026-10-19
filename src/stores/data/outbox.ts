@@ -20,6 +20,10 @@ import type { Inventory, InventoryMovement } from "../../types";
 import { useAuthStore } from "../authStore";
 import { useSyncStore } from "../syncStore";
 import { touchAuthCache } from "../authCache";
+import {
+  continuityWarning, journalCommitted, journalDecided, journalOwner, journalQueued, journalReconciliationRequired, journalRowChanged, journalSent,
+  type JournalEvidence,
+} from "./opJournal";
 
 // The acting user for p_expected_actor_id (idempotentRpc.stampOperationArgs).
 setActorSource(() => useAuthStore.getState().currentUserId ?? null);
@@ -169,8 +173,9 @@ export async function enqueueOutbox(entry: EnqueueInput): Promise<void> {
   const row = buildOutboxRow(entry);
   // The read-max + put run in one transaction so two enqueues cannot be
   // handed the same seq.
-  await localDb.transaction("rw", localDb.syncOutbox, async () => {
+  await localDb.transaction("rw", localDb.syncOutbox, localDb.syncState, async () => {
     await putWithSeq(row);
+    await journalQueued(row);   // the till's evidence, in the same transaction (W8 Phase 0)
   });
   void refreshSyncStatus();
   notifyQueueChanged(row);
@@ -193,6 +198,7 @@ export function buildOutboxRow(entry: EnqueueInput, overrides: Partial<SyncOutbo
     // Who created the operation (086 recovery: only that user, or an
     // administrator, may resolve it on the server).
     actorId: currentActorId(),
+    orgId: useAuthStore.getState().currentOrgId ?? null,
     // Which backend this entry is for (blocker D-d): the drain sends it only
     // to this origin; anywhere else it is quarantined (lib/backendOrigin.ts).
     backendOrigin: currentBackendOrigin(),
@@ -227,8 +233,8 @@ export async function persistStaged(
   const stockMoves = rows.flatMap((r) => (r.movements ?? []) as InventoryMovement[]);
   const touchesStock = stockRows.length > 0 || stockMoves.length > 0;
   const tables = new Set([
-    localDb.syncOutbox, ...rows.flatMap((r) => localRowTables(r)),
-    ...(touchesStock ? [localDb.inventory, localDb.syncState] : []),
+    localDb.syncOutbox, localDb.syncState, ...rows.flatMap((r) => localRowTables(r)),
+    ...(touchesStock ? [localDb.inventory] : []),
   ]);
   await localDb.transaction("rw", [...tables], async () => {
     for (const batch of rows) await putLocalRowsInTransaction(batch);
@@ -237,9 +243,12 @@ export async function persistStaged(
     if (touchesStock) await stagedStockInTransaction(localId, stockRows, stockMoves);
     if ("put" in outbox) {
       await putWithSeq(outbox.put);
+      await journalQueued(outbox.put);
     } else {
       const updated = await localDb.syncOutbox.update(outbox.update.localId, outbox.update.changes);
       if (updated !== 1) throw new Error("The operation's queue record is missing; nothing was saved.");
+      const row = await localDb.syncOutbox.get(outbox.update.localId);
+      if (row) await journalRowChanged(row, row.fenceRequired === true ? "held-outcome-unknown" : row.inDoubt === true ? "outcome-unknown" : "not-delivered-queued");
     }
   });
   // Only now, committed: a running full load re-applies these rows.
@@ -326,14 +335,30 @@ export function simulateNewAppInstanceForTests(): void {
  * flight and still `syncing` — never a queued, conflicted, quarantined, set
  * aside or reconciled entry. Throws (and deletes nothing) otherwise.
  */
-export async function discardWriteAhead(localId: string, reason: string): Promise<void> {
+export async function discardWriteAhead(
+  localId: string, reason: string,
+  evidence: { serverOutcome?: "rejected" | "abandoned" | "mismatch" | "committed" | null; code?: string | null; message?: string | null } = {},
+): Promise<void> {
   if (!inFlightWriteAhead.has(localId)) throw new Error(`Refusing to discard ${localId}: not an in-flight write-ahead attempt of this instance.`);
-  await localDb.transaction("rw", localDb.syncOutbox, async () => {
+  await localDb.transaction("rw", localDb.syncOutbox, localDb.syncState, async () => {
     const row = await localDb.syncOutbox.get(localId);
     if (!row) return;
     if (row.writeAhead !== true || row.status !== "syncing") {
       throw new Error(`Refusing to discard ${localId}: status ${row.status}, writeAhead ${String(row.writeAhead)}.`);
     }
+    // The queue row goes (D-10(a)); the journal keeps what the server said.
+    if (evidence.serverOutcome === "mismatch") {
+      // the server holds ANOTHER decision under this key: it may have been applied
+      await journalReconciliationRequired(row, `discarded at the counter: the server holds a different request under this key (${reason})`);
+      await localDb.syncOutbox.delete(localId);
+      return;
+    }
+    const state = reason === "REJECTED" || reason === "CONTRACT" ? "rejected" : reason === "ABANDONED" ? "abandoned" : "not-applied";
+    await journalDecided(row, state, {
+      source: reason === "offline-path-refused" ? "client" : "reply",
+      code: evidence.code ?? null, message: evidence.message ? evidence.message.slice(0, 500) : null,
+      recordedOnServer: evidence.serverOutcome === "rejected" || evidence.serverOutcome === "abandoned",
+    }, `discarded at the counter: ${reason}`);
     await localDb.syncOutbox.delete(localId);
   });
   console.info(`[sync] wal-discarded:${localId}:${reason}`);
@@ -373,9 +398,18 @@ function endMappingCapture(): IdMapping[] {
 
 /** Acknowledge an operation: write its id mappings and delete its entry in
  *  ONE transaction. Exported for tests. */
-export async function acknowledgeEntry(localId: string, mappings: IdMapping[]): Promise<void> {
-  await localDb.transaction("rw", localDb.syncOutbox, localDb.provisionalIdMap, async () => {
+export async function acknowledgeEntry(
+  localId: string, mappings: IdMapping[],
+  evidence: Omit<JournalEvidence, "at"> = { source: "reply" },
+): Promise<void> {
+  await localDb.transaction("rw", localDb.syncOutbox, localDb.provisionalIdMap, localDb.syncState, async () => {
     if (mappings.length) await localDb.provisionalIdMap.bulkPut(mappings);
+    // W8 Phase 0: the queue row goes, the till's evidence of the committed
+    // operation (key, request, the server's reply) stays — same transaction:
+    // if the journal cannot be written, the row is NOT deleted (it is resent
+    // with its key later and answered from the server's ledger).
+    const row = await localDb.syncOutbox.get(localId);
+    if (row) await journalCommitted(row, evidence);
     await localDb.syncOutbox.delete(localId);
   });
 }
@@ -468,7 +502,7 @@ export const SYNCING_STALE_MS = 2 * RPC_TIMEOUT_MS + 2 * 60_000;
  */
 export async function recoverStrandedSyncing(olderThanMs: number = SYNCING_STALE_MS, now: number = Date.now()): Promise<number> {
   const busy = await rowsInFlightAnywhere();
-  const n = await localDb.transaction("rw", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, async () => {
+  const n = await localDb.transaction("rw", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, localDb.syncState, async () => {
     let n = 0;
     for (const entry of await localDb.syncOutbox.where("status").equals("syncing").toArray()) {
       // An online attempt of this (or another) window still waits for its reply.
@@ -493,6 +527,7 @@ export async function recoverStrandedSyncing(olderThanMs: number = SYNCING_STALE
       entry.nextAttemptAt = undefined;
       delete entry.syncingSince;
       await localDb.syncOutbox.put(entry);
+      await journalRowChanged(entry, "interrupted-no-reply");
       n += 1;
     }
     return n;
@@ -507,7 +542,8 @@ let startupRecoveryDone = false;
  *  authorised offline. */
 export const NOT_YET_CONFIRMED_TEXT =
   "Not recorded on this till: the server may or may not have received it. It is NEVER resent — the till asks the server " +
-  "what happened to it and stops it there if it never arrived.";
+  "what happened to it. If the server has no record of it, it is NOT stopped automatically (the server may have been " +
+  "restored from an older backup): it waits for an owner's decision.";
 
 /** Batch 2A staged close_shift / dispatch_stock_transfer with no provisional
  *  rows: the staging wrote the operation's own key onto the local shift /
@@ -577,7 +613,7 @@ function holdForRecovery(entry: SyncOutboxEntry): void {
  * arguments) is untouched. Returns how many were held.
  */
 export async function classifyLegacyQueue(): Promise<number> {
-  const n = await localDb.transaction("rw", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, async () => {
+  const n = await localDb.transaction("rw", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, localDb.syncState, async () => {
     let held = 0;
     const rows = await localDb.syncOutbox.where("status").anyOf("pending", "failed").toArray();
     for (const entry of rows) {
@@ -587,6 +623,7 @@ export async function classifyLegacyQueue(): Promise<number> {
       } else {
         holdForRecovery(entry);
         await localDb.syncOutbox.put(entry);
+        await journalRowChanged(entry, "held-legacy-row");
         held += 1;
       }
     }
@@ -886,6 +923,14 @@ async function runDrainPass(): Promise<DrainResult> {
     notifyQueueChanged();
   }
   if ((await pendingInQueueOrder()).length === 0) return "drained";
+  // W8 Phase 0: the server no longer has records this till had loaded from it
+  // (possibly restored from an older backup): nothing is sent or looked up
+  // automatically until an owner acknowledges it (Sync page).
+  const warning = await continuityWarning();
+  if (warning) {
+    useSyncStore.getState().setStatus({ lastTransientError: `Automatic sync paused: ${warning.reason} An owner must review it on the Sync page.` });
+    return "backoff";
+  }
   // An online attempt is in flight (here or in another window): let it
   // finish first (its reply decides whether dependent queued work can go).
   if ((await rowsInFlightAnywhere()).size > 0) return "backoff";
@@ -920,6 +965,13 @@ async function runDrainPass(): Promise<DrainResult> {
     const passed: SyncOutboxEntry[] = [];
     for (const candidate of pending) {
       if (isParked(candidate)) continue;
+      // W10 Phase 0: an operation the server has no record of waits for an
+      // owner (never stopped automatically). While it waits, later entries
+      // PROVEN independent of it continue; anything that may depend on it waits.
+      if (awaitsReconciliation(candidate)) {
+        passed.push(candidate);
+        continue;
+      }
       if (passed.some((p) => mayDepend(candidate, p, depCtx))) {
         passed.push(candidate);                      // waits with what it depends on
         continue;
@@ -1016,7 +1068,10 @@ async function runDrainPass(): Promise<DrainResult> {
       if (fresh && fresh.staged === undefined && fresh.fenceRequired === undefined) {
         if (fresh.writeAhead === true) {
           holdForRecovery(fresh);                  // never resent without a lookup
-          await localDb.syncOutbox.put(fresh);
+          await localDb.transaction("rw", localDb.syncOutbox, localDb.syncState, async () => {
+            await localDb.syncOutbox.put(fresh);
+            await journalRowChanged(fresh, "held-legacy-row");
+          });
         } else {
           await localDb.syncOutbox.update(entry.localId, { staged: true });
         }
@@ -1044,7 +1099,10 @@ async function runDrainPass(): Promise<DrainResult> {
     }
 
     const sentAt = new Date().toISOString();
-    await localDb.syncOutbox.update(entry.localId, { status: "syncing", syncingSince: sentAt, sentAt });
+    await localDb.transaction("rw", localDb.syncOutbox, localDb.syncState, async () => {
+      await localDb.syncOutbox.update(entry!.localId, { status: "syncing", syncingSince: sentAt, sentAt });
+      await journalSent(entry!, sentAt);
+    });
     notifyQueueChanged();
 
     let outcome: RpcOutcome = entry.kind === "table_write"
@@ -1157,7 +1215,7 @@ async function runDrainPass(): Promise<DrainResult> {
 /** Reconcile a committed reply and acknowledge the entry (exactly once:
  *  the entry and its mappings go in one transaction). "network" when the
  *  reconciler failed — the entry is kept and asked about again later. */
-async function applyServerReply(entry: SyncOutboxEntry, data: unknown): Promise<"ok" | "network"> {
+async function applyServerReply(entry: SyncOutboxEntry, data: unknown, source: "reply" | "lookup" = "reply"): Promise<"ok" | "network"> {
   const reconcile = reconcilers[entry.name];
   if (reconcile) {
     // A reconciler that throws must not take the queue down with it, and
@@ -1185,7 +1243,7 @@ async function applyServerReply(entry: SyncOutboxEntry, data: unknown): Promise<
   }
   // Acknowledge: the id mappings the reconciler produced and the removal
   // of the entry commit together, or not at all (Batch 2A item 7).
-  await acknowledgeEntry(entry.localId, endMappingCapture());
+  await acknowledgeEntry(entry.localId, endMappingCapture(), { source, response: data });
   notifyQueueChanged(entry);
   useSyncStore.getState().setStatus({ lastTransientError: null });
   return "ok";
@@ -1219,14 +1277,20 @@ const isParked = (entry: SyncOutboxEntry): boolean =>
 /** The server decided this key for good: it never executes from here. Its
  *  local stock effect is released by the next recompute (conflict rows are
  *  not counted — pendingStock.ts). */
-async function markFinal(entry: SyncOutboxEntry, outcome: "rejected" | "abandoned", message: string): Promise<void> {
-  await localDb.syncOutbox.update(entry.localId, {
-    // A set-aside / quarantined entry keeps that status; it now carries the server's decision.
-    status: keptStatus(entry, "conflict"), serverOutcome: outcome, failureKind: "permanent", syncingSince: undefined,
-    attempts: entry.attempts + 1, inDoubt: false, heldReason: undefined, nextAttemptAt: undefined,
-    lastError: outcome === "abandoned"
-      ? `Not applied: ${message}`
-      : `Refused by the server (final; it will not be sent again): ${message}`,
+async function markFinal(
+  entry: SyncOutboxEntry, outcome: "rejected" | "abandoned", message: string, source: "reply" | "lookup" = "reply",
+  fencedFor?: "replacement" | "owner",
+): Promise<void> {
+  await localDb.transaction("rw", localDb.syncOutbox, localDb.syncState, async () => {
+    await journalDecided(entry, outcome, { source, message: message.slice(0, 500), recordedOnServer: true, ...(fencedFor ? { fencedByTill: true, fencedFor } : {}) });
+    await localDb.syncOutbox.update(entry.localId, {
+      // A set-aside / quarantined entry keeps that status; it now carries the server's decision.
+      status: keptStatus(entry, "conflict"), serverOutcome: outcome, failureKind: "permanent", syncingSince: undefined,
+      attempts: entry.attempts + 1, inDoubt: false, heldReason: undefined, nextAttemptAt: undefined,
+      lastError: outcome === "abandoned"
+        ? `Not applied: ${message}`
+        : `Refused by the server (final; it will not be sent again): ${message}`,
+    });
   });
   notifyQueueChanged(entry);
 }
@@ -1259,10 +1323,42 @@ async function park(entry: SyncOutboxEntry, heldReason: string, lastError: strin
 const actorOf = (entry: SyncOutboxEntry): string | null =>
   entry.actorId ?? (typeof entry.args?.p_expected_actor_id === "string" ? (entry.args.p_expected_actor_id as string) : null);
 
+/** Text for an operation the server has no record of (W10 Phase 0). */
+export const RECONCILIATION_REQUIRED_TEXT =
+  "The server has no record of this operation. It may never have arrived — or it may have been applied on a server that was " +
+  "later restored from an older backup. It is NOT stopped and NOT resent automatically: it keeps its original key, and later " +
+  "entries that may depend on it wait. An owner decides (Sync › Stop on server, or reconcile it).";
+
+/** Waiting for an owner's decision (the server has no record of it): not due again yet. */
+const awaitsReconciliation = (e: SyncOutboxEntry): boolean =>
+  e.heldReason === "reconciliation-required" && !e.serverOutcome && Boolean(e.nextAttemptAt) && Date.parse(e.nextAttemptAt!) > Date.now();
+
+/** Hold an entry for an owner's decision, with its journal record, in one transaction. */
+async function holdForReconciliation(entry: SyncOutboxEntry, lastError: string, delayMs: number): Promise<void> {
+  await localDb.transaction("rw", localDb.syncOutbox, localDb.syncState, async () => {
+    await localDb.syncOutbox.update(entry.localId, {
+      status: keptStatus(entry, entry.fenceRequired === true ? "conflict" : "pending"),
+      syncingSince: undefined, failureKind: "transient", heldReason: "reconciliation-required", lastError,
+      inDoubt: true, nextAttemptAt: new Date(Date.now() + delayMs).toISOString(),
+    });
+    const row = await localDb.syncOutbox.get(entry.localId);
+    if (row) await journalReconciliationRequired(row, lastError);
+  });
+  notifyQueueChanged(entry);
+}
+
 /**
- * An operation that must never be resent: ask the server (op_status) and,
- * if the server never saw it, fence it so a late copy can never execute.
- * "next" when the entry was settled or parked; a DrainResult to stop.
+ * An operation that must never be resent (its outcome is unknown and it was
+ * never authorised offline): ask the server (op_status), READ-ONLY.
+ *
+ * W10 Phase 0: "not found" no longer stops (fences) the key. On a server
+ * restored from an older backup, "not found" cannot tell "never arrived"
+ * from "arrived and was lost by the restore" — fencing then would make a
+ * real sale unrecordable under its key. The entry keeps its key, is looked
+ * up again later, and an owner decides (stopOnServer / reconcile). Only the
+ * server's positive answers decide it here: committed (recorded on this
+ * till), rejected or abandoned (final, as recorded in the server's ledger).
+ * "next" when the entry was settled or is waiting; a DrainResult to stop.
  */
 async function resolveByLookup(entry: SyncOutboxEntry, resolvedArgs: Record<string, unknown> | null = null): Promise<DrainResult | "next"> {
   if (!entry.idempotencyKey) {
@@ -1270,10 +1366,8 @@ async function resolveByLookup(entry: SyncOutboxEntry, resolvedArgs: Record<stri
     return "backoff";
   }
   const actorId = actorOf(entry);
-  // The arguments let the server verify, from its own rows, which
-  // organisation the operation belongs to (needed when no actor is known).
   const { absent, status, error } = await lookupOperation(entry.name, entry.idempotencyKey, {
-    fence: true, actorId, args: resolvedArgs ?? entry.args ?? null,
+    fence: false, actorId, args: resolvedArgs ?? entry.args ?? null,
   });
   await localDb.syncOutbox.update(entry.localId, { protocol: "lookup" });
   if (absent) {
@@ -1298,14 +1392,14 @@ async function resolveByLookup(entry: SyncOutboxEntry, resolvedArgs: Record<stri
         await park(entry, "unrecognised-reply", `Applied on the server, but its stored reply could not be read (${problem}). Kept.`, 30 * 60_000);
         return "next";
       }
-      return (await applyServerReply(entry, status.response)) === "network" ? "network" : "next";
+      return (await applyServerReply(entry, status.response, "lookup")) === "network" ? "network" : "next";
     }
     case "rejected":
-      await markFinal(entry, "rejected", status.message ?? "the details are visible to the person who entered it or an administrator.");
+      await markFinal(entry, "rejected", status.message ?? "the details are visible to the person who entered it or an administrator.", "lookup");
       return "next";
     case "abandoned":
       await markFinal(entry, "abandoned",
-        "it never ran on the server and has been stopped there, so it can never be applied. Enter it again as a new operation if it is still needed.");
+        "the server records it as stopped before it ran, so it can never be applied. Enter it again as a new operation if it is still needed.", "lookup");
       return "next";
     case "in_flight":
       await park(entry, "in-flight", "The server is still processing this operation. Asked again shortly.", Math.max(computeBackoffMs(entry.attempts + 1), 5_000));
@@ -1317,21 +1411,16 @@ async function resolveByLookup(entry: SyncOutboxEntry, resolvedArgs: Record<stri
     case "not_found":
     default:
       if (status.reason === "expired") {
-        await park(entry, "expired-unverifiable",
-          "Too old for the server to confirm or stop automatically. It is never sent; an owner must check the server records and reconcile it.",
+        await holdForReconciliation(entry,
+          "Too old for the server to confirm. It is never sent and never stopped automatically; an owner must check the server records and reconcile it.",
           24 * 60 * 60_000);
-      } else if (!actorId) {
-        await park(entry, "needs-administrator",
-          "Recorded by an older version without its user: only an administrator can resolve it (the server checks it belongs to this organisation). Never resent. If it still cannot be resolved, an owner exports and reconciles it.",
-          30 * 60_000);
       } else {
-        await park(entry, "needs-original-user",
-          "Not recorded on this till and not yet confirmed by the server. Only the person who entered it, or an administrator, can resolve it — sign in as one of them. Never resent.",
-          5 * 60_000);
+        await holdForReconciliation(entry, RECONCILIATION_REQUIRED_TEXT, 30 * 60_000);
       }
-      // Undecided: it may still run (a delayed copy), so nothing after it may
-      // overtake it (H2) — e.g. a close of the shift it belongs to.
-      return "backoff";
+      // Undecided and waiting for an owner: later entries proven independent
+      // of it continue (the drain passes it while it waits); anything that may
+      // depend on it waits with it (H2).
+      return "next";
   }
 }
 
@@ -1369,7 +1458,7 @@ async function acknowledgeCommittedWithoutReply(entry: SyncOutboxEntry): Promise
   }
   releaseEntry(entry.localId);
   await deleteLocalRows(entry.provisional);
-  await acknowledgeEntry(entry.localId, []);
+  await acknowledgeEntry(entry.localId, [], { source: "verified-reload", responseUnavailable: "unreadable" });
   notifyQueueChanged(entry);
   // Drop the provisional rows from what is shown (they are no longer queued).
   void verifiedReload();
@@ -1483,7 +1572,7 @@ export async function retryOutboxEntry(localId: string): Promise<void> {
   }
   // An attempt never authorised offline: "retry" means ask the server, never
   // resend. One proven authorised keeps its proof (staged).
-  const held = await localDb.transaction("rw", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, async () => {
+  const held = await localDb.transaction("rw", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, localDb.syncState, async () => {
     const row = await localDb.syncOutbox.get(localId);
     if (!row) return true;
     // (re-checked atomically: a drain may have started sending it meanwhile)
@@ -1492,6 +1581,7 @@ export async function retryOutboxEntry(localId: string): Promise<void> {
     if (row.kind === "rpc" && auth === "never") {
       holdForRecovery(row);
       await localDb.syncOutbox.put(row);
+      await journalRowChanged(row, "held-on-retry");
       return true;
     }
     await localDb.syncOutbox.update(localId, {
@@ -1512,33 +1602,75 @@ export const isUndecided = (entry: SyncOutboxEntry): boolean =>
   && (entry.fenceRequired === true || entry.inDoubt === true || entry.status === "syncing" || entry.statusBeforeArchive === "syncing");
 
 /**
- * Owner action (set aside / conflict entries the drain no longer handles):
- * ask the server what became of an undecided operation and, if it never
- * arrived, fence it — so a later reconciliation ("recreated" / "cancelled")
- * rests on a durable server decision. Committed -> reconciled and removed.
- * Returns what the server said; nothing is ever resent.
+ * Owner action: ask the server what became of an undecided operation —
+ * READ-ONLY (W10 Phase 0). Committed -> recorded on this till; rejected /
+ * abandoned -> the server's decision is kept. "Not found" stops nothing: it
+ * is "not-found" (the server has no record — it may never have arrived, or
+ * it may have been lost by a restore of the server), and the owner decides
+ * with stopOnServer. Nothing is ever resent.
  */
-export async function confirmWithServer(localId: string): Promise<"committed" | "rejected" | "abandoned" | "undecided"> {
+export async function confirmWithServer(localId: string): Promise<"committed" | "rejected" | "abandoned" | "not-found" | "undecided"> {
   const entry = await localDb.syncOutbox.get(localId);
   if (entry && (entry.status === "quarantined" || !belongsToBackend(entry, currentBackendOrigin()))) {
-    // Never asked of (or fenced on) a server it was not queued for: "not
-    // found" here proves nothing about the server it was sent to.
+    // Never asked of a server it was not queued for: "not found" here proves
+    // nothing about the server it was sent to.
     throw new Error("This entry was queued for another server. It can only be checked against that server (export it for the owner); nothing was asked or changed here.");
   }
-  // An entry authorised offline (staged) is a real operation waiting to be
-  // sent: it is looked up, NEVER fenced — confirming must not cancel it
-  // (shared-till pass). Only an attempt never authorised offline (held, or a
-  // write-ahead row with nothing staged) is fenced when the server never saw it.
   // Owner action: enforced here, not only in the UI.
   if (!isOwnerSession()) throw new OutboxActionError("not-owner", "Only the owner (administrator) can confirm an entry with the server.");
-  const neverAuthorised = entry ? (await localDb.transaction("r", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, () => offlineAuthorisation(entry))) === "never" : false;
-  const fenceIt = (e: SyncOutboxEntry) => e.localId === localId ? neverAuthorised : e.fenceRequired === true;
-  const r = await settleBeforeReplacement([localId], { fence: fenceIt });
+  let notFound = false;
+  const r = await settleBeforeReplacement([localId], {
+    fence: () => false, readOnly: true,
+    notFound: async (e) => {
+      notFound = true;
+      // Only an attempt never authorised offline waits for an owner; one
+      // authorised offline is a real operation the queue sends with its key.
+      if (e.localId === localId && e.fenceRequired === true && (await localDb.syncOutbox.get(localId))) {
+        await holdForReconciliation(e, RECONCILIATION_REQUIRED_TEXT, 30 * 60_000);
+      }
+    },
+  });
   const after = await localDb.syncOutbox.get(localId);
-  await ownerAudit(localId, `confirm-with-server: ${r === "committed" ? "committed (recorded)" : after?.serverOutcome ?? (entry && !fenceIt(entry) ? "not decided — authorised offline, looked up only (never fenced)" : "not decided")}${
+  await ownerAudit(localId, `confirm-with-server (lookup only): ${r === "committed" ? "committed (recorded)" : after?.serverOutcome ?? (notFound ? "not found on the server — not stopped; an owner decides" : "not decided")}${
     entry && ownedByOther(entry, currentActorId()) ? ` (entered by ${actorOf(entry)})` : ""}`);
   if (r === "committed") return "committed";
   const row = await localDb.syncOutbox.get(localId);
+  if (row?.serverOutcome === "rejected" || row?.serverOutcome === "abandoned") return row.serverOutcome;
+  return notFound ? "not-found" : "undecided";
+}
+
+/** The owner's written statement must say what they decided and why. */
+export const STOP_STATEMENT_MIN = 15;
+
+/**
+ * EXPLICIT owner decision (W10 Phase 0): stop (fence) an undecided operation
+ * on the server so it can never run — only after the owner has established,
+ * outside the system, that it did not happen (or will be entered again). The
+ * statement is recorded in the till's journal and audit log. If the server
+ * was restored from an older backup and this operation had in fact been
+ * applied there, stopping it makes it unrecordable under its key: the
+ * dialog says so. Never called automatically.
+ */
+export async function stopOnServer(localId: string, statement: string): Promise<"committed" | "rejected" | "abandoned" | "undecided"> {
+  if (!isOwnerSession()) throw new OutboxActionError("not-owner", "Only the owner (administrator) can stop an operation on the server.");
+  const text = statement.trim();
+  if (text.length < STOP_STATEMENT_MIN) throw new Error(`Write down what you established and why it may be stopped (at least ${STOP_STATEMENT_MIN} characters). Nothing was changed.`);
+  const entry = await localDb.syncOutbox.get(localId);
+  if (!entry) throw new OutboxActionError("not-found", "This entry is no longer on this till.");
+  const myOrg = useAuthStore.getState().currentOrgId ?? null;
+  if (entry.orgId && entry.orgId !== myOrg) throw new Error("This entry belongs to another organisation; only its own owner can decide it. Nothing was changed.");
+  if (entry.status === "quarantined" || !belongsToBackend(entry, currentBackendOrigin())) {
+    throw new Error("This entry was queued for another server; it cannot be stopped here. Nothing was changed.");
+  }
+  if (!isUndecided(entry)) throw new Error("The server's outcome of this entry is already known, or it was never sent; there is nothing to stop.");
+  if ((await localDb.transaction("r", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, () => offlineAuthorisation(entry))) !== "never") {
+    throw new Error("This operation was authorised offline: it is a real operation waiting to be sent, and is never stopped. Set it aside or reconcile it instead.");
+  }
+  await localDb.transaction("rw", localDb.syncState, () => journalOwner(entry, "owner-stop-requested", text));
+  const r = await settleBeforeReplacement([localId], { fence: (e) => e.localId === localId, fencedFor: "owner" });
+  const row = await localDb.syncOutbox.get(localId);
+  await ownerAudit(localId, `stop-on-server (owner statement: ${text.slice(0, 160)}): ${r === "committed" ? "it HAD been applied — recorded, not stopped" : row?.serverOutcome ?? "not decided (nothing changed)"}`);
+  if (r === "committed") return "committed";
   if (row?.serverOutcome === "rejected" || row?.serverOutcome === "abandoned") return row.serverOutcome;
   return "undecided";
 }
@@ -1561,8 +1693,15 @@ export async function confirmWithServer(localId: string): Promise<"committed" | 
  */
 export async function settleBeforeReplacement(
   earlier: (string | SyncOutboxEntry)[],
-  opts: { fence?: (entry: SyncOutboxEntry) => boolean } = {},
+  opts: {
+    fence?: (entry: SyncOutboxEntry) => boolean; notFound?: (entry: SyncOutboxEntry) => Promise<void>;
+    fencedFor?: "replacement" | "owner"; readOnly?: boolean;
+  } = {},
 ): Promise<"proceed" | "committed" | "blocked"> {
+  // W10 Phase 0: a replacement never stops anything on a server this till
+  // suspects was restored (the continuity warning). Read-only lookups and the
+  // owner's explicit decision (stopOnServer) still run.
+  if (!opts.readOnly && opts.fencedFor !== "owner" && (await continuityWarning())) return "blocked";
   const snapshots: SyncOutboxEntry[] = [];
   for (const ref of earlier) {
     const snap = typeof ref === "string" ? await localDb.syncOutbox.get(ref) : ref;
@@ -1585,8 +1724,13 @@ export async function settleBeforeReplacement(
       if (row?.serverOutcome) continue;              // decided on the server: rejected / abandoned
       const subject = row ?? snap;
       if (subject.kind !== "rpc" || !subject.idempotencyKey) return "blocked";
+      // A replacement (the person enters the operation again) fences the
+      // earlier attempt if the server never saw it: the replacement records
+      // the operation, so it exists once either way — also when the earlier
+      // one was lost by a restore of the server.
+      const fence = opts.fence ? opts.fence(subject) : true;
       const { absent, status, error } = await lookupOperation(subject.name, subject.idempotencyKey, {
-        fence: opts.fence ? opts.fence(subject) : true, actorId: actorOf(subject), args: (row ? await resolveArgs(row) : null) ?? subject.args ?? null,
+        fence, actorId: actorOf(subject), args: (row ? await resolveArgs(row) : null) ?? subject.args ?? null,
       });
       if (absent || error || !status) return "blocked";
       if (status.status === "committed") {
@@ -1601,10 +1745,15 @@ export async function settleBeforeReplacement(
           return "blocked";
         }
       } else if (status.status === "rejected") {
-        if (row && row.status !== "reconciled") await markFinal(row, "rejected", status.message ?? "the details are visible to the person who entered it or an administrator.");
+        if (row && row.status !== "reconciled") await markFinal(row, "rejected", status.message ?? "the details are visible to the person who entered it or an administrator.", "lookup");
       } else if (status.status === "abandoned") {
-        if (row && row.status !== "reconciled") await markFinal(row, "abandoned", "it never ran on the server and has been stopped there.");
+        if (row && row.status !== "reconciled") {
+          await markFinal(row, "abandoned", status.fenced === true
+            ? "the server had no record of it and it has now been stopped there (by this till), so it can never run under its key."
+            : "the server records it as stopped before it ran.", "lookup", status.fenced === true ? opts.fencedFor ?? "replacement" : undefined);
+        }
       } else {
+        if (status.status === "not_found" && !fence && row && opts.notFound) await opts.notFound(row);
         return "blocked";                            // in flight, unavailable, not fenced
       }
     }
@@ -1664,7 +1813,7 @@ export async function setAsideOutboxEntry(
     throw new OutboxActionError("export-first", "Export pending transactions first (in this session), keep the file, then set the entry aside.");
   }
   const actor = useAuthStore.getState().currentUserId ?? undefined;
-  const updated = await localDb.transaction("rw", localDb.syncOutbox, async () => {
+  const updated = await localDb.transaction("rw", localDb.syncOutbox, localDb.syncState, async () => {
     const entry = await localDb.syncOutbox.get(localId);
     if (!entry) throw new OutboxActionError("not-found", "This entry is no longer in the queue (it may have synced).");
     if (entry.status === "archived") throw new OutboxActionError("already-set-aside", "This entry is already set aside.");
@@ -1679,6 +1828,7 @@ export async function setAsideOutboxEntry(
       nextAttemptAt: undefined,
     };
     await localDb.syncOutbox.put(next);
+    await journalOwner(next, "set-aside", opts.reason);
     return next;
   });
   void refreshSyncStatus();
@@ -1698,7 +1848,7 @@ export async function restoreSetAsideEntry(localId: string): Promise<SyncOutboxE
   if (!isOwnerSession()) {
     throw new OutboxActionError("not-owner", "Only the owner (administrator) can restore a set-aside entry.");
   }
-  const restored = await localDb.transaction("rw", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, async () => {
+  const restored = await localDb.transaction("rw", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, localDb.syncState, async () => {
     const entry = await localDb.syncOutbox.get(localId);
     if (!entry) throw new OutboxActionError("not-found", "This entry is no longer on this till.");
     if (entry.status !== "archived") throw new OutboxActionError("not-set-aside", "This entry is not set aside.");
@@ -1722,6 +1872,7 @@ export async function restoreSetAsideEntry(localId: string): Promise<SyncOutboxE
     delete next.archiveReason;
     delete next.syncingSince;
     await localDb.syncOutbox.put(next);
+    await journalOwner(next, "restored-to-queue");
     return next;
   });
   void refreshSyncStatus();

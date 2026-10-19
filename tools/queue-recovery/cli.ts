@@ -27,7 +27,9 @@ const USAGE = `usage:
   queue-recovery inspect <file.spqx> [--json]
   queue-recovery replay  <file.spqx> --target <url> [--dry-run] [--email <user email>]
                          [--confirm-host <host>] [--include-conflicts] [--include-quarantined] [--include-set-aside]
-                         [--include-reconciled] [--rest-prefix /rest/v1] [--report <out.json>]
+                         [--include-reconciled] [--fence-unfound] [--rest-prefix /rest/v1] [--report <out.json>]
+  --fence-unfound stops (fences) HELD entries the server has no record of. Without it they are only
+  looked up: "not found" may mean the server was restored and lost them. Owner decision only.
   --target is mandatory (no default, no env fallback). A host different from the one
   the till was built for must be repeated with --confirm-host.
   --include-quarantined replays entries the till QUARANTINED (queued for another backend,
@@ -51,7 +53,7 @@ function parseArgs(argv: string[]): Args {
     const a = rest[i];
     if (!a.startsWith("--")) throw new Error(`unexpected argument: ${a}`);
     const name = a.slice(2);
-    if (["dry-run", "json", "include-conflicts", "include-quarantined", "include-set-aside", "include-reconciled"].includes(name)) flags.set(name, true);
+    if (["dry-run", "json", "include-conflicts", "include-quarantined", "include-set-aside", "include-reconciled", "fence-unfound"].includes(name)) flags.set(name, true);
     else if (["target", "email", "confirm-host", "rest-prefix", "report"].includes(name)) {
       const v = rest[++i];
       if (v === undefined) throw new Error(`--${name} needs a value`);
@@ -189,6 +191,7 @@ async function main(): Promise<number> {
     accessToken,
     ledgerToken: process.env.QUEUE_RECOVERY_SERVICE_KEY || null,
     includeConflicts: args.flags.has("include-conflicts"),
+    fenceUnfound: args.flags.has("fence-unfound"),
     includeQuarantined,
     includeSetAside: args.flags.has("include-set-aside"),
     includeReconciled: args.flags.has("include-reconciled"),

@@ -30,9 +30,13 @@
 //     operator; another user's operation is only looked up (never run, never
 //     fenced) and the run stops there (later entries may depend on it);
 //   * a held entry (fenceRequired: its first attempt may or may not have
-//     reached the server) is NEVER replayed: it is looked up and, if the
-//     server never saw it, fenced (op_status) — by its own user, or by an
-//     ADMIN with the operation's own arguments as organisation evidence;
+//     reached the server) is NEVER replayed: it is looked up, READ-ONLY. If
+//     the server has no record of it, it is reported as held — "not found"
+//     cannot tell "never arrived" from "lost by a restore of the server"
+//     (W10 Phase 0). Only with --fence-unfound (an owner's decision that
+//     these operations did not happen) is it fenced (op_status) — by its own
+//     user, or by an ADMIN with the operation's own arguments as
+//     organisation evidence;
 //   * an entry the server already decided (serverOutcome) is reported, not sent;
 //   * committed / recorded refusal / abandoned are final; in flight,
 //     unavailable, held and unknown stop the run (ordering is preserved);
@@ -135,6 +139,10 @@ export interface ReplayOptions {
    *  same), "cancelled" means it must not happen. Explicit owner decision
    *  only; treated by the status it had before reconciliation. */
   includeReconciled?: boolean;
+  /** W10 Phase 0: fence held entries the server has no record of. An owner's
+   *  explicit decision that they did not happen (or will be entered again);
+   *  without it they are looked up only and reported as held. */
+  fenceUnfound?: boolean;
   dryRun?: boolean;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
@@ -533,7 +541,7 @@ export async function replayExport(payload: QueueExportPayload, options: ReplayO
     const executorElsewhere = e.kind === "rpc" && e.backendOrigin !== origin && !!e.idempotencyKey && isUuidV7(e.idempotencyKey) && EXECUTOR_RPCS.has(e.opType);
     if (options.dryRun && (held || (e.backendOrigin !== origin && (undecided(e) || !options.otherBackendConfirmed || executorElsewhere)))) {
       // The real run would not replay it (the same tests as below): say so and stop.
-      push(e, "held", { detail: `dry run: ${e.backendOrigin !== origin ? `queued for ${e.backendOrigin ?? "an unrecorded backend"}` : fenceable ? "held: would be looked up and fenced, never replayed" : "held: would be looked up only"}` });
+      push(e, "held", { detail: `dry run: ${e.backendOrigin !== origin ? `queued for ${e.backendOrigin ?? "an unrecorded backend"}` : fenceable && options.fenceUnfound === true ? "held: would be looked up and fenced if the server has no record of it (--fence-unfound), never replayed" : "held: would be looked up only (never fenced), never replayed"}` });
       continue;
     }
     if (options.dryRun) {
@@ -543,7 +551,7 @@ export async function replayExport(payload: QueueExportPayload, options: ReplayO
       // an entry with a recorded creator runs only in that user's session.
       const creator = e.kind === "rpc" ? (e.actorId ?? (typeof args.p_expected_actor_id === "string" ? args.p_expected_actor_id : null)) : null;
       push(e, unresolved && !pendingRef ? "blocked-unresolved-ref" : "planned", {
-        detail: `${e.kind === "rpc" ? `rpc ${e.opType}` : `${e.tableOp} ${e.table}`} key ${shortKey(e.idempotencyKey)}${held ? " (HELD: lookup + fence only, never replayed)" : ""}${pendingRef ? " (ref resolves from an earlier entry)" : ""}${unresolved && !pendingRef ? `: ${unresolved}` : ""}${creator ? ` (only if signed in as ${creator}; otherwise held)` : ""}`,
+        detail: `${e.kind === "rpc" ? `rpc ${e.opType}` : `${e.tableOp} ${e.table}`} key ${shortKey(e.idempotencyKey)}${held ? (options.fenceUnfound === true ? " (HELD: lookup + fence only, never replayed)" : " (HELD: lookup only, never replayed)") : ""}${pendingRef ? " (ref resolves from an earlier entry)" : ""}${unresolved && !pendingRef ? `: ${unresolved}` : ""}${creator ? ` (only if signed in as ${creator}; otherwise held)` : ""}`,
       });
       continue;
     }
@@ -616,9 +624,12 @@ export async function replayExport(payload: QueueExportPayload, options: ReplayO
         finish("held", { detail: "held for confirmation; the target has no migration 086 (no lookup or fence exists there). Never replayed — an owner reconciles it." });
         continue;
       }
-      const verdict = await statusOf(e, key, actor, opArgs, fenceable);
-      if (!fenceable && verdict.outcome === "unknown") {
-        finish("held", { detail: "its outcome is unknown and whether it was authorised offline cannot be established from the file: looked up only (not on the server yet) — never fenced, never sent. An owner reconciles it." });
+      const fence = fenceable && options.fenceUnfound === true;
+      const verdict = await statusOf(e, key, actor, opArgs, fence);
+      if (!fence && verdict.outcome === "unknown") {
+        finish("held", { detail: fenceable
+          ? "the server has no record of it: it may never have arrived, or a restore of the server may have lost it. Looked up only — never fenced, never sent. An owner decides (re-run with --fence-unfound only after establishing it did not happen)."
+          : "its outcome is unknown and whether it was authorised offline cannot be established from the file: looked up only (not on the server yet) — never fenced, never sent. An owner reconciles it." });
       } else {
         finish(verdict.outcome, verdict.extra);
       }

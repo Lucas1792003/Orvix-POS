@@ -118,7 +118,11 @@ quarantined, and a separate owner authorization. Nothing in these scripts reopen
 3. **Disconnect every till from the network now** (Wi-Fi off / cable out, or Tailscale disconnected on the
    device; a Tailscale ACL that blocks the tills works too) and label each one. "Offline" here means *no network
    path*, not only "the server is down": the moment Tailscale Serve is back (§R step 4) every connected till
-   would reconnect at once and drain, and its first drain fences its in-doubt keys (disaster-recovery.md W10).
+   would reconnect at once and drain. Since W8/W10 Phase 0 a till no longer fences an operation the server has no
+   record of (it holds it for an owner: "Reconciliation required"), keeps a journal of every operation, and pauses
+   automatic sync when a full load shows server rows it had loaded are gone — but tills running older builds still
+   fence, and the pause needs a full load (restart the app after reconnecting) by the SAME user as the till's last
+   load before the restore (a different user, role, shop or permission set is never compared — its view differs).
    The tills keep selling offline; nobody signs a till in, and no till syncs, until §R step 6.
 4. The restore tools are complete and the migration source matches (no database access):
    ```
@@ -295,8 +299,11 @@ Steps:
 5. Owner signs in as ADMIN (existing authenticator app) and checks a few records.
 6. Reconnect tills **one at a time** (each was disconnected in §0 step 3), in the order disaster-recovery.md
    §6 sets: reconciled tills first; a quarantined till stays disconnected until its queue has been resolved.
-   A reconnecting till drains its queue and fences its in-doubt keys (W10, still a BLOCKER): its
-   reconciliation record must already list every in-doubt entry so the owner can correct a "never ran" by hand.
+   A reconnecting till drains its queue; an in-doubt operation the restored server has no record of is held as
+   "Reconciliation required" (never fenced automatically, Phase 0) — decide each one with Sync › Stop on server (after
+   checking it did not happen) or re-enter it. If the till shows "Automatic sync is paused", export (owner: the
+   export carries the till's journal) before acknowledging. Tills on builds before Phase 0 still fence on their first
+   drain (W10): their reconciliation record must list every in-doubt entry first.
 7. Backups back on: `crontab ~/crontab.restore-<ts>`, then `backup-logical.sh` once by hand and
    `backup-status.sh` → OK. Studio only when needed (`docker compose up -d --no-deps studio`, SSH tunnel).
    If `supabase-stack.service` was disabled for the restore, re-enable it.

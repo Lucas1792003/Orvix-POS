@@ -54,8 +54,9 @@ describe.skipIf(!enabled)("086 stabilization — queue-recovery tool (H3)", () =
     tillId: "till-qa-m086", backendHost: new URL(origin).host, session: { userId: A.ids.cashA, orgId: A.ids.org, shopId: A.ids.shop, role: "CASHIER" },
     entries, provisionalIdMap: [], redactedFields: 0, reconciliationLog: [], onlineOperations: [],
   });
-  const replay = async (entries: QueueExportEntry[], who: "cashA" | "cashB" | "mgr" | "admin") =>
-    replayExport(payload(entries), { target: origin, anonKey: cfg.anonKey, accessToken: await tokenOf(who) });
+  // W10 Phase 0: held entries are looked up only unless the owner passes --fence-unfound
+  const replay = async (entries: QueueExportEntry[], who: "cashA" | "cashB" | "mgr" | "admin", fenceUnfound = false) =>
+    replayExport(payload(entries), { target: origin, anonKey: cfg.anonKey, accessToken: await tokenOf(who), fenceUnfound });
   const sale = (qty = 1, prod = A.ids.prod1) => ({
     p_shop_id: A.ids.shop, p_shift_id: st.shiftA, p_payment_method: "CASH", p_paid_mmk: 2000000000, p_cart_discount_pct: 0,
     p_items: [{ product_id: prod, qty, units_per_item: 1 }], p_created_at: new Date().toISOString(),
@@ -122,10 +123,14 @@ describe.skipIf(!enabled)("086 stabilization — queue-recovery tool (H3)", () =
     expect(first.data.outcome).toBe("committed");
     const n0 = sales();
     const held = { actorId: A.ids.cashA, status: "conflict" as const, fenceRequired: true, inDoubt: true, writeAhead: true, staged: false };
+    // default (W10 Phase 0): looked up only — held, nothing written, the run stops there
+    const r0 = await replay([entry("complete_sale", sale(1), kNever, held), entry("complete_sale", doneArgs, kDone, held)], "cashA");
+    expect(outcomes(r0)[0]).toBe("held");
+    expect(ledger(kNever)).toBe("<none>");
     const r = await replay([
       entry("complete_sale", sale(1), kNever, held),
       entry("complete_sale", doneArgs, kDone, held),
-    ], "cashA");
+    ], "cashA", true);
     expect(outcomes(r)).toEqual(["abandoned", "already-applied"]);
     expect(r.ops[1].resultId).toBe(first.data.response.sale.id);
     expect(ledger(kNever)).toBe(`abandoned/FENCED/${A.ids.cashA}`);
@@ -142,7 +147,9 @@ describe.skipIf(!enabled)("086 stabilization — queue-recovery tool (H3)", () =
     const asCashier = await replay([entry("complete_sale", sale(), k, held)], "cashB");
     expect(outcomes(asCashier)).toEqual(["held"]);
     expect(ledger(k)).toBe("<none>");
-    const asAdmin = await replay([entry("complete_sale", sale(), k, held)], "admin");
+    expect(outcomes(await replay([entry("complete_sale", sale(), k, held)], "admin"))).toEqual(["held"]);   // default: lookup only
+    expect(ledger(k)).toBe("<none>");
+    const asAdmin = await replay([entry("complete_sale", sale(), k, held)], "admin", true);
     expect(outcomes(asAdmin)).toEqual(["abandoned"]);
     expect(ledger(k)).toBe("abandoned/FENCED/<null>");
     return { cashier: "held (not_authorized)", admin: "abandoned, actor NULL, org verified from the operation's own arguments" };
@@ -251,12 +258,15 @@ describe.skipIf(!enabled)("086 stabilization — queue-recovery tool (H3)", () =
     const kNever = v7();
     const kUnknown = v7();
     const n0 = sales();
-    const r = await replay([entry("complete_sale", sale(), kNever, { actorId: A.ids.cashA, status: "syncing", writeAhead: true, staged: false })], "cashA");
+    const neverRow = entry("complete_sale", sale(), kNever, { actorId: A.ids.cashA, status: "syncing", writeAhead: true, staged: false });
+    expect(outcomes(await replay([neverRow], "cashA"))).toEqual(["held"]);       // default: lookup only (W10 Phase 0)
+    expect(ledger(kNever)).toBe("<none>");
+    const r = await replay([neverRow], "cashA", true);
     expect(outcomes(r)).toEqual(["abandoned"]);
     expect(ledger(kNever)).toBe(`abandoned/FENCED/${A.ids.cashA}`);
-    // post-checkpoint: with NOTHING staged the till fences this row too (recoverStrandedSyncing) — so does the tool
+    // post-checkpoint: with NOTHING staged the till holds this row too (recoverStrandedSyncing) — so does the tool
     const kStranded = v7();
-    const rs = await replay([entry("complete_sale", sale(), kStranded, { actorId: A.ids.cashA, status: "syncing", writeAhead: true, staged: null })], "cashA");
+    const rs = await replay([entry("complete_sale", sale(), kStranded, { actorId: A.ids.cashA, status: "syncing", writeAhead: true, staged: null })], "cashA", true);
     expect(outcomes(rs)).toEqual(["abandoned"]);
     expect(ledger(kStranded)).toBe(`abandoned/FENCED/${A.ids.cashA}`);
     // staged records, a later attempt, an older (v1) file: authorisation cannot be established -> looked up only
@@ -271,7 +281,7 @@ describe.skipIf(!enabled)("086 stabilization — queue-recovery tool (H3)", () =
   T("Q.12", "086 (post-checkpoint): the CURRENT till's own interrupted online sale (being sent, write-ahead, no staged flag, first attempt) — the tool decides as the till: fenced if it never arrived, reported once if it did; dry run predicts 'held' (exit 4); a legacy in-doubt close is looked up only", async () => {
     // a version-2 file (the current build writes v2; 086 fields present)
     const v2 = (entries: QueueExportEntry[]) => ({ ...payload(entries), formatVersion: 2 }) as unknown as QueueExportPayload;
-    const replay2 = async (entries: QueueExportEntry[]) => replayExport(v2(entries), { target: origin, anonKey: cfg.anonKey, accessToken: await tokenOf("cashA") });
+    const replay2 = async (entries: QueueExportEntry[], fenceUnfound = true) => replayExport(v2(entries), { target: origin, anonKey: cfg.anonKey, accessToken: await tokenOf("cashA"), fenceUnfound });
     const interrupted = { actorId: A.ids.cashA, status: "syncing" as const, writeAhead: true, staged: null, attempts: 0, inDoubt: null };
     const kNever = v7();
     const kDone = v7();
@@ -283,6 +293,8 @@ describe.skipIf(!enabled)("086 stabilization — queue-recovery tool (H3)", () =
     const dry = await replayExport(v2([entry("complete_sale", sale(), kNever, interrupted)]), { target: origin, anonKey: cfg.anonKey, accessToken: await tokenOf("cashA"), dryRun: true });
     expect(outcomes(dry)).toEqual(["held"]);
     expect(exitCodeFor(dry)).toBe(4);
+    expect(ledger(kNever)).toBe("<none>");
+    expect(outcomes(await replay2([entry("complete_sale", sale(), kNever, interrupted)], false))).toEqual(["held"]);   // default: lookup only
     expect(ledger(kNever)).toBe("<none>");
     const r1 = await replay2([entry("complete_sale", sale(), kNever, interrupted)]);
     expect(outcomes(r1)).toEqual(["abandoned"]);

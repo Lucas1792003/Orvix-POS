@@ -37,7 +37,7 @@ async function confirmPayment(T: any, paid = 5000): Promise<void> {
   await amount.press("Enter");
 }
 
-test("M1 C1: crash during the FIRST online attempt (never reached the server) -> restart -> fenced, never executed; the late copy is refused", async () => {
+test("M1 C1: crash during the FIRST online attempt (never reached the server) -> restart -> looked up read-only, HELD for an owner (W10 Phase 0), never executed; after the owner's stop the late copy is refused", async () => {
   const T = await freshTill("m086-1");
   const salesBefore = await serverSales();
   let captured: any = null;
@@ -56,21 +56,25 @@ test("M1 C1: crash during the FIRST online attempt (never reached the server) ->
 
   const R = await reopenTill("m086-1");
   try {
-    await expect.poll(async () => (await idbSnapshot(R)).outbox.find((r: any) => r.localId === row.localId)?.serverOutcome, { timeout: 60_000 }).toBe("abandoned");
-    const after = (await idbSnapshot(R)).outbox.find((r: any) => r.localId === row.localId);
-    expect(after).toMatchObject({ status: "conflict", fenceRequired: true, inDoubt: false });
-    expect(ledger(row.idempotencyKey)).toBe("abandoned/FENCED");
+    await expect.poll(async () => (await idbSnapshot(R)).outbox.find((r: any) => r.localId === row.localId)?.heldReason, { timeout: 60_000 }).toBe("reconciliation-required");
+    const held = (await idbSnapshot(R)).outbox.find((r: any) => r.localId === row.localId);
+    expect(held).toMatchObject({ status: "conflict", fenceRequired: true, inDoubt: true });
+    expect(ledger(row.idempotencyKey)).toBe("<none>");                                   // not fenced automatically
     expect(await serverSales()).toBe(salesBefore);
     expect(R.rpcBodies.filter((b) => b.name === "op_execute" && (b.body as any)?.p_key === row.idempotencyKey)).toHaveLength(0);
-    expect(R.rpcBodies.some((b) => b.name === "op_status" && (b.body as any)?.p_key === row.idempotencyKey && (b.body as any)?.p_fence === true)).toBe(true);
-    // the delayed original request finally arrives: refused on both paths
+    expect(R.rpcBodies.some((b) => b.name === "op_status" && (b.body as any)?.p_key === row.idempotencyKey && (b.body as any)?.p_fence === true)).toBe(false);
+    // the owner's explicit decision — the fence stopOnServer sends, by the operation's own actor
     const c = await signedInClient(liveCfg(), st.emails.cashA, pw);
+    const stop = await c.rpc("op_status", { p_key: captured.p_key, p_rpc: "complete_sale", p_fence: true, p_expected_actor_id: captured.p_actor_id, p_args: captured.p_args });
+    expect((stop.data as any)?.status).toBe("abandoned");
+    expect(ledger(row.idempotencyKey)).toBe("abandoned/FENCED");
+    // the delayed original request finally arrives: refused on both paths
     const late = await c.rpc("op_execute", captured);
     expect(late.data).toEqual({ outcome: "abandoned", replayed: true });
     const legacy = await c.rpc("complete_sale", { ...captured.p_args, p_idempotency_key: captured.p_key });
     expect(legacy.error?.message).toMatch(/^OP_EXECUTOR_REQUIRED/);   // UUIDv7: never through a legacy RPC on an 086 server
     expect(await serverSales()).toBe(salesBefore);
-    note("M1", { beforeCrash: "syncing write-ahead, v7 key", afterRestart: "op_status fence -> abandoned", resent: 0, ledger: "abandoned/FENCED", lateExecutor: late.data, lateLegacy: legacy.error?.message?.slice(0, 21), sales: "unchanged" });
+    note("M1", { beforeCrash: "syncing write-ahead, v7 key", afterRestart: "op_status lookup (no fence) -> held, reconciliation required", resent: 0, ownerStop: "abandoned/FENCED", lateExecutor: late.data, lateLegacy: legacy.error?.message?.slice(0, 21), sales: "unchanged" });
   } finally {
     await R.close();
   }

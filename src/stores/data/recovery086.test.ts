@@ -24,8 +24,9 @@ import { fakeSupabase as fake } from "./testing/fakeSupabase";
 import { localDb, type SyncOutboxEntry } from "../../lib/localDb";
 import {
   classifyLegacyQueue, confirmWithServer, countPendingOutbox, drainOutbox, enqueueOutbox, registerOutboxReconciler, restoreSetAsideEntry,
-  retryOutboxEntry, setAsideOutboxEntry, simulateNewAppInstanceForTests,
+  retryOutboxEntry, setAsideOutboxEntry, simulateNewAppInstanceForTests, stopOnServer,
 } from "./outbox";
+import { getJournalRecord } from "./opJournal";
 import {
   callRpc, fromExecutorReply, newIdempotencyKey, runRequest, setExecutorCapabilityForTests, executorCapability,
 } from "./idempotentRpc";
@@ -178,13 +179,41 @@ describe("C1: never authorised offline -> asked about, fenced, never resent", ()
     return (await one());
   };
 
-  it("never delivered: fenced as abandoned by its own actor; final; the delayed request can never execute", async () => {
+  it("W10 Phase 0 — not found on the server: looked up READ-ONLY, never fenced, never resent; held for an owner (reconciliation required)", async () => {
     const e = await heldEntry();
-    expect(await drainOutbox()).toBe("drained");
+    expect(await drainOutbox()).toBe("backoff");                                 // it waits for an owner
     expect(fake.callsFor("op_execute")).toHaveLength(0);
-    expect(fake.callsFor("op_status")[0].args).toMatchObject({ p_key: e.idempotencyKey, p_fence: true, p_expected_actor_id: "user-1" });
+    expect(fake.callsFor("op_status")[0].args).toMatchObject({ p_key: e.idempotencyKey, p_fence: false, p_expected_actor_id: "user-1" });
+    expect(fake.server.idempotency.size).toBe(0);                                // nothing written on the server
+    expect(await one()).toMatchObject({ status: "conflict", fenceRequired: true, heldReason: "reconciliation-required", inDoubt: true });
+    expect(await one()).not.toHaveProperty("serverOutcome");
+    expect((await pendingStockDeltas()).size).toBe(1);                           // its decrease still counts (may have run)
+    expect(await getJournalRecord(e.idempotencyKey!)).toMatchObject({ state: "reconciliation-required", key: e.idempotencyKey, rpc: "complete_sale" });
+    // a delayed copy of the original request may still arrive: it runs ONCE
+    // under its key, and the held entry is then recorded as committed — one sale
+    const late = await callRpc("complete_sale", { ...sale(1), p_idempotency_key: e.idempotencyKey });
+    expect(late.serverOutcome ?? "committed").toBe("committed");
+    await localDb.syncOutbox.update(e.localId, { nextAttemptAt: undefined });
+    await drainOutbox();
+    expect(fake.server.sales).toHaveLength(1);
+    expect(await localDb.syncOutbox.count()).toBe(0);
+    expect(await getJournalRecord(e.idempotencyKey!)).toMatchObject({ state: "committed", evidence: { source: "lookup" } });
+  });
+
+  it("W10 Phase 0 — an owner's EXPLICIT stop (with a statement) fences it; without a statement nothing changes; a cashier cannot", async () => {
+    const e = await heldEntry();
+    await drainOutbox();
+    await expect(stopOnServer(e.localId, "checked the receipts, it did not happen")).rejects.toThrow(/owner/);
+    actingRole = "ADMIN";
+    await expect(stopOnServer(e.localId, "short")).rejects.toThrow(/at least/);
+    expect(fake.server.idempotency.size).toBe(0);
+    expect(await stopOnServer(e.localId, "no receipt, no cash: it never reached the customer")).toBe("abandoned");
+    expect(fake.callsFor("op_status").at(-1)?.args).toMatchObject({ p_key: e.idempotencyKey, p_fence: true });
     expect(await one()).toMatchObject({ status: "conflict", serverOutcome: "abandoned" });
-    expect((await pendingStockDeltas()).size).toBe(0);
+    const j = await getJournalRecord(e.idempotencyKey!);
+    expect(j).toMatchObject({ state: "abandoned" });
+    expect(j!.events.map((x) => x.event)).toContain("owner-stop-requested");
+    expect(j!.events.find((x) => x.event === "owner-stop-requested")?.detail).toMatch(/never reached the customer/);
     const late = await callRpc("complete_sale", { ...sale(1), p_idempotency_key: e.idempotencyKey });
     expect(late.serverOutcome).toBe("abandoned");
     expect(fake.server.sales).toHaveLength(0);
@@ -234,7 +263,11 @@ describe("C1: never authorised offline -> asked about, fenced, never resent", ()
     fake.setCaller("admin-1", true);
     await localDb.syncOutbox.update((await one()).localId, { nextAttemptAt: undefined });
     await drainOutbox();
-    expect(await one()).toMatchObject({ serverOutcome: "abandoned" });
+    // asked (read-only) in the administrator's session: not found -> an owner decides
+    expect(await one()).toMatchObject({ heldReason: "reconciliation-required", fenceRequired: true });
+    expect(fake.callsFor("op_status").at(-1)?.args).toMatchObject({ p_fence: false });
+    expect(fake.server.idempotency.size).toBe(0);
+    expect(await stopOnServer((await one()).localId, "administrator checked: never rung up")).toBe("abandoned");
   });
 
   it("server WITHOUT 086: held with the 'not recorded on this till' warning; never sent; later entries wait until an owner sets it aside", async () => {
@@ -422,9 +455,13 @@ describe("correction pass: the review findings", () => {
     const after = new Map((await rows()).map((r) => [r.localId, r]));
     expect(after.get(a.localId)).toMatchObject({ fenceRequired: true, status: "conflict" });
     expect(fake.callsFor("op_execute").some((c) => c.args.p_key === a.idempotencyKey)).toBe(false);
-    // queued offline: authorised (staged) — but it waits behind the held one (H2)
-    expect(after.get(b.localId)).toMatchObject({ status: "pending", staged: true });
-    expect(fake.server.sales).toHaveLength(0);
+    // W10 Phase 0: the held one waits for an owner (the server has no record of
+    // it) and is never resent; the queued offline sale is PROVEN independent of
+    // it (two decreases, no shared record — dependencies.ts) and is sent with its key
+    expect(after.get(a.localId)).toMatchObject({ heldReason: "reconciliation-required" });
+    expect(after.has(b.localId)).toBe(false);
+    expect(fake.server.sales).toHaveLength(1);
+    expect(fake.server.idempotency.has(a.idempotencyKey!)).toBe(false);
   });
 
   it("5: no recorded actor — a cashier cannot resolve it; an ADMIN can, with the operation's own arguments as server-side evidence", async () => {
@@ -432,11 +469,13 @@ describe("correction pass: the review findings", () => {
     const e = await one();
     await localDb.syncOutbox.update(e.localId, { actorId: undefined, fenceRequired: true, staged: false, status: "conflict", inDoubt: true });
     await drainOutbox();
-    expect(await one()).toMatchObject({ heldReason: "needs-administrator", status: "conflict" });
+    // W10 Phase 0: looked up read-only; not found -> held for an owner (never fenced automatically)
+    expect(await one()).toMatchObject({ heldReason: "reconciliation-required", status: "conflict" });
+    expect(fake.server.idempotency.size).toBe(0);
     fake.setCaller("admin-1", true);
     actingUser = "admin-1";
-    await localDb.syncOutbox.update(e.localId, { nextAttemptAt: undefined });
-    await drainOutbox();
+    actingRole = "ADMIN";
+    expect(await stopOnServer(e.localId, "owner checked the records: never happened")).toBe("abandoned");
     expect(await one()).toMatchObject({ serverOutcome: "abandoned" });
     const fenceCall = fake.callsFor("op_status").at(-1)!;
     expect(fenceCall.args).toMatchObject({ p_fence: true, p_expected_actor_id: null });
@@ -547,7 +586,14 @@ describe("stabilization pass", () => {
     fake.releaseExecuting();
     for (const r of await rows()) await localDb.syncOutbox.update(r.localId, { nextAttemptAt: undefined });
     await drainOutbox();
-    expect((await localDb.syncOutbox.get(s1.localId))).toMatchObject({ serverOutcome: "abandoned" });
+    // not found once the execution ended: held for an owner — the close (it may
+    // depend on the sale) still waits behind it
+    expect((await localDb.syncOutbox.get(s1.localId))).toMatchObject({ heldReason: "reconciliation-required" });
+    expect(sent("close_shift")).toHaveLength(0);
+    actingRole = "ADMIN";
+    expect(await stopOnServer(s1.localId, "owner: the hung sale was never completed")).toBe("abandoned");
+    actingRole = "CASHIER";
+    await drainOutbox();
     expect(sent("close_shift")).toHaveLength(1);
   });
 
@@ -599,7 +645,12 @@ describe("stabilization pass", () => {
     for (const r of [a, b]) await localDb.syncOutbox.update(r.localId, { status: "archived", statusBeforeArchive: "syncing", inDoubt: true, writeAhead: true });
     await fake.rpc("op_execute", { p_key: b.idempotencyKey, p_rpc: "complete_sale", p_args: sale(2), p_actor_id: "user-1" });
     actingRole = "ADMIN";                                   // an owner action (enforced in confirmWithServer itself)
-    expect(await confirmWithServer(a.localId)).toBe("abandoned");
+    // W10 Phase 0: Confirm is READ-ONLY — not found stops nothing
+    expect(await confirmWithServer(a.localId)).toBe("not-found");
+    expect(fake.server.idempotency.get(a.idempotencyKey!)).toBeUndefined();
+    expect(await localDb.syncOutbox.get(a.localId)).toMatchObject({ status: "archived" });
+    // the owner's explicit decision stops it, and it stays set aside
+    expect(await stopOnServer(a.localId, "owner: checked receipts, it did not happen")).toBe("abandoned");
     expect(await localDb.syncOutbox.get(a.localId)).toMatchObject({ status: "archived", serverOutcome: "abandoned" });
     expect(fake.server.idempotency.get(a.idempotencyKey!)).toMatchObject({ state: "abandoned" });
     expect(await confirmWithServer(b.localId)).toBe("committed");
@@ -734,8 +785,9 @@ describe("final pass", () => {
     expect(restored).toMatchObject({ status: "conflict", fenceRequired: true, inDoubt: true });
     await drainOutbox();
     expect(fake.callsFor("op_execute").filter((c) => c.args.p_key === e.idempotencyKey)).toHaveLength(0);
-    expect(fake.callsFor("op_status").at(-1)?.args).toMatchObject({ p_key: e.idempotencyKey, p_fence: true });
-    expect(await one()).toMatchObject({ serverOutcome: "abandoned" });
+    expect(fake.callsFor("op_status").at(-1)?.args).toMatchObject({ p_key: e.idempotencyKey, p_fence: false });
+    expect(await one()).toMatchObject({ heldReason: "reconciliation-required", fenceRequired: true });
+    expect(fake.server.idempotency.size).toBe(0);
   });
 
   it("E: a restored set-aside entry that WAS authorised offline (staged) comes back in doubt and is resent only with its own key (replayed if committed)", async () => {

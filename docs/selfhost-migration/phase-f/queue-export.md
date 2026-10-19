@@ -88,6 +88,8 @@ Decrypted payload (validated with a zod schema on both sides):
 | `entries[]` | per outbox row, in queue order: `seq`, `opId` (outbox `localId`), `idempotencyKey`, `kind` (`rpc`/`table_write`), `opType` (RPC name or `<table>.<op>`), `table`, `tableOp`, `rowId`, `payload` (RPC args incl. `p_idempotency_key`, or the table row), `refs`, `provisional`, `shopId`, `createdAt` (queued), `ringUpAt` (`p_created_at`), `status`, `attempts`, `lastErrorClass` (`transient`/`permanent`), `lastError` (≤ 500 chars), `nextAttemptAt` |
 | `provisionalIdMap[]` | provisional id → server id for parents that already synced (resolves `refs`) |
 | `redactedFields` | how many credential-looking keys the serializer blanked (0 in practice) |
+| `journal[]` | W8 Phase 0, **owner (ADMIN) exports of their organisation only** (empty in staff and sign-in-screen exports): the till's operation journal (`syncState` `opj:` records) — every financial operation with its key, request and the server's reply, acknowledged ones included, without the `fingerprint` field; credentials blanked as above. Evidence for a reconciliation, never replayed by the tool |
+| `vanished[]` | W8 Phase 0, owner exports only: rows a full load no longer returned although the till had loaded them from the server (continuity evidence), of this organisation |
 
 All statuses are exported (`pending`, `syncing`, `failed`, `conflict`), i.e.
 everything the server does not have yet.
@@ -97,7 +99,7 @@ everything the server does not have yet.
 | Concern | Control |
 |---|---|
 | Export changes the queue (drops, reorders, marks synced) | Collection is one Dexie transaction in mode `"r"` over `syncOutbox` + `provisionalIdMap` (Dexie rejects writes inside it); rows are copied field by field into new objects; the drain lock is not taken; nothing calls the outbox API. Tested: raw `syncOutbox`/`provisionalIdMap`/`syncState`/`authCache` contents byte-identical before/after (unit + e2e), drain afterwards sends the same keys in the same order. The only write anywhere is the till id in `localStorage`, once per profile. |
-| Credentials in the file | (1) allowlist serializer — only the outbox fields above; the auth session (localStorage), `authCache` and `syncState` are not read; (2) any key matching access/refresh/provider/id token, password, passphrase, secret, totp secret/code, api/anon key, service role, jwt, authorization, bearer, cookie, session is replaced by `[REDACTED]` at any depth inside payloads (the tool never replays such an entry); (3) before encrypting, the serialized payload is searched for every credential value the renderer can see (stored session access/refresh/provider tokens, the anon key) and the export **aborts** if one occurs anywhere. Canary tests for all three. |
+| Credentials in the file | (1) allowlist serializer — only the outbox fields above (plus, in an owner's export, the `opj:` journal / `opjv:` evidence records of `syncState`); the auth session (localStorage), `authCache` and the rest of `syncState` are not read; (2) any key matching access/refresh/provider/id token, password, passphrase, secret, totp secret/code, api/anon key, service role, jwt, authorization, bearer, cookie, session is replaced by `[REDACTED]` at any depth inside payloads (the tool never replays such an entry); (3) before encrypting, the serialized payload is searched for every credential value the renderer can see (stored session access/refresh/provider tokens, the anon key) and the export **aborts** if one occurs anywhere. Canary tests for all three. |
 | A lost/stolen USB stick | AES-256-GCM with a 600k-iteration PBKDF2 key from a passphrase typed at export time and carried separately; the clear part holds counts only. Strength is bounded by the passphrase (≥ 10 characters enforced; staff are told to write it down separately). |
 | Tampering with the file (e.g. edited amounts) | GCM tag over ciphertext + clear header: fails as "wrong passphrase or modified". |
 | Renderer gaining file-system access | None: the preload exposes one function taking two strings; main validates the envelope, owns the dialog and the path; the sender must be the app window. |
@@ -131,6 +133,7 @@ QUEUE_RECOVERY_ANON_KEY=… [QUEUE_RECOVERY_SERVICE_KEY=…] \
 | `--confirm-host <host>` | required when the target is not the host the till was built for (e.g. a disposable restore stack) |
 | `--dry-run` | resolve order and refs, print the plan, send nothing |
 | `--include-conflicts` | also replay entries the till had parked as conflicts (default: skipped and listed) |
+| `--fence-unfound` | W10 Phase 0: stop (fence) HELD entries the server has no record of. Without it they are looked up only and reported held (the run stops there): "not found" may mean the server was restored and lost them. An owner's decision only |
 | `--rest-prefix` | `/rest/v1` (gateway, default) or `""` for a bare PostgREST |
 | `--report <file>` | per-op JSON report (mode 0600) |
 | `QUEUE_RECOVERY_PASSPHRASE` / `_PASSWORD` | else hidden prompt |

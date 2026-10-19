@@ -56,9 +56,9 @@ objects have no copy at all.** The email tier (the chosen offsite channel) is in
 | W7 | Nothing told "PostgreSQL started" apart from "this restore may serve tills". The runbooks reopened the API, or never closed it | HIGH | **Corrected in the repository (snapshot 24); not deployed, verified only on local models.** Snapshot 23 called this "fixed", but it was not: README §B/§B2 only stopped `db` (the gateway kept serving); README §A step 6 `up -d` everything but `api-gw` started the gateway again through `functions → api-gw`; restore-from-email.md started everything, re-enabled Tailscale Serve and let a till sync before any gate. Now `restore-api-guard.sh` closes and confirms every entry point before PostgreSQL is touched (§5.6), the database starts only with `--no-deps`, the gate (§5) runs, and reopening is the manual README §R. Checked by `tests/dr/api-isolation-test.sh` and `tests/dr/runbook-check.sh` |
 | W14 | `deploy.sh` never copied any `dr-*.sql`: on the server the gate could not run its checks and `dr-restore-fixups.sql` was missing (`dr-drill.sh` likewise lacked its SQL) | HIGH | **corrected in the repository** (§5.2): `deploy-manifest.txt`; the package is staged and verified before any `ssh`; the migration source is shipped; the server copy is re-verified. `tests/dr/packaging-test.sh`. Not deployed |
 | W15 | A malformed `--count-tolerance` (e.g. `abc`) made every tolerant count comparison error out and **pass**; any tolerance also applied to sales, payments, ledger and migration counts; a failed checksum query passed as "0 recorded"; an empty invariant output passed | HIGH — financial | **corrected** (§5.1): validated tolerance (else exit 2), strict equality except GoTrue session churn, failed/empty queries FAIL. `tests/dr/gate-unit-test.sh` |
-| W8 | **Tills cannot detect a restored server** (same URL); work recorded after the backup is lost silently | **BLOCKER** | §6 — needs a migration + client change |
+| W8 | **Tills cannot detect a restored server** (same URL); work recorded after the backup is lost silently | **BLOCKER** | §6 — needs a migration + client change. **Phase 0 (client, 2026-10-19)**: every financial operation is journaled on the till and kept after acknowledgement (key, request, the server's reply); a full load that no longer returns sales / supplier payments this till had loaded keeps them as evidence and pauses automatic sync until an owner acknowledges. Detects only rollbacks that lose rows this till had loaded, and only when the same user, role, shop and permissions make the next full load (another user's view is never compared); restoring the lost operations on the server is not automated |
 | W9 | No full rebuild on another machine from the offsite copy has been done | HIGH | owner prerequisite |
-| W10 | **The first drain after a restore FENCES every in-doubt key** (`outbox.ts` lookup with `fence: true`): a sale that really happened before the restore can then never be replayed under its key, and the till tells the cashier it "never ran" (proven R6) | **BLOCKER** (part of W8) | §6 |
+| W10 | **The first drain after a restore FENCES every in-doubt key** (`outbox.ts` lookup with `fence: true`): a sale that really happened before the restore can then never be replayed under its key, and the till tells the cashier it "never ran" (proven R6) | **BLOCKER** (part of W8) | §6. **Phase 0 (client)**: no automatic fence on "not found" (drain, Confirm with server, recovery tool without `--fence-unfound`) — held as "Reconciliation required" for an owner (Stop on server with a statement); proven by `run.sh tills` R6. Builds before Phase 0 still fence |
 | W11 | A **logical** restore loses the USAGE grants on the schemas `graphql` / `graphql_public` (C: the dump has no schema ACL entries for them; the cause is **U** — likely their privileges sit in `pg_init_privs` of the image's init, which pg_dump treats as the default; pg_graphql is not installed here) | HIGH | **found by the drill, fixed**: `dr-restore-fixups.sql` (runbook §A step 5); an invariant in `dr-financial-checks.sql` detects a skipped step even without a reference. Whether other objects behave alike: the schema fingerprint compares functions outside public, sequences, column and database grants (C: nothing else differed) |
 | W12 | A restore brings back every login role's **password hash** (`globals.sql`): after a theft, the stolen passwords keep working unless rotated | MEDIUM | runbook: rotate EVERY login role (§4) |
 | W13 | `restore-test.sh` (weekly, production) still compares counts only | MEDIUM | recommendation: run the gate's invariants there too |
@@ -252,16 +252,18 @@ is restored to the backup at the **same URL**. Observed:
 | Till state at restore | Current behaviour | Verdict |
 |---|---|---|
 | Sale queued offline, never sent | sent once on reconnect | correct |
-| Sale **in doubt** (committed after the backup, reply lost) | **not resent**: the first drain asks the restored server with a **fence** → `abandoned/FENCED`; the till marks it "never ran" | no double execution, but the sale is now **lost and unrecoverable under its key** (**W10**) |
+| Sale **in doubt** (committed after the backup, reply lost) | before Phase 0: **not resent**, the first drain asks the restored server with a **fence** → `abandoned/FENCED`, "never ran". **Phase 0**: looked up read-only, **held for an owner** (ledger untouched) | before: lost and unrecoverable under its key (**W10**); Phase 0: still recordable under its key, an owner decides |
 | Sale recorded after the backup (reply received) | nothing: no queue entry (acknowledged rows are deleted), no unresolved operation, no warning | **silent loss** (W8) |
 | Lump sum **unknown** (committed after the backup) | online-only, never drained; stays unknown and blocks new supplier payments; Check with server → no decision | safe by default; "Send the same payment again" (same key) would be the correct recovery — but nobody knows a restore happened |
 | Lump sum **refused** after the backup | stays final on the till; the server's tombstone is gone | a late copy of that request, or a recovery-tool replay of its key, **would now execute** |
 | Restore detection | none (identity = build-time URL) | **BLOCKER** |
 | Replacement backend at a different URL (or port) | needs a new build; queued/unresolved entries for the old origin are quarantined, never sent | correct for queued work; settled work is lost exactly as above |
 | An 085 backup restored while tills run the 086 client | tills that ever reached 086 hold every executor operation (`OP_SCHEMA_UNAVAILABLE`) — nothing double-executes, nothing syncs | re-apply 086 with the runner before reopening the API |
-| Browser sessions without persistent storage | their unsynced work cannot be reconciled at all | document |
+| Browser sessions without persistent storage | their unsynced work cannot be reconciled at all (Phase 0 asks for persistent storage at start; the browser may refuse) | document |
 
-**Blocker (W8 + W10) — design for a future migration + client change (not implemented here):**
+**Blocker (W8 + W10) — design for a future migration + client change.** Phase 0 implemented the client-only parts of
+items 2–4 (journal; no automatic fence; owner decision); the server parts (1, the hold, generation, reconciliation RPCs)
+are migration 087+ (not implemented):
 
 1. **Server-side hold, not only client-side.** The restore procedure writes a new
    `restore_generation` (and the backup time) and sets a **restore hold**; while it is set, `op_execute`
@@ -274,7 +276,7 @@ is restored to the backup at the **same URL**. Observed:
    replacement flows), and shows a reconciliation screen.
 3. **A journal of applied operations on the till** (key, rpc, args, actor, server reply time), kept
    at least as long as the worst restore window (today: unbounded; with a weekly archive: ≥ 7 days)
-   — acknowledged queue rows are deleted today, so "applied after the backup" cannot be listed.
+   — acknowledged queue rows are deleted; since Phase 0 the journal (`opj:` records) keeps them, with the server's reply.
 4. **Reconciliation, owner-approved, server state not till clocks:** for each journal entry and each
    in-doubt/unknown operation, a **non-fencing** `op_status`; `not_found` = lost by the restore →
    **replay with the original key and actor** (nothing new minted) or record manually; keys the
@@ -289,9 +291,10 @@ reconciled or quarantined:
   after its queue is resolved.
 
 Every till is disconnected from the network for the whole restore (README §0 step 3). No till signs in or
-syncs before the owner-authorised reopening (README §R). A first drain fences (W10). After reopening,
-reconnect tills one at a time: reconciled tills first, quarantined ones only once resolved — each
-reconnecting till still drains and fences its in-doubt keys, so its reconciliation record must list them.
+syncs before the owner-authorised reopening (README §R). On builds before Phase 0 a first drain fences (W10). After
+reopening, reconnect tills one at a time: reconciled tills first, quarantined ones only once resolved. A Phase 0 till
+holds an in-doubt key the server has no record of for an owner (never fenced automatically); an older till still drains
+and fences its in-doubt keys, so its reconciliation record must list them.
 
 ## 7. What a correct 086 restore must preserve (proven by the 086 drill)
 

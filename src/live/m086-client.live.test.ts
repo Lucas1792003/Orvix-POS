@@ -269,6 +269,14 @@ describe.skipIf(!enabled)("086 Stage 1 client (real modules, real server)", () =
     await app.localDb.syncOutbox.update(held.a2.localId, { nextAttemptAt: undefined });
     const n0 = sales();
     await drain();
+    // W10 Phase 0: looked up READ-ONLY; the server has no record -> held for an owner, never fenced automatically
+    expect((await rowsOf()).find((r: any) => r.localId === held.a2.localId)).toMatchObject({ status: "conflict", heldReason: "reconciliation-required" });
+    expect(ledger(held.a2.idempotencyKey)).toBe("<none>");
+    expect(log.filter((l) => l.rpc === "op_status" && l.key === held.a2.idempotencyKey && l.fence === true)).toHaveLength(0);
+    // the owner's explicit decision (statement) stops it
+    await signInApp("admin", "ADMIN");
+    expect(await app.outbox.stopOnServer(held.a2.localId, "m086 B1: the owner established it never happened")).toBe("abandoned");
+    await signInApp("cashA");
     const row = (await rowsOf()).find((r: any) => r.localId === held.a2.localId);
     expect(row).toMatchObject({ status: "conflict", serverOutcome: "abandoned" });
     expect(ledger(held.a2.idempotencyKey)).toBe("abandoned/FENCED");
@@ -373,13 +381,14 @@ describe.skipIf(!enabled)("086 Stage 1 client (real modules, real server)", () =
     await drain();
     // the committed one: the server's own record names cashier A, so her lookup reconciles it (once, nothing resent)
     expect((await rowsOf()).some((x: any) => x.idempotencyKey === committedKey)).toBe(false);
-    // the never-arrived one: no actor anywhere -> held for an administrator
+    // the never-arrived one: the server has no record -> held for an owner (W10 Phase 0: never fenced automatically)
     expect((await rowsOf()).find((x: any) => x.idempotencyKey === neverKey))
-      .toMatchObject({ status: "conflict", fenceRequired: true, heldReason: "needs-administrator" });
+      .toMatchObject({ status: "conflict", fenceRequired: true, heldReason: "reconciliation-required" });
+    expect(ledger(neverKey)).toBe("<none>");
     expect(log.slice(logFrom).filter((l) => (l.rpc === "op_execute" || l.rpc === "complete_sale") && (l.key === neverKey || l.key === committedKey))).toHaveLength(0);
     await signInApp("admin", "ADMIN");
-    await app.localDb.syncOutbox.update(`legacy-${neverKey}`, { nextAttemptAt: undefined });
-    await drain();
+    // the owner's explicit decision; the server verifies the organisation from the operation's own arguments
+    expect(await app.outbox.stopOnServer(`legacy-${neverKey}`, "m086 B4b: owner checked, it never arrived")).toBe("abandoned");
     expect((await rowsOf()).find((x: any) => x.idempotencyKey === neverKey)).toMatchObject({ serverOutcome: "abandoned" });
     expect(ledger(neverKey)).toBe("abandoned/FENCED");
     expect(sql1(`SELECT coalesce(actor_id, '<null>') FROM idempotency_keys WHERE key = ${lit(neverKey)}::uuid`)).toBe("<null>");
@@ -703,9 +712,14 @@ describe.skipIf(!enabled)("086 Stage 1 client (real modules, real server)", () =
     const logFrom = log.length;
     await drain();
     expect(log.slice(logFrom).filter((l) => (l.rpc === "op_execute" || l.rpc === "complete_sale") && l.key === row.idempotencyKey)).toHaveLength(0);
+    expect(ledger(row.idempotencyKey)).toBe("<none>");                    // W10 Phase 0: not fenced automatically
+    expect((await rowsOf()).find((r: any) => r.localId === row.localId)).toMatchObject({ heldReason: "reconciliation-required" });
+    await signInApp("admin", "ADMIN");
+    expect(await app.outbox.stopOnServer(row.localId, "m086 F5: owner decision after checking the receipts")).toBe("abandoned");
+    await signInApp("cashA");
     expect(ledger(row.idempotencyKey)).toBe("abandoned/FENCED");
     expect(sales()).toBe(n0);
-    return { restored: "held (conflict + fenceRequired)", server: "abandoned/FENCED, never executed", serverSales: "unchanged" };
+    return { restored: "held (conflict + fenceRequired)", server: "held (not fenced automatically); the owner's stop -> abandoned/FENCED, never executed", serverSales: "unchanged" };
   });
 
   // ===================== PAYMENT-SAFETY AND SHARED-TILL PASS (real server) =====================
@@ -809,11 +823,11 @@ describe.skipIf(!enabled)("086 Stage 1 client (real modules, real server)", () =
     const row = (await rowsOf()).find((r: any) => r.status === "pending" && r.args.p_items[0].qty === 2 && r.actorId === st.ids.cashA);
     online(true);
     await signInApp("admin", "ADMIN");
-    expect(await app.outbox.confirmWithServer(row.localId)).toBe("undecided");
+    expect(await app.outbox.confirmWithServer(row.localId)).toBe("not-found");   // W10 Phase 0: read-only
     expect(ledger(row.idempotencyKey)).toBe("<none>");             // NOT fenced (it was authorised offline)
     const audit = (await app.localDb.syncState.toArray()).map((r: any) => { try { return JSON.parse(r.value); } catch { return {}; } })
       .filter((l: any) => l.event === "owner-action" && l.localId === row.localId);
-    expect(audit.some((l: any) => /never fenced/.test(l.detail))).toBe(true);
+    expect(audit.some((l: any) => /lookup only/.test(l.detail) && /not stopped/.test(l.detail))).toBe(true);
     await signInApp("cashA");
     const n0 = sales();
     await drain();
@@ -924,10 +938,18 @@ describe.skipIf(!enabled)("086 Stage 1 client (real modules, real server)", () =
     expect(sql1(`SELECT (ended_at IS NULL)::text FROM shifts WHERE id = ${lit(shiftId)}`)).toBe("true");
     for (const r of await rowsOf()) await app.localDb.syncOutbox.update(r.localId, { nextAttemptAt: undefined });
     await drain();
+    // W10 Phase 0: not found -> held for an owner; the close (depends on the sale's shift) still waits
+    expect(ledger(row.idempotencyKey)).toBe("<none>");
+    expect(log.filter((l) => l.key === close.idempotencyKey)).toHaveLength(0);
+    expect(sql1(`SELECT (ended_at IS NULL)::text FROM shifts WHERE id = ${lit(shiftId)}`)).toBe("true");
+    await signInApp("admin", "ADMIN");
+    expect(await app.outbox.stopOnServer(row.localId, "m086 S5: owner decision, the sale did not happen")).toBe("abandoned");
+    await signInApp("cashA");
+    await drain();
     expect(ledger(row.idempotencyKey)).toBe("abandoned/FENCED");
     expect(ledger(close.idempotencyKey)).toBe("committed/");
     expect(sql1(`SELECT (ended_at IS NOT NULL)::text FROM shifts WHERE id = ${lit(shiftId)}`)).toBe("true");
-    return { whileUndecided: "close not sent; shift still open", afterFence: "sale abandoned (never ran), then the close committed" };
+    return { whileUndecided: "close not sent; shift still open (also after the server said not found)", afterOwnerStop: "sale abandoned (owner's decision), then the close committed" };
   });
   // ===================== POST-CHECKPOINT FINANCIAL SAFETY (after d0390a1, real server) =====================
   const gateReached = async (name: string) => { for (let i = 0; i < 300 && !gates.has(name); i++) await delay(20); if (!gates.has(name)) throw new Error(`gate ${name} never reached`); };

@@ -211,6 +211,19 @@ const unreadableOnlineRecordSchema = z.object({
   }).passthrough(),
 });
 
+/** W8 Phase 0: the till's operation journal (stores/data/opJournal.ts) —
+ *  every financially significant operation it recorded, acknowledged ones
+ *  included, with the server's replies as received. Additive: absent in
+ *  older files; older tools ignore it. Evidence for an owner's
+ *  reconciliation after a server restore — never replayed by a tool. */
+const journalRecordSchema = z.object({
+  key: z.string(),
+  rpc: z.string(),
+  state: z.string(),
+  orgId: z.string().nullable(),
+  createdAt: z.string(),
+}).passthrough();
+
 export type QueueExportEntry = z.infer<typeof entrySchema>;
 
 const payloadSchema = z.object({
@@ -237,6 +250,9 @@ const payloadSchema = z.object({
   onlineOperations: z.array(onlineOperationSchema).default([]),
   /** Format 3: online-operation records the till could not read (raw). */
   unreadableOnlineRecords: z.array(unreadableOnlineRecordSchema).default([]),
+  journal: z.array(journalRecordSchema).default([]),
+  /** Rows the server no longer had at a later full load (continuity evidence). */
+  vanished: z.array(z.object({ key: z.string(), table: z.string(), detectedAt: z.string() }).passthrough()).default([]),
 });
 
 export type QueueExportPayload = z.infer<typeof payloadSchema>;

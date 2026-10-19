@@ -126,7 +126,7 @@ describe("write-ahead: the record exists before the request leaves", () => {
     expect(row.lastError).toMatch(/NOT recorded on this till/);
   });
 
-  it("CRASH MID-REQUEST, server WITH 086, request never arrived: fenced (abandoned), never executed; a late copy cannot run", async () => {
+  it("CRASH MID-REQUEST, server WITH 086, request never arrived: looked up read-only, held for an owner (W10 Phase 0) — never resent, never fenced automatically", async () => {
     fake.enableExecutor();
     setExecutorCapabilityForTests("available");
     const { get } = makeSaleStore();
@@ -138,12 +138,14 @@ describe("write-ahead: the record exists before the request leaves", () => {
 
     restart();
     makeSaleStore();
-    expect(await drainOutbox()).toBe("drained");
+    expect(await drainOutbox()).toBe("backoff");                    // waits for an owner's decision
     expect(fake.callsFor("op_execute")).toHaveLength(1); // never resent
-    expect(fake.callsFor("op_status").at(-1)?.args).toMatchObject({ p_key: key, p_fence: true, p_expected_actor_id: "user-1" });
+    expect(fake.callsFor("op_status").at(-1)?.args).toMatchObject({ p_key: key, p_fence: false, p_expected_actor_id: "user-1" });
     const [row] = await rows();
-    expect(row).toMatchObject({ status: "conflict", serverOutcome: "abandoned", inDoubt: false });
+    expect(row).toMatchObject({ status: "conflict", heldReason: "reconciliation-required", inDoubt: true, fenceRequired: true });
+    expect(row.serverOutcome).toBeUndefined();
     expect(fake.server.sales).toHaveLength(0);
+    expect(fake.server.idempotency.size).toBe(0);
     // the delayed original request: the legacy path and the executor both refuse it
     const legacy = await fake.rpc("complete_sale", args as Record<string, unknown>);
     // a UUIDv7 key is refused on the legacy path before anything else (086 idem_begin guard)
@@ -406,7 +408,7 @@ describe("H1: held / set-aside attempts are never invisible to a replacement che
     expect(fake.server.sales[0].idempotencyKey).not.toBe(row.idempotencyKey);
   });
 
-  it("a server decision ends it: a fenced (abandoned) attempt is no longer asked about", async () => {
+  it("W10 Phase 0: an undecided attempt (server has no record) is offered for replacement; entering it again fences the earlier one first — exactly one sale, linked in the journal", async () => {
     fake.enableExecutor();
     setExecutorCapabilityForTests("available");
     const first = makeSaleStore();
@@ -417,13 +419,20 @@ describe("H1: held / set-aside attempts are never invisible to a replacement che
     restart();
     makeSaleStore();
     await drainOutbox();
-    expect((await rows())[0]).toMatchObject({ serverOutcome: "abandoned" });
+    const [earlier] = await rows();
+    expect(earlier).toMatchObject({ heldReason: "reconciliation-required" });
     let asked = 0;
     registerOperationPrompt(async () => { asked += 1; return "new"; });
     const { get } = makeSaleStore();
     await get().createSale(saleInput());
-    expect(asked).toBe(0);
+    expect(asked).toBe(1);                                           // the person decided: a replacement
     expect(fake.server.sales).toHaveLength(1);
+    expect(await localDb.syncOutbox.get(earlier.localId)).toMatchObject({ serverOutcome: "abandoned" });
+    const { getJournalRecord } = await import("./opJournal");
+    const j = await getJournalRecord(earlier.idempotencyKey!);
+    expect(j).toMatchObject({ state: "abandoned" });
+    expect(j?.replacedBy).toBeTruthy();
+    expect(await getJournalRecord(j!.replacedBy!)).toMatchObject({ state: "committed", replaces: [earlier.idempotencyKey] });
   });
 });
 

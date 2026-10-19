@@ -61,16 +61,22 @@ function exportOf(over: Partial<QueueExportEntry>): QueueExportPayload {
     entries: [entry], provisionalIdMap: [], redactedFields: 0, reconciliationLog: [], onlineOperations: [],
   } as unknown as QueueExportPayload;
 }
-const run = (s: Server, p: QueueExportPayload) => replayExport(p, { target: ORIGIN, anonKey: "anon", accessToken: "t", fetchImpl: s.fetch });
+const run = (s: Server, p: QueueExportPayload, over: { fenceUnfound?: boolean } = {}) =>
+  replayExport(p, { target: ORIGIN, anonKey: "anon", accessToken: "t", fetchImpl: s.fetch, ...over });
 
 describe("recovery tool: an online attempt being SENT when exported is classified as the till classifies it", () => {
-  it("never authorised offline (staged: false), never reached the server: FENCED, never executed", async () => {
+  it("never authorised offline (staged: false), not on the server: looked up only — HELD, never fenced, never executed (W10 Phase 0); fenced only with --fence-unfound", async () => {
     const s = new Server();
     const r = await run(s, exportOf({}));
     expect(s.executed).toBe(0);
     expect(s.calls.filter((c) => c.rpc === "op_execute")).toHaveLength(0);
+    expect(s.ledger.get(KEY)).toBeUndefined();
+    expect(r.ops[0]).toMatchObject({ outcome: "held" });
+    expect(r.ops[0].detail).toMatch(/restore of the server/);
+    const f = await run(s, exportOf({}), { fenceUnfound: true });          // the owner's explicit decision
     expect(s.ledger.get(KEY)).toMatchObject({ state: "abandoned" });
-    expect(r.ops[0].outcome).toBe("abandoned");
+    expect(f.ops[0].outcome).toBe("abandoned");
+    expect(s.executed).toBe(0);
   });
 
   it("never authorised offline, it DID reach the server: reported already-applied, executed exactly once (by the till), never again", async () => {
@@ -81,12 +87,13 @@ describe("recovery tool: an online attempt being SENT when exported is classifie
     expect(s.executed).toBe(0);
   });
 
-  it("the CURRENT till's own interrupted online sale (write-ahead, being sent, no staged flag, first attempt): fenced like the till does — never executed", async () => {
+  it("the CURRENT till's own interrupted online sale (write-ahead, being sent, no staged flag, first attempt): held like the till holds it — never executed, never fenced without --fence-unfound", async () => {
     const s = new Server();
     const r = await run(s, exportOf({ staged: null, attempts: 0 }));
     expect(s.executed).toBe(0);
-    expect(s.ledger.get(KEY)).toMatchObject({ state: "abandoned" });
-    expect(r.ops[0].outcome).toBe("abandoned");
+    expect(s.ledger.get(KEY)).toBeUndefined();
+    expect(r.ops[0].outcome).toBe("held");
+    expect((await run(s, exportOf({ staged: null, attempts: 0 }), { fenceUnfound: true })).ops[0].outcome).toBe("abandoned");
   });
 
   it("authorisation that only the till could prove (an older close with nothing staged, in doubt): looked up only — never fenced, never executed; the run stops, exit 4", async () => {
@@ -146,8 +153,9 @@ describe("recovery tool: an online attempt being SENT when exported is classifie
   it("review-10 H1: a first online attempt already moved to 'pending' (write-ahead, no staged flag, no attempt recorded) is fenced like the till holds it — never replayed", async () => {
     const s = new Server();
     const r = await run(s, exportOf({ status: "pending", staged: null, attempts: 0, inDoubt: null }));
-    expect(r.ops[0].outcome).toBe("abandoned");
+    expect(r.ops[0].outcome).toBe("held");
     expect(s.executed).toBe(0);
+    expect(s.ledger.get(KEY)).toBeUndefined();
   });
 
   it("the ledger check (service key) is scoped to the export's own organisation — another organisation's use of the same key never makes a fresh run look 'already applied'", async () => {

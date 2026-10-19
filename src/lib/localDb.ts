@@ -125,6 +125,9 @@ export interface SyncOutboxEntry {
   // ---- G1 Stage 1 / migration 086 (recovery protocol). Additive only. ----
   /** The app user who created the operation (stamped when the row is built). */
   actorId?: string | null;
+  /** W8 Phase 0: the organisation the operation was created in (additive;
+   *  absent on rows of older builds — their journal records are unattributed). */
+  orgId?: string | null;
   /** Its local effects were staged under the offline rules (the operation
    *  was authorised to exist on this till without the server). */
   staged?: boolean;

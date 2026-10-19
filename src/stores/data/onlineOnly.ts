@@ -14,6 +14,7 @@ import { wasExported } from "../../lib/queueExport/exportRecord";
 import { classifyOnlineRecord, UNREADABLE_SET_ASIDE_PREFIX, unreadableInScope, type UnreadableOnlineRecord } from "../../lib/onlineOpRecord";
 export { classifyOnlineRecord, type UnreadableOnlineRecord };
 import { currentBackendOrigin } from "../../lib/backendOrigin";
+import { continuityWarning, journalKeyReconciliationRequired, journalOnline, journalReplacement, type JournalEvidence } from "./opJournal";
 
 // ----------------------------------------------------------------------
 // Online-only operations with an explicit, persisted identity (Batch 2A,
@@ -172,7 +173,11 @@ export function resetOnlineOnlyForTests(): void {
 }
 
 async function save(op: OnlineOperation): Promise<void> {
-  await localDb.syncState.put({ key: PREFIX + op.id, value: JSON.stringify(op), updatedAt: op.updatedAt });
+  // The record and the till's journal entry are written together (W8 Phase 0).
+  await localDb.transaction("rw", localDb.syncState, async () => {
+    await localDb.syncState.put({ key: PREFIX + op.id, value: JSON.stringify(op), updatedAt: op.updatedAt });
+    await journalOnline(op, "created");
+  });
 }
 
 /** The stored record as an operation, or null when this build cannot read it
@@ -185,7 +190,7 @@ const parseOp = (value: string | undefined): OnlineOperation | null => {
 /** Every stored record, readable or not. Reads fail CLOSED: an unreadable
  *  STORE throws (callers send nothing). */
 async function loadRecords(): Promise<{ ops: OnlineOperation[]; unreadable: UnreadableOnlineRecord[] }> {
-  const rows = await localDb.syncState.filter((e) => e.key.startsWith(PREFIX)).toArray();
+  const rows = await localDb.syncState.where("key").startsWith(PREFIX).toArray();
   const ops: OnlineOperation[] = [];
   const unreadable: UnreadableOnlineRecord[] = [];
   for (const row of rows) {
@@ -218,13 +223,18 @@ const mayBeSameOperation = (r: UnreadableOnlineRecord, name: string, scope: stri
  *  to store, or null to leave it untouched. Throws if the store fails. */
 async function transition<T>(
   id: string, decide: (stored: OnlineOperation | null) => { next: OnlineOperation | null; result: T },
+  event = "updated", evidence?: Omit<JournalEvidence, "at">,
 ): Promise<T> {
   return localDb.transaction("rw", localDb.syncState, async () => {
     const row = await localDb.syncState.get(PREFIX + id);
     let current: OnlineOperation | null = null;
     try { current = row ? parseOp(row.value) : null; } catch { current = null; }
     const { next, result } = decide(current);
-    if (next) await localDb.syncState.put({ key: PREFIX + id, value: JSON.stringify(next), updatedAt: next.updatedAt });
+    if (next) {
+      await localDb.syncState.put({ key: PREFIX + id, value: JSON.stringify(next), updatedAt: next.updatedAt });
+      // Same transaction: the journal follows every change of the record.
+      await journalOnline(next, event, next.status === "settled" ? evidence : undefined);
+    }
     return result;
   });
 }
@@ -263,7 +273,7 @@ const RANK = { client: 1, server: 2, owner: 2 } as const;
  *  record stays as it was — unresolved operations stay listed). */
 async function settle(
   op: OnlineOperation, outcome: NonNullable<OnlineOperation["outcome"]>,
-  by: "server" | "client" | "owner" = "server", attempt?: number,
+  by: "server" | "client" | "owner" = "server", attempt?: number, evidence?: Omit<JournalEvidence, "at">,
 ): Promise<boolean> {
   try {
     return await transition(op.id, (stored) => {
@@ -273,7 +283,7 @@ async function settle(
         return { next: null, result: false };            // a newer attempt exists: its outcome decides
       }
       return { next: { ...stored, status: "settled", outcome, decidedBy: by, updatedAt: new Date().toISOString() }, result: true };
-    });
+    }, `settled:${outcome}`, evidence ?? { source: by === "owner" ? "owner" : by === "client" ? "client" : "reply" });
   } catch (err) {
     console.error(`[sync] ${op.name}: could not record its settlement (it stays unresolved):`, err);
     return false;
@@ -290,7 +300,7 @@ async function claimAttempt(op: OnlineOperation): Promise<Claim> {
     if (!stored || stored.status !== "unresolved") return { next: null, result: { refused: stored } };
     const claimed: OnlineOperation = { ...stored, attempts: stored.attempts + 1, uncertain: true, updatedAt: new Date().toISOString() };
     return { next: claimed, result: { claimed } };
-  });
+  }, "attempt");
 }
 
 /** An attempt whose outcome is unknown: the operation is unresolved again
@@ -304,7 +314,7 @@ async function reopen(op: OnlineOperation, lastError: string): Promise<"reopened
         next: { ...stored, status: "unresolved", outcome: undefined, decidedBy: undefined, uncertain: true, lastError, updatedAt: new Date().toISOString() },
         result: "reopened" as const,
       };
-    });
+    }, "outcome-unknown");
   } catch {
     return "reopened";                                    // nothing written: it was unresolved before the attempt
   }
@@ -354,22 +364,22 @@ async function send(op: OnlineOperation, retries: number, fresh = false): Promis
   };
   if (!outcome.error && outcome.responseUnavailable) {
     // Applied on the server (086 ledger); the reply is not readable here.
-    await settle(claimed, "applied");
+    await settle(claimed, "applied", "server", undefined, { source: "reply", responseUnavailable: outcome.responseUnavailable });
     void verifiedReload();
     return outcome;
   }
   if (outcome.error && outcome.serverOutcome === "abandoned") {
-    await settle(claimed, "abandoned");
+    await settle(claimed, "abandoned", "server", undefined, { source: "reply", message: outcome.error.message.slice(0, 500), recordedOnServer: true });
     return outcome;
   }
   if (outcome.error && outcome.serverOutcome === "rejected") {
-    await settle(claimed, "refused");
+    await settle(claimed, "refused", "server", undefined, { source: "reply", code: outcome.error.code ?? null, message: outcome.error.message.slice(0, 500), recordedOnServer: true });
     return outcome;
   }
   if (!outcome.error) {
     const problem = replyProblem(claimed.name, outcome.data);
     if (problem) return keepPending(`the server's reply could not be read (${problem}).`, null);
-    await settle(claimed, "applied");
+    await settle(claimed, "applied", "server", undefined, { source: "reply", response: outcome.data });
     return outcome;
   }
   const { failure } = outcome.error;
@@ -414,7 +424,8 @@ async function decideOnServer(
   if (typeof key !== "string") return keepPending("it has no key to confirm on the server.", outcome.error);
   const { status, error } = await lookupOperation(op.name, key, { fence: true, actorId: op.userId, args: op.args });
   if (!error && status?.status === "abandoned") {
-    await settle(op, "abandoned");
+    // a fresh first attempt proven not applied: stopping its key is safe (nothing could have run)
+    await settle(op, "abandoned", "server", undefined, { source: "lookup", recordedOnServer: true, fencedByTill: status.fenced === true, fencedFor: "new-separate-operation" });
     return outcome;                                       // stopped on the server: it never runs
   }
   if (!error && status?.status === "rejected") {
@@ -549,6 +560,11 @@ async function run(
     // Without the record a lost reply could not be recovered: do not send.
     throw new Error(`Not sent: the operation could not be saved on this till (${err instanceof Error ? err.message : String(err)}). Try again.`);
   }
+  if (existing.length) {
+    const earlierKeys = existing.map((e) => e.args[IDEMPOTENCY_KEY_ARG]).filter((k): k is string => typeof k === "string");
+    await localDb.transaction("rw", localDb.syncState, () => journalReplacement(String(op.args[IDEMPOTENCY_KEY_ARG]), earlierKeys))
+      .catch((err) => console.error(`[sync] ${name}: could not link the replacement in the journal:`, err));
+  }
   return send(op, retries, true);
 }
 
@@ -556,6 +572,9 @@ async function run(
  *  "applied" if any of them happened, "blocked" if any cannot be decided
  *  now, "clear" when none happened (absent ones are fenced first). */
 async function settleEarlier(ops: OnlineOperation[]): Promise<"clear" | "applied" | "blocked"> {
+  // W10 Phase 0: never stop an earlier attempt on a server this till suspects
+  // was restored (it may have been applied there and lost by the restore).
+  if (await continuityWarning()) return "blocked";
   let applied = false;
   for (const op of ops) {
     if (isForeignOperation(op)) return "blocked";
@@ -569,7 +588,7 @@ async function settleEarlier(ops: OnlineOperation[]): Promise<"clear" | "applied
     } else if (status.status === "rejected") {
       await settle(op, "refused");
     } else if (status.status === "abandoned") {
-      await settle(op, "abandoned");
+      await settle(op, "abandoned", "server", undefined, { source: "lookup", recordedOnServer: true, fencedByTill: status.fenced === true, fencedFor: "replacement" });
     } else {
       return "blocked";
     }
@@ -627,6 +646,13 @@ export async function checkOnlineOperation(id: string): Promise<{ absent: boolea
     await settle(op, "refused");
   } else if (status?.status === "abandoned") {
     await settle(op, "abandoned");
+  } else if (status?.status === "not_found" && !isForeignOperation(op) && (op.attempts > 0 || op.uncertain)) {
+    // W10 Phase 0: sent (or possibly sent) and the server has no record of
+    // it — it may have been lost by a restore of the server. Nothing is
+    // stopped; the till's journal records that an owner must decide.
+    await localDb.transaction("rw", localDb.syncState, () => journalKeyReconciliationRequired(key,
+      "the server has no record of it (it may never have arrived, or a restore of the server lost it)"))
+      .catch(() => undefined);
   }
   return result;
 }
@@ -673,6 +699,10 @@ export async function markOnlineOperationVerified(id: string): Promise<void> {
   // own backend, the earlier key is first decided or stopped (fenced) on the
   // server, exactly as before a replacement. Only where no fence exists (no
   // 086, another or an unrecorded backend) does the owner's word close it.
+  // W10 Phase 0: not while this till suspects its server was restored.
+  if (isUnresolved(op) && (await continuityWarning())) {
+    throw new Error("This till has a server-continuity warning (the server may have been restored from an older backup). Review it on the Sync page first: this payment may have been applied there and lost. Nothing was changed.");
+  }
   const key = op.args[IDEMPOTENCY_KEY_ARG];
   if (isUnresolved(op) && !isForeignOperation(op) && typeof key === "string") {
     const { absent, status, error } = await lookupOperation(op.name, key, { fence: true, actorId: op.userId, args: op.args });
@@ -685,7 +715,8 @@ export async function markOnlineOperationVerified(id: string): Promise<void> {
         throw new Error("It could not be confirmed or stopped on the server (it may still be running). Nothing was changed — try again when the server answers.");
       }
       const outcome = status.status === "committed" ? "applied" : status.status === "rejected" ? "refused" : "abandoned";
-      if (!(await settle(op, outcome))) {
+      if (!(await settle(op, outcome, "server", undefined, outcome === "abandoned"
+        ? { source: "lookup", recordedOnServer: true, fencedByTill: status.fenced === true, fencedFor: "owner-verified" } : { source: "lookup" }))) {
         const now = (await loadAll()).find((o) => o.id === id);
         if (now?.status !== "settled") throw new Error("Its record could not be updated on this till; nothing was changed. Try again.");
       }
@@ -697,6 +728,11 @@ export async function markOnlineOperationVerified(id: string): Promise<void> {
     const now = (await loadAll()).find((o) => o.id === id);
     if (now?.status !== "settled") throw new Error("Its record could not be updated on this till; nothing was changed. Try again.");
   }
+}
+
+/** Every readable online-only record (the journal backfill reads them). */
+export async function allOnlineOperations(): Promise<OnlineOperation[]> {
+  return loadAll();
 }
 
 /** Tests / diagnostics: unresolved operations plus unreadable records. */

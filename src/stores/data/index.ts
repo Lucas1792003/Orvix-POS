@@ -6,6 +6,8 @@ import { useAppStore } from "../appStore";
 import { mergeProvisionalRows, persistSnapshotToLocal, readLocalSnapshot, type LocalSnapshot } from "./localSync";
 import { classifyLegacyQueue, countPendingOutbox, drainOutbox, registerOutboxReconciler, setNeedsReauth } from "./outbox";
 import { registerVerifiedReload } from "./verifiedReload";
+import { backfillJournal } from "./opJournal";
+import { allOnlineOperations } from "./onlineOnly";
 import { bootstrapDeltaCursors, pullDeltaChanges } from "./deltaSync";
 import { refreshInventoryIfNotLive } from "./inventoryRealtime";
 import { fetchAllRows, fetchAllRowsIn, fetchServerTime, type ReadResult, type Row } from "./fetchAll";
@@ -130,6 +132,10 @@ export const useDataStore = create<DataState>()((...args) => {
     // exists — the full load below replaces those rows with the server's
     // (M4). Local only; idempotent; the drain repeats it.
     await classifyLegacyQueue().catch((err) => console.error("[DB] Failed to classify the sync queue:", err));
+    // W8 Phase 0: every queued / unresolved operation already on this till
+    // gets its journal record (operations acknowledged before this build
+    // cannot be recovered — nothing is invented). Idempotent.
+    await backfillJournal(allOnlineOperations).catch((err) => console.error("[DB] Failed to backfill the operation journal:", err));
 
     // No point firing 27 requests that will just fail — leave whatever we
     // rendered from cache (or the "Loading data…" / Retry screen if this is
@@ -333,7 +339,12 @@ export const useDataStore = create<DataState>()((...args) => {
       // local mirror, and a persist still in flight would otherwise race
       // it (and used to clear every table, outbox included).
       try {
-        await persistSnapshotToLocal(snapshot, ledgerForSnapshot);
+        const who = useAuthStore.getState();
+        const meNow = who.currentUserId ? snapshot.users.find((u) => u.id === who.currentUserId) : undefined;
+        await persistSnapshotToLocal(snapshot, ledgerForSnapshot, {
+          userId: who.currentUserId ?? null, role: who.currentRole ?? null, orgId: who.currentOrgId ?? null, shopId: meNow?.shopId ?? null,
+          permissions: JSON.stringify([[...(meNow?.grantedPermissions ?? [])].sort(), [...(meNow?.revokedPermissions ?? [])].sort()]),
+        });
       } catch (err) {
         console.error("[DB] Failed to persist local cache:", err);
       }

@@ -73,7 +73,20 @@ async function prepareLocalState(): Promise<void> {
   }
 }
 
+/** W8 Phase 0: ask the browser / Electron to keep this profile's storage
+ *  (IndexedDB holds the queue and the operation journal) instead of evicting
+ *  it under storage pressure. Best effort; the answer is only logged. */
+function requestPersistentStorage(): void {
+  try {
+    const storage = typeof navigator !== "undefined" ? (navigator as Navigator & { storage?: { persist?: () => Promise<boolean> } }).storage : undefined;
+    void storage?.persist?.().then((granted) => { if (!granted) console.warn("[boot] persistent storage not granted: the browser may evict local data under storage pressure"); }, () => undefined);
+  } catch {
+    /* not available */
+  }
+}
+
 async function boot(): Promise<void> {
+  requestPersistentStorage();
   await prepareLocalState();
   const [{ default: App }, { useAuthStore }] = await Promise.all([
     import("./App"),

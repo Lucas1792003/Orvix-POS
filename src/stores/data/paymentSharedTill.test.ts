@@ -189,12 +189,12 @@ describe("shared till: what stays blocked, owner recovery, entries being sent", 
     as("admin-1");
     fake.setCaller("admin-1", true);
     actingRole = "ADMIN";
-    expect(await confirmWithServer(row.localId)).toBe("undecided");
+    expect(await confirmWithServer(row.localId)).toBe("not-found");                        // W10 Phase 0: read-only
     expect(fake.server.idempotency.get(row.idempotencyKey!)).toBeUndefined();               // not fenced
     expect(fake.callsFor("op_status").at(-1)?.args).toMatchObject({ p_key: row.idempotencyKey, p_fence: false });
     expect(await localDb.syncOutbox.get(row.localId)).toMatchObject({ status: "pending", staged: true });
     const audit = (await localDb.syncState.toArray()).filter((r) => r.key.startsWith("reconcile-log:") || /rlog/.test(r.key)).map((r) => JSON.parse(r.value ?? "{}"));
-    expect(audit.some((l) => l.event === "owner-action" && /confirm-with-server/.test(l.detail) && /never fenced/.test(l.detail))).toBe(true);
+    expect(audit.some((l) => l.event === "owner-action" && /confirm-with-server \(lookup only\)/.test(l.detail) && /not stopped/.test(l.detail))).toBe(true);
   });
 
   it("owner recovery: setting aside another cashier's unknown sale is audited as NOT cancelled and keeps its stock reservation", async () => {

@@ -1,5 +1,6 @@
 import { LEDGER_STATE_KEY } from "./stockLedger";
 import { localDb, SNAPSHOT_TABLE_NAMES, type StoredBusinessProfile } from "../../lib/localDb";
+import { recordVanished, SALES_LOAD_CAP, SNAPSHOT_SCOPE_KEY, vanishedRows } from "./opJournal";
 import type { DataState } from "./types";
 import type { BusinessProfile } from "../../types";
 
@@ -26,9 +27,37 @@ export type LocalSnapshot = Pick<DataState,
  */
 /** `stockLedger`: the serialized unresolved-effects ledger that describes
  *  `snapshot.inventory` — written in the SAME transaction (stockLedger.ts). */
-export async function persistSnapshotToLocal(snapshot: LocalSnapshot, stockLedger?: string): Promise<void> {
+/** `scope`: who the load was made for (user, role, organisation) — the
+ *  vanished-row check only compares two loads made for the same scope. */
+export async function persistSnapshotToLocal(
+  snapshot: LocalSnapshot, stockLedger?: string,
+  scope?: { userId: string | null; role: string | null; orgId: string | null; shopId?: string | null; permissions?: string },
+): Promise<void> {
   const snapshotTables = SNAPSHOT_TABLE_NAMES.map((name) => localDb.table(name));
   await localDb.transaction("rw", [...snapshotTables, localDb.syncMeta, localDb.syncState], async () => {
+    // W8 Phase 0: before the mirror is replaced, keep any sale / supplier
+    // payment this till had loaded from the server that the server no longer
+    // returns although the load covers it (opJournal.ts: evidence + the
+    // continuity warning) — same transaction as the replace.
+    // Only between two loads made for the SAME user, role and organisation:
+    // another user's load can legitimately show fewer rows (RLS scope).
+    // (user, role, organisation, shop and the user's permission grants: each changes what RLS shows)
+    const scopeKey = scope ? JSON.stringify([scope.userId, scope.role, scope.orgId, scope.shopId ?? null, scope.permissions ?? ""]) : null;
+    const previousScope = (await localDb.syncState.get(SNAPSHOT_SCOPE_KEY))?.value ?? null;
+    if (scopeKey && previousScope === scopeKey) {
+      const visibleShops = new Set(snapshot.shops.map((s) => s.id));
+      const [oldSales, oldItems, oldPayments] = await Promise.all([localDb.sales.toArray(), localDb.saleItems.toArray(), localDb.supplierPayments.toArray()]);
+      const lostSales = vanishedRows(oldSales, snapshot.sales, { cap: SALES_LOAD_CAP, visibleShops });
+      if (lostSales.length) {
+        const lost = new Set(lostSales.map((s) => s.id));
+        const itemsBySale = new Map<string, typeof oldItems>();
+        for (const i of oldItems) if (lost.has(i.saleId)) itemsBySale.set(i.saleId, [...(itemsBySale.get(i.saleId) ?? []), i]);
+        await recordVanished("sales", lostSales, (id) => itemsBySale.get(id) ?? [], scope?.orgId ?? null);
+      }
+      const lostPayments = vanishedRows(oldPayments, snapshot.supplierPayments, { visibleShops });
+      if (lostPayments.length) await recordVanished("supplierPayments", lostPayments, () => undefined, scope?.orgId ?? null);
+    }
+    if (scopeKey) await localDb.syncState.put({ key: SNAPSHOT_SCOPE_KEY, value: scopeKey, updatedAt: new Date().toISOString() });
     await Promise.all(snapshotTables.map((table) => table.clear()));
     await Promise.all([
       localDb.shops.bulkPut(snapshot.shops),

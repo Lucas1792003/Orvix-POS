@@ -1,4 +1,5 @@
 import { localDb, type SyncOutboxEntry } from "../../lib/localDb";
+import { useSyncStore } from "../syncStore";
 import { belongsToBackend, currentBackendOrigin } from "../../lib/backendOrigin";
 import type { InventoryMovement } from "../../types";
 import { classifyFailure, failureInfo } from "../../lib/failureClass";
@@ -9,12 +10,18 @@ import {
 } from "./outbox";
 import { callRpc, currentActorId, RpcError, stampOperationArgs, type OperationContext } from "./idempotentRpc";
 import { replyProblem } from "./replyShapes";
+import { getJournalRecord, journalReplacement } from "./opJournal";
 import type { LocalRowBatch } from "./localWrites";
 import {
   askAboutUnresolved, PendingConfirmationError, UnresolvedOperationError, type UnresolvedOperationInfo,
 } from "./operationPrompt";
 
 export { PendingConfirmationError } from "./operationPrompt";
+
+/** A sync-layer warning shown with the queue status (non-fatal). */
+const syncWarning = (message: string): void => {
+  try { useSyncStore.getState().setStatus({ lastTransientError: message }); } catch { /* status only */ }
+};
 
 // ----------------------------------------------------------------------
 // Write-ahead lifecycle for offline-capable operations (Batch 2A, plan v2
@@ -242,6 +249,17 @@ async function guardedRun<T>(spec: OfflineCapableSpec<T>, args: Record<string, u
         again.map(describeEntry),
       );
     }
+    // The till's journal links the replacement to the attempts it replaces —
+    // only once the replacement exists on this till (its own record).
+    const earlierKeys = twins.map((t) => t.idempotencyKey).filter((k): k is string => typeof k === "string");
+    try {
+      return await run(spec, args);
+    } finally {
+      if (await getJournalRecord(spec.op.idempotencyKey).catch(() => null)) {
+        await localDb.transaction("rw", localDb.syncState, () => journalReplacement(spec.op.idempotencyKey, earlierKeys))
+          .catch((err) => console.error(`[sync] ${spec.name}: could not link the replacement in the journal:`, err));
+      }
+    }
   }
   return run(spec, args);
 }
@@ -343,7 +361,17 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
     const result = await spec.applyOnline(outcome.data, localId);
     // Stock rows on disk with the ledger before the row goes.
     await flushStockCommit(localId).catch((err) => console.error(`[sync] ${spec.name}: stock mirror write failed:`, err));
-    await acknowledgeEntry(localId, []);
+    try {
+      // The queue row goes and the journal keeps the server's reply — together.
+      await acknowledgeEntry(localId, [], { source: "reply", response: outcome.data });
+    } catch (err) {
+      // The server committed it (its reply is applied above); the till could
+      // not record that durably (e.g. storage full). The queue row stays: it
+      // is confirmed later with its own key (answered from the server's
+      // ledger), never sent as a new operation.
+      console.error(`[sync] ${spec.name}: committed, but its acknowledgement could not be recorded on this till; kept for confirmation:`, err);
+      syncWarning(`A ${spec.name} was applied on the server, but this till could not record it (storage). It is kept and confirmed again with its key.`);
+    }
     notifyQueueChanged();
     return result;
   }
@@ -357,7 +385,7 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
   // staged, and never presented as a final refusal.
   if (!failure.retryable || failure.hold === "suspended" || failure.hold === "reauth" || failure.hold === "backend-version"
       || failure.klass === "DEPENDENCY" || failure.klass === "WRONG_ACTOR" || failure.klass === "NOT_RECORDED") {
-    await discardWriteAhead(localId, failure.klass);
+    await discardWriteAhead(localId, failure.klass, { serverOutcome: outcome.serverOutcome ?? null, code: error.code ?? null, message: error.message });
     throw error;
   }
 
@@ -417,7 +445,8 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
     throw new PendingConfirmationError(
       `Not recorded on this till: the server did not answer, so it may or may not have received this${
         err instanceof Error && err.message ? ` (${err.message})` : ""}. It will NOT be sent again: the till asks the server ` +
-      "what happened to it and stops it there if it never arrived. Check Sync before entering it again.",
+      "what happened to it. If the server has no record of it, it waits for an owner — it is not stopped automatically, and " +
+      "a delayed copy of this request may still arrive. Check Sync before entering it again.",
     );
   }
   throw notConfirmed("the server's reply was lost. It is shown on this till as unconfirmed.");

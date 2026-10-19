@@ -8,9 +8,12 @@
 // reply is lost, a refused lump sum), then the server is restored to the backup and the till goes
 // on. Every scenario is judged in PostgreSQL and in the till's IndexedDB.
 //
-// This test RECORDS what the current code does. Behaviour that breaks the recovery rules is named
-// "GAP" and asserted as it is today (so the test documents it); those gaps are the blockers in
-// docs/selfhost-migration/phase-g/disaster-recovery.md. Skipped unless DR_TILLS=1.
+// This test RECORDS what the current code does. W8/W10 Phase 0 (client-side safeguards): the till
+// keeps a journal of every financial operation (kept after acknowledgement), never fences an
+// operation the server has no record of without an owner's decision, and keeps the rows a restored
+// server no longer has as evidence (automatic sync pauses until an owner acknowledges). What Phase 0
+// still cannot do is named "GAP" and asserted as it is (the remaining blockers in
+// docs/selfhost-migration/phase-g/disaster-recovery.md). Skipped unless DR_TILLS=1.
 // ---------------------------------------------------------------------------
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import "fake-indexeddb/auto";
@@ -126,6 +129,7 @@ describe.skipIf(!enabled)("offline tills vs a server restored to an older backup
       prompt: await import("../stores/data/operationPrompt"),
       origin: await import("../lib/backendOrigin"),
       lump: await import("../features/suppliers/lumpSumOutcome"),
+      journal: await import("../stores/data/opJournal"),
     };
     app.prompt.registerOperationPrompt(async () => "cancel");
     await signInApp("cashA", "CASHIER");
@@ -145,7 +149,9 @@ describe.skipIf(!enabled)("offline tills vs a server restored to an older backup
 
   T("R1", "after the backup: an online sale (recorded, reply received); a sale whose reply is LOST (committed); an offline sale (queued, never sent)", async () => {
     await app.useDataStore.getState().createSale(sale(1, 1100));
-    saleIds.s1 = sql1(`SELECT id FROM sales WHERE shift_id = ${lit(shiftId)} AND total_mmk = 1100`);
+    // the server prices the sale itself (price levels): identify S1 as the newest sale of the shift
+    saleIds.s1 = sql1(`SELECT id FROM sales WHERE shift_id = ${lit(shiftId)} ORDER BY created_at DESC, id DESC LIMIT 1`);
+    expect(saleIds.s1).toMatch(/^sale-/);                           // never an empty id (the checks below would pass vacuously)
     captureNext = { rpc: "op_execute", target: "complete_sale" };
     await app.useDataStore.getState().createSale(sale(1, 1200)).catch(() => undefined);
     k.s2 = [...lost][0];
@@ -194,38 +200,55 @@ describe.skipIf(!enabled)("offline tills vs a server restored to an older backup
     return { restored: "to the backup", lost: "sale S1, sale S2, lump sum L1 (and the L2 refusal) are gone from the server" };
   });
 
-  T("R4", "GAP: the till cannot tell that its server was restored — same backend origin, nothing held, no reconciliation asked", async () => {
+  T("R4", "PARTIAL (Phase 0): the origin still looks identical, but the first full load from the restored server sees that a sale it had loaded is gone — kept as evidence; automatic sync pauses", async () => {
     await signInApp("cashA", "CASHIER");
     expect(app.origin.currentBackendOrigin()).toBe(new URL(cfg.url).origin);
-    const quarantined = (await app.localDb.syncOutbox.toArray()).filter((r: any) => r.status === "quarantined");
-    expect(quarantined).toHaveLength(0);
-    return { detection: "none: the origin is the build-time URL; a restored server at the same URL looks identical" };
+    await app.useDataStore.getState().loadData({ force: true });
+    const vanished = await app.journal.listVanished();
+    expect(vanished.some((v: any) => v.table === "sales" && v.row?.id === saleIds.s1)).toBe(true);
+    const warning = await app.journal.continuityWarning();
+    expect(warning).toBeTruthy();
+    const mark = log.length;
+    expect(await drain()).toBe("backoff");                                                  // nothing sent or looked up
+    expect(log.slice(mark).filter((l) => l.rpc === "op_execute" || l.rpc === "op_status")).toHaveLength(0);
+    return { detection: `continuity warning: ${warning.reason}`, gap: "a restore that loses nothing this till had LOADED is still invisible to Phase 0" };
   });
 
-  T("R5", "GAP: a sale recorded after the backup (reply received) is silently lost by the restore — the server no longer has it and nothing on the till or the server reports it", async () => {
-    const shown = (await app.localDb.sales.toArray()).some((x: any) => x.id === saleIds.s1)
-      || (app.useDataStore.getState().sales ?? []).some((x: any) => x.id === saleIds.s1);
+  T("R5", "W8 Phase 0: the sale recorded after the backup is still lost on the server — but the till's journal keeps its key, its request and the server's reply (receipt, total) as evidence", async () => {
     expect(sql1(`SELECT count(*) FROM sales WHERE id = ${lit(saleIds.s1)}`)).toBe("0");                     // the server lost it
+    const { records } = await app.journal.listJournal();
+    const j = records.find((r: any) => r.rpc === "complete_sale" && (r.evidence?.response as any)?.sale?.id === saleIds.s1);
+    expect(j).toBeTruthy();
+    expect(j.state).toBe("committed");
+    expect(j.args?.p_idempotency_key).toBe(j.key);
     const queued = (await app.localDb.syncOutbox.toArray()).filter((r: any) => r.status !== "reconciled");
-    expect(queued.some((r: any) => (r.args?.p_items?.length && r.args?.p_paid_mmk === 1100))).toBe(false);   // nothing queued for it
-    const unresolved = await app.onlineOnly.listUnresolvedOnlineOperations();
-    expect(unresolved.some((o: any) => o.name === "complete_sale")).toBe(false);                            // nothing unresolved for it
-    return { server: "absent", till: shown ? "still shows it as recorded" : "no local copy left", signal: "none: no queue entry, no unresolved operation, no warning" };
+    expect(queued.some((r: any) => r.idempotencyKey === j.key)).toBe(false);              // not resent: an owner reconciles it
+    return { server: "absent", till: `journal: committed, receipt ${(j.evidence.response as any).sale?.receiptNo ?? "?"}, key kept`, gap: "restoring it on the server is not automated (Phase 1)" };
   });
 
-  T("R6", "the in-doubt sale is NOT resent: its key is stopped on the restored server (fenced) — GAP: that sale WAS committed before the restore, so it is now recorded nowhere and the till files it as 'stopped'; the offline sale is sent (expected)", async () => {
+  T("R6", "W10 Phase 0: after the owner acknowledges the warning, the in-doubt sale is looked up READ-ONLY and held for an owner — never fenced, never resent; the offline sale is sent", async () => {
     lost.clear();
     const n0 = salesOfShift();
+    await signInApp("cashA", "ADMIN");                                                     // the owner reviews the warning
+    await app.journal.acknowledgeContinuity(st.ids.cashA, "dr drill: server restored to the backup; reconciliation pending");
+    await signInApp("cashA", "CASHIER");
     const mark = log.length;
     await drain();
     const after = log.slice(mark);
     expect(after.filter((l) => l.key === k.s2 && l.rpc === "op_execute")).toHaveLength(0);   // never resent
-    expect(after.some((l) => l.key === k.s2 && l.rpc === "op_status")).toBe(true);           // asked, then stopped
-    expect(ledger(k.s2)).toBe("abandoned/FENCED");
+    expect(after.some((l) => l.key === k.s2 && l.rpc === "op_status")).toBe(true);           // asked (read-only)
+    expect(ledger(k.s2)).toBe("<none>");                                                    // NOT fenced
     const row = (await app.localDb.syncOutbox.toArray()).find((r: any) => r.idempotencyKey === k.s2);
+    const j2 = await app.journal.getJournalRecord(k.s2);
+    expect(row?.heldReason).toBe("reconciliation-required");
+    expect(j2?.state).toBe("reconciliation-required");
     expect(ledger(k.s3)).toBe("committed/");
     expect(salesOfShift()).toBe(n0 + 1);
-    return { s2: `not resent; fenced on the restored server; till row: ${row ? `${row.status}/${row.serverOutcome ?? "-"}` : "gone"} — the sale taken before the restore is lost`, s3: "sent once (never reached the server before)" };
+    return {
+      s2: `not resent, not fenced; till row: ${row ? `${row.status}/${row.heldReason ?? "-"}` : "gone"}; journal: ${j2?.state}`,
+      s3: "sent once (never reached the server before)",
+      gap: "the owner still decides by hand (re-enter it, or Stop on server); nothing restores it automatically",
+    };
   });
 
   T("R7", "the unknown lump sum (online-only; never part of the queue drain) stays unknown and blocks new supplier payments; Check with server answers 'no decision' (the restored server never saw it)", async () => {
@@ -238,13 +261,18 @@ describe.skipIf(!enabled)("offline tills vs a server restored to an older backup
     const res = await app.lump.checkPendingLumpSum(state.ops[0].id);
     expect(res.kind).toBe("unknown");
     expect(lumpRows()).toBe("0:0");
-    return { l1: `still unknown and blocking (${res.reason})`, server: "no payment", note: "'Send the same payment again' (same key) would execute it on the restored server — that IS the correct recovery for a payment the restore lost, but today nothing tells the cashier or owner a restore happened, so it is not a reconciled decision" };
+    expect(ledger(k.l1)).toBe("<none>");                                                    // a Check never fences
+    const j = await app.journal.getJournalRecord(k.l1);
+    expect(j?.state).toBe("reconciliation-required");
+    return { l1: `still unknown and blocking (${res.reason}); journal: ${j?.state}`, server: "no payment", note: "'Send the same payment again' (same key) would execute it on the restored server — the correct recovery for a payment the restore lost, now an owner's reconciled decision (journal + continuity warning)" };
   });
 
   T("R8", "the refused lump sum stays final on the till (never resent) although the server no longer holds its refusal", async () => {
     const refused = (await app.localDb.syncState.toArray()).filter((r: any) => r.key.startsWith("online-op:")).map((r: any) => JSON.parse(r.value)).filter((o: any) => o.outcome === "refused");
     expect(refused.length).toBeGreaterThan(0);
     for (const o of refused) expect(log.slice(restoreMark).filter((l) => l.key === o.args.p_idempotency_key && l.rpc === "op_execute")).toHaveLength(0);
-    return { l2: "settled refused on the till; never sent again after the restore" };
+    const j = await app.journal.getJournalRecord(k.l2);
+    expect(j).toMatchObject({ state: "rejected", evidence: { recordedOnServer: true } });
+    return { l2: "settled refused on the till; never sent again after the restore; the journal keeps the refusal the server no longer has", gap: "re-recording the lost tombstone on the server is Phase 1" };
   });
 });

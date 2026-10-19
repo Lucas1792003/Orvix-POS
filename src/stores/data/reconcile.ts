@@ -28,6 +28,7 @@
 // ----------------------------------------------------------------------
 import { localDb, RECONCILE_LOG_PREFIX, type SyncOutboxEntry } from "../../lib/localDb";
 import { newId } from "../../lib/id";
+import { journalOwner } from "./opJournal";
 import { canonicalJson } from "../../lib/queueExport/format";
 import { entryDigest, recordDigest } from "../../lib/reconcile/digest";
 import { isReconcilableStatus, recordConsistencyProblem, validateResolution, type ResolutionInput } from "../../lib/reconcile/policy";
@@ -128,7 +129,7 @@ export async function reconcileOutboxEntry(localId: string, input: ReconcileInpu
     const legacyServer = !/^[0-9a-f]{8}-[0-9a-f]{4}-7/i.test(row.idempotencyKey ?? "") && executorCapability() === "absent";
     if (!legacyServer) {
       throw new ReconcileError("undecided",
-        "The server has not decided this operation yet, so it could still be applied. Use \"Confirm with server\" first: it is stopped there if it never arrived, or recorded if it did. Then export again and reconcile.");
+        "The server has not decided this operation yet, so it could still be applied. Use \"Confirm with server\" first (it is recorded here if it did arrive); if the server has no record of it, decide with \"Stop on server\" (an owner statement — it may have been lost by a restore of the server). Then export again and reconcile.");
     }
   }
 
@@ -198,6 +199,8 @@ export async function reconcileOutboxEntry(localId: string, input: ReconcileInpu
       detail: `${record.resolution}${record.serverRef ? ` -> sale ${record.serverRef.saleId}${record.serverRef.receiptNo ? ` (${record.serverRef.receiptNo})` : ""}` : ""}; check ${record.check.result}; was ${record.statusBefore}; ${record.reason.slice(0, 200)}`,
     };
     await localDb.syncState.put({ key: `${RECONCILE_LOG_PREFIX}${line.id}`, value: JSON.stringify(line), updatedAt: line.at });
+    // The owner's documented outcome in the till's journal (same transaction).
+    await journalOwner(next, `reconciled:${record.resolution}`, line.detail, true);
     return next;
   });
   void refreshSyncStatus();

@@ -24,7 +24,7 @@ vi.mock("../authStore", async () => {
 import { fakeSupabase as fake } from "./testing/fakeSupabase";
 import { localDb, RECONCILE_LOG_PREFIX } from "../../lib/localDb";
 import {
-  classifyLegacyQueue, confirmWithServer, enqueueOutbox, recoverStrandedSyncing, restoreSetAsideEntry, retryOutboxEntry, simulateNewAppInstanceForTests,
+  classifyLegacyQueue, confirmWithServer, enqueueOutbox, recoverStrandedSyncing, restoreSetAsideEntry, retryOutboxEntry, simulateNewAppInstanceForTests, stopOnServer,
 } from "./outbox";
 import { setExecutorCapabilityForTests } from "./idempotentRpc";
 import { registerVerifiedReload } from "./verifiedReload";
@@ -105,7 +105,7 @@ describe("2. unreadable financial records never disappear", () => {
   });
 
   it("an IndexedDB read error: nothing is sent, and the count fails (the UI shows a read error, never 'none')", async () => {
-    vi.spyOn(localDb.syncState, "filter").mockImplementation(() => { throw new Error("IDB read failed"); });
+    vi.spyOn(localDb.syncState, "where").mockImplementation(() => { throw new Error("IDB read failed"); });
     await expect(callOnlineOnly("pay_supplier_lump_sum", payArgs, { retries: 0 })).rejects.toThrow(/could not check/);
     expect(executions()).toBe(0);
     vi.restoreAllMocks();
@@ -270,14 +270,18 @@ describe("4. one recovery rule for every path", () => {
     expect(await restoreSetAsideEntry(r.localId)).toMatchObject({ status: "conflict", fenceRequired: true });
   });
 
-  it("CONFIRM WITH SERVER on an authorised Batch 2A row (staged records): looked up, NEVER fenced; on one never authorised: fenced", async () => {
+  it("CONFIRM WITH SERVER is read-only (W10 Phase 0): authorised or not, not found stops nothing; only the owner's explicit stop fences one never authorised", async () => {
     actingRole = "ADMIN";
     const a = await legacyRow({ status: "archived", statusBeforeArchive: "conflict", inDoubt: true, provisional: [{ table: "sales", ids: ["sale-local-4"] }] });
-    expect(await confirmWithServer(a.localId)).toBe("undecided");
+    expect(await confirmWithServer(a.localId)).toBe("not-found");
+    expect(fake.server.idempotency.get(a.idempotencyKey!)).toBeUndefined();
+    await expect(stopOnServer(a.localId, "authorised offline, owner wants it stopped")).rejects.toThrow(/authorised offline/);
     expect(fake.server.idempotency.get(a.idempotencyKey!)).toBeUndefined();
     await localDb.syncOutbox.clear();
     const b = await legacyRow({ status: "archived", statusBeforeArchive: "conflict", inDoubt: true, provisional: [] });
-    expect(await confirmWithServer(b.localId)).toBe("abandoned");
+    expect(await confirmWithServer(b.localId)).toBe("not-found");
+    expect(fake.server.idempotency.get(b.idempotencyKey!)).toBeUndefined();
+    expect(await stopOnServer(b.localId, "owner checked: this attempt never happened")).toBe("abandoned");
   });
 
   it("a STRANDED Batch 2A close (being sent, a later attempt, nothing staged) with the local shift row carrying its key: authorised — resent, not fenced; without that proof: held", async () => {

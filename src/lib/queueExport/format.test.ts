@@ -26,6 +26,7 @@ const payload = (entries: QueueExportEntry[] = [entry({})]): QueueExportPayload 
   tillId: "till-abc123", backendHost: "pos.example.test",
   session: { userId: "user-1", orgId: "org-1", shopId: "shop-1", role: "CASHIER" },
   entries, provisionalIdMap: [], redactedFields: 0, reconciliationLog: [], onlineOperations: [], unreadableOnlineRecords: [],
+  journal: [], vanished: [],
 });
 
 async function flipCiphertextByte(text: string): Promise<string> {
