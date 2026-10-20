@@ -7,7 +7,7 @@ import {
 } from "./idempotentRpc";
 import { replyProblem } from "./replyShapes";
 import { verifiedReload } from "./verifiedReload";
-import { askAboutUnresolved, UnresolvedOperationError, type UnresolvedOperationInfo } from "./operationPrompt";
+import { askAboutUnresolved, SessionEndedError, UnresolvedOperationError, type UnresolvedOperationInfo } from "./operationPrompt";
 import { useAuthStore } from "../authStore";
 import { blockingEarlierWork, drainOutbox, isOwnerSession, ownerAudit } from "./outbox";
 import { wasExported } from "../../lib/queueExport/exportRecord";
@@ -477,12 +477,20 @@ export async function callOnlineOnly(
 
   // A double click acts once.
   const flightKey = `${scope}|${fingerprint}`;
+  // fix 3: who asked. A reply that arrives after a sign-out / account switch
+  // is settled as usual (its record, the journal) but never handed back to be
+  // applied to the next session's screen and mirror.
+  const askedBy = useAuthStore.getState().currentUserId;
+  const sameSession = (outcome: RpcOutcome): RpcOutcome => {
+    if (!outcome.error && useAuthStore.getState().currentUserId !== askedBy) throw new SessionEndedError(name);
+    return outcome;
+  };
   const running = inFlight.get(flightKey);
-  if (running) return running;
+  if (running) return running.then(sameSession);
   const promise = run(name, args, fingerprint, scope, retries, options.now ?? Date.now())
     .finally(() => inFlight.delete(flightKey));
   inFlight.set(flightKey, promise);
-  return promise;
+  return promise.then(sameSession);
 }
 
 

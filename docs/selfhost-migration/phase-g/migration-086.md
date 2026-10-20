@@ -585,6 +585,22 @@ rollback → re-apply with live clients and two organisations (`tools/m086-verif
 `rollback` part: R.5 — one key in two organisations stays two operations,
 a pre-074 key stays refused everywhere, on the rolled-back `idem_begin`).
 
+**Never re-run 086 once 087 is installed** (audit 2026-10-20, reproduced in
+`supabase/tests/m086-rerun/run.sh`). 086's header says "FORWARD RECOVERY:
+idempotent; re-run" — that holds only before 087 (or after an 087 rollback).
+Its grant step re-owns and revokes **every** `public.op_%` function, so on an
+087 database a superuser re-run silently hands `op_execute_v87` /
+`op_status_v87` to `postgres`, removes `authenticated` EXECUTE (every v87 till
+is refused every operation), re-grants the prune to `service_role` and leaves
+087's function registry drifted. As `postgres` it stops at 087's DDL guard
+only when psql stops at the first error; without `ON_ERROR_STOP` the later
+GRANT hands the prune back to `service_role`. A manual **autocommit** re-run
+stays unsafe even with the guard (086 drops and re-adds the ledger's state
+CHECK in two statements). Protections: `apply-migrations.sh` refuses 086 whenever 087 objects
+exist (fact `has_v87`), and the provisional `PSAFE-A` event trigger refuses
+the damaging statements even for a manual superuser `psql` run. 086 itself is
+not edited (recorded sha256, verified digests).
+
 **Never:** restore 062's prune body (it deletes tombstones and re-opens
 refused keys); re-run ANY migration 062–085 once 086 is applied — their
 key-only `idem_begin` / `idem_finish` over the per-organisation ledger would

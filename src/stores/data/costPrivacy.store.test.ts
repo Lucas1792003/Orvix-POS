@@ -163,6 +163,10 @@ describe("session change during a full load (review M1)", () => {
     });
     signedInAs("u-admin");
     await load();
+    // fix 3: the overtaken load is discarded entirely and the cashier's own
+    // load runs (it reads no cost table); wait for that one to finish
+    await vi.waitFor(() => expect(useDataStore.getState().isLoaded && !useDataStore.getState().isLoading).toBe(true));
+    await useDataStore.getState().loadData(); // joins nothing left in flight
     expect(useDataStore.getState().products).toHaveLength(1);
     expect(memCost()).toEqual(NONE);
     await vi.waitFor(async () => expect(await localDb.products.count()).toBe(1));

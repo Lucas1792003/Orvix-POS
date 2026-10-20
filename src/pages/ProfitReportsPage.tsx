@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { stockValuationRows, stockValuationTotals } from "../features/reports/stockValuation";
 import { useAuthStore } from "../stores/authStore";
 import { useAppStore } from "../stores/appStore";
 import { useDataStore } from "../stores/dataStore";
@@ -80,31 +81,11 @@ export const ProfitReportsPage = () => {
     }));
   }, [byShop.state, reportShopIds, shops]);
 
-  // Calculate stock valuation
-  const stockValuation = useMemo(() => {
-    const result: { productId: string; productName: string; totalQty: number; retailValue: number; costValue: number }[] = [];
-
-    products.forEach((product) => {
-      let totalQty = 0;
-      shops.forEach((shop) => {
-        if (effectiveShopId && shop.id !== effectiveShopId) return;
-        const inv = inventory.find((i) => i.shopId === shop.id && i.productId === product.id);
-        totalQty += inv?.qtyBaseUnits ?? 0;
-      });
-
-      if (totalQty > 0) {
-        result.push({
-          productId: product.id,
-          productName: product.name,
-          totalQty,
-          retailValue: totalQty * product.priceMmk,
-          costValue: totalQty * (product.costMmk ?? 0),
-        });
-      }
-    });
-
-    return result.sort((a, b) => b.retailValue - a.retailValue);
-  }, [products, inventory, shops, effectiveShopId]);
+  // Stock valuation (fix 4: a product without a known cost is unavailable, not 0)
+  const stockValuation = useMemo(
+    () => stockValuationRows(products, inventory, shops, effectiveShopId),
+    [products, inventory, shops, effectiveShopId],
+  );
 
   // Calculate transfer summary (borrowed vs lent)
   const transferSummary = useMemo(() => {
@@ -178,10 +159,12 @@ export const ProfitReportsPage = () => {
     const avgMargin = totalProfit !== null && totalRevenue ? (totalProfit / totalRevenue) * 100 : null;
     const unanswered = profitByShop.length - ok.length;
 
-    const totalRetailValue = stockValuation.reduce((sum, s) => sum + s.retailValue, 0);
-    const totalCostValue = stockValuation.reduce((sum, s) => sum + s.costValue, 0);
+    const valuation = stockValuationTotals(stockValuation);
+    const totalRetailValue = valuation.retail;
+    const totalCostValue = valuation.cost;
+    const costMissing = valuation.costMissing;
 
-    return { totalRevenue, totalCost, totalProfit, avgMargin, unanswered, totalRetailValue, totalCostValue };
+    return { totalRevenue, totalCost, totalProfit, avgMargin, unanswered, totalRetailValue, totalCostValue, costMissing };
   }, [profitByShop, stockValuation]);
 
   const exportProfitReport = () => {
@@ -206,7 +189,7 @@ export const ProfitReportsPage = () => {
       product: s.productName,
       quantity: s.totalQty,
       retail_value: s.retailValue,
-      cost_value: s.costValue,
+      cost_value: s.costValue === null ? "unavailable" : s.costValue,
     })));
   };
 
@@ -336,7 +319,12 @@ export const ProfitReportsPage = () => {
             </div>
             <div className="bg-slate-50 rounded-lg p-4">
               <div className="text-sm text-slate-500">Total Cost Value</div>
-              <div className="text-xl font-bold text-slate-900">MMK {totals.totalCostValue.toLocaleString()}</div>
+              <div className="text-xl font-bold text-slate-900">{money(totals.totalCostValue)}</div>
+              {totals.costMissing > 0 && (
+                <div className="mt-1 text-xs text-amber-700">
+                  Unavailable: {totals.costMissing} product{totals.costMissing === 1 ? " has" : "s have"} no cost recorded.
+                </div>
+              )}
             </div>
           </div>
 
@@ -361,9 +349,9 @@ export const ProfitReportsPage = () => {
                     <td className="py-3">{row.productName}</td>
                     <td className="py-3 text-right">{row.totalQty}</td>
                     <td className="py-3 text-right">MMK {row.retailValue.toLocaleString()}</td>
-                    <td className="py-3 text-right">MMK {row.costValue.toLocaleString()}</td>
+                    <td className="py-3 text-right">{money(row.costValue)}</td>
                     <td className="py-3 text-right text-green-600">
-                      MMK {(row.retailValue - row.costValue).toLocaleString()}
+                      {money(row.costValue === null ? null : row.retailValue - row.costValue)}
                     </td>
                   </tr>
                 ))}

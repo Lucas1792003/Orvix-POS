@@ -175,6 +175,11 @@ export async function pullDeltaChanges(
 ): Promise<DeltaPullResult> {
   const changes: Partial<LocalSnapshot> = {};
   let hadErrors = false;
+  // Whose pull this is (fix 3): a page that arrives after a sign-out or an
+  // account switch belongs to the previous session — never mirrored, never
+  // shown, its cursor not advanced.
+  const pullUserId = useAuthStore.getState().currentUserId;
+  const sessionChanged = () => useAuthStore.getState().currentUserId !== pullUserId;
 
   // Server clock before any page: the upper bound for every cursor (see
   // COMMIT_LAG_MS). Unavailable → cursors advance to the last row as before.
@@ -231,10 +236,21 @@ export async function pullDeltaChanges(
           break;
         }
         const rows = await withPermittedCost(table, raw.map(mapper), currentState);
+        if (sessionChanged()) {
+          hadErrors = true;
+          return;
+        }
         merged = mergeById(merged, rows);
         pulled += rows.length;
         // Mirror first, cursor second: a crash in between re-reads this page.
         await localTable.bulkPut(rows);
+        if (sessionChanged()) {
+          // signed out while this page was being written: scrub it again
+          const { NO_VIEWER, scrubLocalSensitiveCache } = await import("./sensitiveCache");
+          await scrubLocalSensitiveCache(NO_VIEWER).catch(() => undefined);
+          hadErrors = true;
+          return;
+        }
         at = last.updated_at;
         afterId = last.id;
         await localDb.syncMeta.put({ table, lastPulledAt: at, lastPulledId: afterId });
@@ -249,6 +265,7 @@ export async function pullDeltaChanges(
     }),
   );
 
+  if (sessionChanged()) return { changes: {}, hadErrors: true };
   return { changes, hadErrors };
 }
 

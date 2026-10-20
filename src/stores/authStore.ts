@@ -616,16 +616,22 @@ export const useAuthStore = create<AuthState>()((set) => ({
     // -> authStore).
     const { useDataStore } = await import("./dataStore");
     useDataStore.setState({ isLoaded: false, isLoading: false, loadError: null });
-    // P-4: purchase cost / COGS must not outlive the session that was allowed
-    // to see it (the next person on this device may not be). Only the cost
-    // fields are removed — offline sales, the outbox and its journal stay.
-    const { scrubLocalCostCache, stripProductCost, stripUnitCost, stripLineCost } = await import("./data/costPrivacy");
+    // P-4 / fix 3: purchase cost, purchase-order and supplier-payment money
+    // and audit messages must not outlive the session that was allowed to
+    // see them (the next person on this device may not be). In memory they
+    // go; on disk only those fields of rows the server sent are removed —
+    // offline sales, queued operations (their rows included), the outbox and
+    // the journal stay. A load still running for this session is discarded
+    // (stores/data/index.ts), so it cannot write them back.
+    const { stripProductCost, stripUnitCost, stripLineCost } = await import("./data/costPrivacy");
+    const { NO_VIEWER, scrubLocalSensitiveCache } = await import("./data/sensitiveCache");
     useDataStore.setState((s) => ({
       products: s.products.map(stripProductCost),
       productUnits: s.productUnits.map(stripUnitCost),
       saleItems: s.saleItems.map(stripLineCost),
+      purchaseOrders: [], purchaseOrderItems: [], supplierPayments: [], auditLogs: [],
     }));
-    await scrubLocalCostCache().catch((err) => console.error("[auth] cost scrub on logout failed:", err));
+    await scrubLocalSensitiveCache(NO_VIEWER).catch((err) => console.error("[auth] sensitive cache scrub on logout failed:", err));
   },
 
   requestAdminCode: async () => {

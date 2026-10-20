@@ -73,14 +73,16 @@ const sales: Sale[] = [
   sale({ id: "S5", totalMmk: 1000, createdAt: DAY(18) }),
   sale({ id: "S6", shopId: "shop-b", totalMmk: 1000, createdAt: DAY(19) }),
 ];
+// Every line carries the cost at the moment of sale (as complete_sale records
+// it): A 600, B 400, except S2's A, sold while A's cost was 550.
 const items: SaleItem[] = [
-  line("i11", "S1", "A", 2, 1000),
+  line("i11", "S1", "A", 2, 1000, { unitCostMmkSnapshot: 600 }),
   line("i21", "S2", "A", 3, 1000, { unitCostMmkSnapshot: 550 }),
-  line("i22", "S2", "B", 2, 700),
-  line("i31", "S3", "B", 1, 700),
-  line("i41", "S4", "A", 5, 1000),
-  line("i51", "S5", "A", 1, 1000),
-  line("i61", "S6", "A", 1, 1000),
+  line("i22", "S2", "B", 2, 700, { unitCostMmkSnapshot: 400 }),
+  line("i31", "S3", "B", 1, 700, { unitCostMmkSnapshot: 400 }),
+  line("i41", "S4", "A", 5, 1000, { unitCostMmkSnapshot: 600 }),
+  line("i51", "S5", "A", 1, 1000, { unitCostMmkSnapshot: 600 }),
+  line("i61", "S6", "A", 1, 1000, { unitCostMmkSnapshot: 600 }),
 ];
 
 const planned = (saleId: string, selection: Record<string, number>) => {
@@ -212,5 +214,43 @@ describe("Sales page day sections", () => {
       ["2026-12-31", 100],
       ["2027-01-01", 200],
     ]);
+  });
+});
+
+describe("missing cost evidence (fix 4): every path says unavailable — never today's cost, never 0", () => {
+  // S2's line of B lost its snapshot (a legacy line, a mirror without cost)
+  const gappy = items.map((i) => (i.id === "i22" ? { ...i, unitCostMmkSnapshot: undefined } : i));
+  const shopA = filterSalesByRange(scopeSales(sales, "shop-a"), "today", NOW);
+
+  it("dashboard: revenue is still exact; cost, profit unavailable", () => {
+    const revenue = calculateNetRevenue(shopA, refunds);
+    expect(revenue).toBe(6060);
+    const cost = calculateCostOfGoods(shopA, gappy, products, refunds);
+    expect(cost).toBeNull();
+    expect(calculateProfit(revenue, cost)).toBeNull();
+  });
+
+  it("per shop: only the shop with the gap is unavailable", () => {
+    const rows = calculatePerShopMetrics(sales, gappy, products, shops, refunds, [], []);
+    expect(rows.map((r) => [r.shop.id, r.revenue, r.cost, r.profit, r.margin === null ? null : Math.round(r.margin)])).toEqual([
+      ["shop-a", 6060, null, null, null],
+      ["shop-b", 1000, 600, 400, 40],
+    ]);
+  });
+
+  it("trend and server-ranged profit rows agree", () => {
+    expect(calculateDailyRevenueCostProfitTrend(sales, gappy, products, refunds, "shop-a", "today", NOW))
+      .toEqual([{ date: "2026-10-19", label: "2026-10-19", revenue: 6060, cost: null, profit: null }]);
+    const rows = calculateProfitByShop({
+      shops, sales: sales.map(({ id, shopId, status, totalMmk, paymentMethod, createdAt }) => ({ id, shopId, status, totalMmk, paymentMethod, createdAt })),
+      saleItems: gappy.map(({ saleId, productId, qtyUnits, unitCostMmkSnapshot }) => ({ saleId, productId, qtyUnits, unitCostMmkSnapshot })),
+      refunds, products, range: { start: "2026-10-19", end: "2026-10-19" }, shopId: "shop-a",
+    });
+    expect(rows).toEqual([{ shopId: "shop-a", shopName: expect.any(String), revenue: 6060, cost: null, profit: null, margin: null }]);
+  });
+
+  it("a later change of the product's cost does not change a past sale's cost", () => {
+    const repriced = products.map((p) => ({ ...p, costMmk: (p.costMmk ?? 0) * 3 }));
+    expect(calculateCostOfGoods(shopA, items, repriced, refunds)).toBe(3700);
   });
 });

@@ -15,7 +15,7 @@ import { assertOfflineQueueAllowed, gateNewOperation, recoveryRefusalError } fro
 import { RecoveryBlockedError, noteAuthorizationLost, offlineFinancialBlockedError, offlineFinancialOpsBlocked } from "./recoveryState";
 import type { LocalRowBatch } from "./localWrites";
 import {
-  askAboutUnresolved, PendingConfirmationError, UnresolvedOperationError, type UnresolvedOperationInfo,
+  askAboutUnresolved, PendingConfirmationError, SessionEndedError, UnresolvedOperationError, type UnresolvedOperationInfo,
 } from "./operationPrompt";
 
 /** v87.x: an operation whose outcome is unknown on an 087 server — held for confirmation, never staged. */
@@ -169,27 +169,74 @@ export const intentOf = (name: string, args: Record<string, unknown>): string =>
   return `${name}:${canonical(rest)}`;
 };
 
-/** Every earlier attempt of the same intent whose outcome nobody has
- *  established — whatever its queue status (H1): sending or in doubt,
- *  HELD for lookup ("conflict" + fenceRequired), parked, or set aside by an
- *  owner before the server decided it. Only a server decision (committed ->
- *  reconciled and gone; rejected / abandoned -> serverOutcome) ends it. */
-async function unresolvedTwins(name: string, intent: string): Promise<SyncOutboxEntry[]> {
+/**
+ * The logical scope an attempt belongs to, for operations a person re-enters
+ * by hand: a sale re-rung after "pending confirmation" may come back with the
+ * items in another order or another tender, so its exact arguments differ
+ * but it is still the same customer's sale. Same shop, same shift, same
+ * cashier: possibly the same sale. Stock adjustment: same shop and product.
+ * null = matched by exact arguments only.
+ */
+export const scopeOf = (name: string, args: Record<string, unknown>, actorId: string | null | undefined): string | null => {
+  const s = (v: unknown) => (typeof v === "string" || typeof v === "number" ? String(v) : "");
+  if (name === "complete_sale") return `${name}|${s(args.p_shop_id)}|${s(args.p_shift_id)}|${s(actorId)}`;
+  if (name === "adjust_stock") return `${name}|${s(args.p_shop_id)}|${s(args.p_product_id)}`;
+  return null;
+};
+
+/** Every earlier attempt whose outcome nobody has established — whatever its
+ *  queue status (H1): sending or in doubt, HELD for lookup ("conflict" +
+ *  fenceRequired), parked, or set aside by an owner before the server
+ *  decided it. Only a server decision (committed -> reconciled and gone;
+ *  rejected / abandoned -> serverOutcome) ends it.
+ *  `twins`: the same intent (identical arguments). `overlapping`: another
+ *  intent in the same logical scope (scopeOf) — possibly the same sale
+ *  re-entered differently, possibly a genuinely separate one; never
+ *  decided here. */
+/** How long an unresolved attempt counts as possibly the same sale re-rung. */
+export const SIMILAR_WINDOW_MS = 10 * 60_000;
+
+/** Products a sale's items name (similar = at least one in common). */
+const productsOf = (args: Record<string, unknown> | undefined): Set<string> =>
+  new Set(Array.isArray(args?.p_items) ? (args!.p_items as { product_id?: unknown }[]).map((i) => String(i.product_id)) : []);
+
+async function unresolvedAttempts(
+  name: string, intent: string, scope: string | null, args?: Record<string, unknown>,
+): Promise<{ twins: SyncOutboxEntry[]; overlapping: SyncOutboxEntry[] }> {
   // "quarantined": an attempt queued for another backend still counts — this
   // server cannot tell whether that one ran (it always blocks a replacement).
   const rows = await localDb.syncOutbox.where("status").anyOf("pending", "syncing", "failed", "conflict", "archived", "quarantined").toArray();
-  return rows.filter((r) => r.kind === "rpc" && r.name === name && !r.serverOutcome
+  const unresolved = rows.filter((r) => r.kind === "rpc" && r.name === name && !r.serverOutcome
     && (r.writeAhead === true || r.fenceRequired === true)
-    && (r.status === "syncing" || r.inDoubt === true || r.fenceRequired === true || r.statusBeforeArchive === "syncing")
-    && intentOf(name, r.args ?? {}) === intent);
+    && (r.status === "syncing" || r.inDoubt === true || r.fenceRequired === true || r.statusBeforeArchive === "syncing"));
+  const twins = unresolved.filter((r) => intentOf(name, r.args ?? {}) === intent);
+  const mine = productsOf(args);
+  const shareProduct = (r: SyncOutboxEntry) => name !== "complete_sale" || [...productsOf(r.args)].some((p) => mine.has(p));
+  // A re-ring follows the "pending confirmation" message within minutes; an
+  // attempt older than that is not plausibly the same sale entered again
+  // (an outage must not make every later sale ask). A queued offline entry
+  // the outbox is merely sending is not an uncertain attempt either.
+  const recent = (r: SyncOutboxEntry) => Date.now() - Date.parse(r.createdAt) <= SIMILAR_WINDOW_MS;
+  const uncertain = (r: SyncOutboxEntry) => r.inDoubt === true || r.fenceRequired === true || r.staged !== true;
+  const overlapping = scope === null ? [] : unresolved.filter((r) =>
+    intentOf(name, r.args ?? {}) !== intent
+    && scopeOf(name, r.args ?? {}, (r.args?.p_expected_actor_id as string | undefined) ?? r.actorId) === scope
+    && shareProduct(r) && recent(r) && uncertain(r));
+  return { twins, overlapping };
 }
 
 export const describeEntry = (entry: SyncOutboxEntry): UnresolvedOperationInfo => {
-  const items = Array.isArray(entry.args?.p_items) ? (entry.args!.p_items as unknown[]).length : null;
+  const items = Array.isArray(entry.args?.p_items) ? (entry.args!.p_items as { qty?: unknown }[]) : null;
   const label = FRIENDLY[entry.name] ?? entry.name;
+  // Enough for the person to recognise the earlier attempt (item count and
+  // quantities, tender) — never cost.
+  const units = items?.reduce((n, i) => n + (typeof i.qty === "number" ? i.qty : 0), 0) ?? 0;
+  const tender = entry.name === "complete_sale" && typeof entry.args?.p_payment_method === "string"
+    ? ` · ${entry.args.p_payment_method}${typeof entry.args.p_paid_mmk === "number" ? ` ${entry.args.p_paid_mmk.toLocaleString()} MMK` : ""}`
+    : "";
   return {
     kind: entry.name === "complete_sale" ? "sale" : "operation",
-    summary: items != null ? `${label} · ${items} item${items === 1 ? "" : "s"}` : label,
+    summary: items != null ? `${label} · ${items.length} item${items.length === 1 ? "" : "s"} (${units} unit${units === 1 ? "" : "s"})${tender}` : label,
     createdAt: entry.createdAt,
   };
 };
@@ -209,10 +256,29 @@ export async function submitOfflineCapable<T>(spec: OfflineCapableSpec<T>): Prom
 }
 
 async function guardedRun<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>, intent: string): Promise<T> {
-  const twins = await unresolvedTwins(spec.name, intent);
-  if (twins.length) {
-    const allowNew = REPEATABLE.has(spec.name);
-    const decision = await askAboutUnresolved({ existing: twins.map(describeEntry), allowRetry: true, allowNew });
+  const scope = scopeOf(spec.name, args, (args.p_expected_actor_id as string | undefined) ?? currentActorId());
+  const { twins: exact, overlapping } = await unresolvedAttempts(spec.name, intent, scope, args);
+  // An earlier attempt whose outcome is unknown: identical (the same
+  // arguments) or similar (same shop, shift and cashier, a product in common
+  // — the same sale re-rung in another order, another tender or quantity,
+  // or another customer's). The person decides; nothing is decided here:
+  //   retry      -> the earlier one is resent with ITS key (default path);
+  //   new        -> a REPLACEMENT: the earlier attempt is stopped on the
+  //                 server first (recorded instead if it did arrive). Only
+  //                 when exactly ONE earlier attempt is in question — an
+  //                 attempt the person did not single out is never stopped;
+  //   additional -> a genuinely separate operation (another customer): the
+  //                 earlier one stays and is confirmed with its own key;
+  //   cancel     -> nothing is sent.
+  const candidates = exact.length ? exact : overlapping;
+  let twins: SyncOutboxEntry[] = [];
+  if (candidates.length) {
+    const repeatable = REPEATABLE.has(spec.name);
+    const canReplace = repeatable && candidates.length === 1;
+    const decision = await askAboutUnresolved({
+      existing: candidates.map(describeEntry), allowRetry: true, allowNew: canReplace,
+      allowAdditional: repeatable, overlap: exact.length ? "identical" : "similar",
+    });
     if (decision === "retry") {
       // The earlier one is resent with ITS key by the queue — never a new one.
       void drainOutbox().catch(() => undefined);
@@ -220,11 +286,16 @@ async function guardedRun<T>(spec: OfflineCapableSpec<T>, args: Record<string, u
         "The earlier attempt is awaiting the server's confirmation and is being resent with its original key. Do not enter it again.",
       );
     }
-    if (decision !== "new" || !allowNew) {
+    if (decision === "additional" && repeatable) return run(spec, args);
+    if (decision !== "new" || !canReplace) {
       throw new UnresolvedOperationError(
-        "An earlier attempt of this operation is still awaiting confirmation. Nothing was sent.", twins.map(describeEntry),
+        exact.length
+          ? "An earlier attempt of this operation is still awaiting confirmation. Nothing was sent."
+          : "A similar earlier attempt is still awaiting confirmation. Nothing was sent.",
+        candidates.map(describeEntry),
       );
     }
+    twins = candidates;
     // G1 Stage 1: a replacement only once every earlier attempt is known not
     // to have happened — asked, and stopped on the server (fenced) if it
     // never arrived. If one DID happen, it is recorded instead.
@@ -252,7 +323,8 @@ async function guardedRun<T>(spec: OfflineCapableSpec<T>, args: Record<string, u
     }
     // Every earlier attempt is now decided on the server. Another attempt
     // that appeared meanwhile (another window) is not: nothing new.
-    const again = await unresolvedTwins(spec.name, intent);
+    const after = await unresolvedAttempts(spec.name, intent, twins === exact ? null : scope, args);
+    const again = [...after.twins, ...after.overlapping];
     if (again.length) {
       throw new UnresolvedOperationError(
         "Another attempt of this operation appeared while the earlier one was being confirmed. Nothing new was entered.",
@@ -363,6 +435,10 @@ const notConfirmed = (detail: string) => new PendingConfirmationError(
 );
 
 async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>, localId: string): Promise<T> {
+  // fix 3: who sent it — a reply arriving after a sign-out / account switch
+  // is recorded (queue row acknowledged, journal), never applied to the next
+  // session's screen or mirror.
+  const sentBy = currentActorId();
   // 2. One attempt, bounded; the reply must have the expected shape.
   const outcome = await callRpc(spec.name, args, { opEpoch: spec.op.opEpoch });
   let error: RpcError | null = outcome.error;
@@ -384,6 +460,12 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
     }
   }
 
+  if (!error && currentActorId() !== sentBy) {
+    await acknowledgeEntry(localId, [], { source: "reply", response: outcome.data }, outcome.signedReply)
+      .catch((err) => console.error(`[sync] ${spec.name}: committed after the session ended; acknowledgement not recorded (kept for confirmation):`, err));
+    notifyQueueChanged();
+    throw new SessionEndedError(spec.name);
+  }
   if (!error) {
     const result = await spec.applyOnline(outcome.data, localId);
     // Stock rows on disk with the ledger before the row goes.

@@ -98,6 +98,11 @@ const item = (overrides: Partial<SaleItem>): SaleItem => ({
   lineTotalMmk: 1000,
   ...overrides,
 });
+/** Lines as the server records them: each carries the cost at the moment of
+ *  sale (here: the product's cost in the fixture). Cost is never taken from
+ *  the product at report time (fix 4). */
+const atSaleCost = (items: SaleItem[], products: Pick<Product, "id" | "costMmk">[]): SaleItem[] =>
+  items.map((i) => ({ ...i, unitCostMmkSnapshot: i.unitCostMmkSnapshot ?? products.find((p) => p.id === i.productId)?.costMmk }));
 
 const inv = (shopId: string, productId: string, qty: number): Inventory => ({
   shopId,
@@ -308,42 +313,68 @@ describe("calculateRefundDeductions — per-sale cap", () => {
 describe("calculateCostOfGoods", () => {
   const products: Product[] = [product({ id: "p1", costMmk: 600 }), product({ id: "p2", costMmk: 400 })];
 
-  it("multiplies current product cost × qty for items of in-scope sales", () => {
+  it("multiplies each line's own cost snapshot × qty for items of in-scope sales", () => {
     const sales = [sale({ id: "s1" })];
     const items = [
-      item({ saleId: "s1", productId: "p1", qtyUnits: 3 }),
-      item({ saleId: "s1", productId: "p2", qtyUnits: 5 }),
-      // out-of-scope item — must not contribute
+      item({ saleId: "s1", productId: "p1", qtyUnits: 3, unitCostMmkSnapshot: 600 }),
+      item({ saleId: "s1", productId: "p2", qtyUnits: 5, unitCostMmkSnapshot: 400 }),
+      // out-of-scope item — must not contribute (nor make the cost unavailable)
       item({ saleId: "s-other", productId: "p1", qtyUnits: 100 }),
     ];
     expect(calculateCostOfGoods(sales, items, products)).toBe(3 * 600 + 5 * 400);
   });
 
-  it("treats missing product cost as 0", () => {
+  it("HISTORICAL CHANGE: a line is costed at its sale-time snapshot, never at today's product cost", () => {
     const sales = [sale({ id: "s1" })];
-    const items = [item({ saleId: "s1", productId: "ghost", qtyUnits: 9 })];
-    expect(calculateCostOfGoods(sales, items, products)).toBe(0);
+    const items = [item({ saleId: "s1", productId: "p1", qtyUnits: 2, unitCostMmkSnapshot: 500 })];
+    const raised = [product({ id: "p1", costMmk: 900 })]; // cost raised after the sale
+    expect(calculateCostOfGoods(sales, items, raised)).toBe(2 * 500);
   });
 
-  it("reverses the cost of units returned by approved PARTIAL refunds", () => {
+  it("MISSING COST: a line without its own snapshot makes the cost UNAVAILABLE (null) — not today's cost, not 0", () => {
+    const sales = [sale({ id: "s1" })];
+    expect(calculateCostOfGoods(sales, [item({ saleId: "s1", productId: "p1", qtyUnits: 9 })], products)).toBeNull();
+    expect(calculateCostOfGoods(sales, [item({ saleId: "s1", productId: "ghost", qtyUnits: 9 })], products)).toBeNull();
+    // one costed line does not make an uncosted one costed
+    expect(calculateCostOfGoods(sales, [
+      item({ saleId: "s1", productId: "p1", qtyUnits: 1, unitCostMmkSnapshot: 600 }),
+      item({ saleId: "s1", productId: "p2", qtyUnits: 1 }),
+    ], products)).toBeNull();
+    // profit and margin built on it are unavailable too
+    expect(calculateProfit(10_000, null)).toBeNull();
+    expect(calculateProfitMargin(10_000, null)).toBeNull();
+  });
+
+  it("OFFLINE: a provisional line staged on this till (no snapshot yet) is unavailable until the server's line replaces it", () => {
+    const sales = [sale({ id: "sale-local-1" })];
+    expect(calculateCostOfGoods(sales, [item({ saleId: "sale-local-1", productId: "p1", qtyUnits: 2 })], products)).toBeNull();
+  });
+
+  it("PARTIAL REFUND: reverses the cost of units returned by approved PARTIAL refunds at the sale's own snapshot", () => {
     const sales = [sale({ id: "s1", status: "REFUNDED" })];
     const items = [
       item({ saleId: "s1", productId: "p1", qtyUnits: 4, unitCostMmkSnapshot: 500 }),
-      item({ saleId: "s1", productId: "p2", qtyUnits: 2 }),
+      item({ saleId: "s1", productId: "p2", qtyUnits: 2, unitCostMmkSnapshot: 400 }),
     ];
     const refunds = [
       refund({ id: "ok", saleId: "s1", items: [{ productId: "p1", qtyUnits: 1, amountMmk: 1000 }] }),
       refund({ id: "pending", saleId: "s1", status: "REQUESTED", items: [{ productId: "p2", qtyUnits: 2, amountMmk: 1 }] }),
     ];
-    // (4 − 1) × 500 snapshot + 2 × 400 current (pending refund ignored).
+    // (4 − 1) × 500 + 2 × 400 (pending refund ignored).
     expect(calculateCostOfGoods(sales, items, products, refunds)).toBe(3 * 500 + 2 * 400);
-    // Without refunds the old behaviour holds.
     expect(calculateCostOfGoods(sales, items, products)).toBe(4 * 500 + 2 * 400);
+  });
+
+  it("REFUNDED sale with an uncosted line: unavailable (the reversal cannot be computed either)", () => {
+    const sales = [sale({ id: "s1", status: "REFUNDED" })];
+    const items = [item({ saleId: "s1", productId: "p1", qtyUnits: 4 })];
+    const refunds = [refund({ id: "ok", saleId: "s1", items: [{ productId: "p1", qtyUnits: 1, amountMmk: 1000 }] })];
+    expect(calculateCostOfGoods(sales, items, products, refunds)).toBeNull();
   });
 
   it("caps the reversal at what that sale sold of the product", () => {
     const sales = [sale({ id: "s1", status: "REFUNDED" })];
-    const items = [item({ saleId: "s1", productId: "p1", qtyUnits: 2 })];
+    const items = [item({ saleId: "s1", productId: "p1", qtyUnits: 2, unitCostMmkSnapshot: 600 })];
     const refunds = [
       refund({ id: "x", saleId: "s1", items: [{ productId: "p1", qtyUnits: 5, amountMmk: 0 }] }),
       refund({ id: "y", saleId: "s1", items: [{ productId: "not-sold", qtyUnits: 3, amountMmk: 0 }] }),
@@ -403,6 +434,16 @@ describe("calculateInventoryValue", () => {
   it("sums (qty × cost) for the selected shop", () => {
     expect(calculateInventoryValue(inventory, products, "shop-a")).toBe(9000);
     expect(calculateInventoryValue(inventory, products, "shop-b")).toBe(10000);
+  });
+
+  it("a stocked active product without a cost on this device makes the valuation UNAVAILABLE (never valued at 0)", () => {
+    const noCost = [...products, product({ id: "p-nc", costMmk: undefined })];
+    const stocked = [...inventory, inv("shop-a", "p-nc", 3)];
+    expect(calculateInventoryValue(stocked, noCost, "shop-a")).toBeNull();
+    expect(calculateInventoryValue(stocked, noCost, null)).toBeNull();
+    // shop-b does not stock it: still known there; out of stock does not count either
+    expect(calculateInventoryValue(stocked, noCost, "shop-b")).toBe(10000);
+    expect(calculateInventoryValue([...inventory, inv("shop-a", "p-nc", 0)], noCost, "shop-a")).toBe(9000);
   });
 
   it("sums across all shops in admin-aggregate mode", () => {
@@ -511,13 +552,16 @@ describe("calculateTopProducts", () => {
       item({ saleId: "s2", productId: "p1", qtyUnits: 5, lineTotalMmk: 5500 }),
       item({ saleId: "s2", productId: "p3", qtyUnits: 1, lineTotalMmk: 2800 }),
     ];
-    const top = calculateTopProducts(sales, items, products, 5);
+    const top = calculateTopProducts(sales, atSaleCost(items, products), products, 5);
     expect(top.map((r) => r.product.id)).toEqual(["p1", "p3", "p2"]);
     const lager = top.find((r) => r.product.id === "p1")!;
     expect(lager.qty).toBe(7);
     expect(lager.revenue).toBe(7700);
     expect(lager.cost).toBe(7 * 600);
     expect(lager.profit).toBe(7700 - 7 * 600);
+    // without the lines' own cost: revenue and ranking stay, cost / profit unavailable
+    const unknown = calculateTopProducts(sales, items, products, 5).find((r) => r.product.id === "p1")!;
+    expect(unknown).toMatchObject({ qty: 7, revenue: 7700, cost: null, profit: null });
   });
 
   it("excludes items belonging to out-of-scope sales (e.g. VOID excluded by caller)", () => {
@@ -638,7 +682,7 @@ describe("calculateDailyRevenueCostProfitTrend", () => {
       item({ saleId: "void", productId: "p1", qtyUnits: 99 }),
     ];
 
-    const rows = calculateDailyRevenueCostProfitTrend(sales, items, products, [], "shop-a", "today", NOW);
+    const rows = calculateDailyRevenueCostProfitTrend(sales, atSaleCost(items, products), products, [], "shop-a", "today", NOW);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       revenue: 10000,
@@ -664,7 +708,7 @@ describe("calculateDailyRevenueCostProfitTrend", () => {
       refund({ saleId: "s2", status: "APPROVED", type: "PARTIAL", items: [{ productId: "p1", qtyUnits: 1, amountMmk: 1000 }] }),
     ];
 
-    const rows = calculateDailyRevenueCostProfitTrend(sales, items, products, refunds, "shop-a", "week", NOW);
+    const rows = calculateDailyRevenueCostProfitTrend(sales, atSaleCost(items, products), products, refunds, "shop-a", "week", NOW);
     expect(rows.map((row) => row.date)).toEqual(["2026-05-23", "2026-05-24"]);
     expect(rows[0]).toMatchObject({
       revenue: 14000,
@@ -1154,7 +1198,7 @@ describe("calculatePerShopMetrics", () => {
       po({ id: "po", shopId: "shop-a", status: "RECEIVED", totalMmk: 20000, paidMmk: 5000 }),
     ];
 
-    const rows = calculatePerShopMetrics(sales, items, products, shops, [], shifts, purchaseOrders);
+    const rows = calculatePerShopMetrics(sales, atSaleCost(items, products), products, shops, [], shifts, purchaseOrders);
     const a = rows.find((r) => r.shop.id === "shop-a")!;
     const b = rows.find((r) => r.shop.id === "shop-b")!;
 

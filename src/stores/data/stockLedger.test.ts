@@ -21,6 +21,7 @@ import { createInventorySlice } from "./slices/inventorySlice";
 import { createSaleSlice } from "./slices/saleSlice";
 import { drainOutbox, registerOutboxReconciler, simulateNewAppInstanceForTests } from "./outbox";
 import { resetWriteAheadForTests } from "./writeAhead";
+import { registerOperationPrompt } from "./operationPrompt";
 import { setExecutorCapabilityForTests } from "./idempotentRpc";
 import { resetOnlineOnlyForTests } from "./onlineOnly";
 import { inventoryRealtimeSessionForTests, subscribeInventoryRealtime, type InventoryRealtimeHandle } from "./inventoryRealtime";
@@ -347,6 +348,10 @@ describe("queue data stays readable by v1.0.16", () => {
     void sell(get, 3);                         // syncing write-ahead
     await vi.waitFor(async () => expect(await localDb.syncOutbox.count()).toBe(1));
     fake.queueModes("commit-then-timeout");
+    // fix 1: the first sale is still unresolved on this shift, so the cashier
+    // is asked; here it is a genuinely additional sale
+    registerOperationPrompt(async () => "additional");
+    onTestFinished(() => registerOperationPrompt(null));
     await sellInDoubt(get, 2);                 // pending + inDoubt
     await sellOffline(get, 1);                 // pending
     await vi.waitFor(async () => expect(await localDb.syncOutbox.count()).toBe(3));

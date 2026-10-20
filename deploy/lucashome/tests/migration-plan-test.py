@@ -55,7 +55,7 @@ class Plan(unittest.TestCase):
             v, s = (e, "") if isinstance(e, str) else e
             lines.append(f"{v}\t{s}\t{1 if s else 0}")
         wr(lp, "\n".join(lines) + "\n")
-        f = {"ledger_md5": MD5, "ledger_cols": "name,statements,version", "has_op_execute": "f", "idem_pk": "key"}
+        f = {"ledger_md5": MD5, "ledger_cols": "name,statements,version", "has_op_execute": "f", "has_v87": "f", "idem_pk": "key"}
         f.update(facts or {})
         wr(fp, "".join(f"{k}\t{v}\n" for k, v in f.items()))
         argv = [mode, "--migrations", mig or self.mig, "--ledger", lp, "--facts", fp, "--out", out, *args]
@@ -115,6 +115,20 @@ class Plan(unittest.TestCase):
     def test_forward_recovery_086_after_rollback(self):
         # after the rollback: (org_id, key) kept, op_execute gone, 086 row removed -> only 086 may run
         self.ok(self.run_plan("forward", self.upto(85), {"idem_pk": "org_id,key"}, "--from", "086", "--to", "086"))
+
+    def test_086_never_rerun_once_087_is_installed(self):
+        # audit 2026-10-20: 086's grant step would re-own / revoke op_execute_v87 and op_status_v87
+        # (supabase/tests/m086-rerun). Even the documented forward recovery is refused while 087 is present,
+        # whatever the ledger says (an 087 installed but not recorded, a hand-edited ledger).
+        self.refused(self.run_plan("forward", self.upto(85), {"idem_pk": "org_id,key", "has_v87": "t"}, "--from", "086", "--to", "086"),
+                     "must never be re-run after 087")
+        self.refused(self.run_plan("forward", self.upto(84, skip=()), {"has_v87": "t"}, "--from", "085", "--to", "086"),
+                     "must never be re-run after 087")
+        # without 087 the forward recovery is unchanged
+        self.ok(self.run_plan("forward", self.upto(85), {"idem_pk": "org_id,key", "has_v87": "f"}, "--from", "086", "--to", "086"))
+
+    def test_has_v87_fact_required_and_validated(self):
+        self.refused(self.run_plan("forward", self.upto(85), {"has_v87": "maybe"}, "--from", "086", "--to", "086"), "malformed")
 
     def test_legacy_rows_without_checksum_are_noted_not_hidden(self):
         _, out, _ = self.ok(self.run_plan("forward", self.upto(85), None, "--from", "086", "--to", "086"))

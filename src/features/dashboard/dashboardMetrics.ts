@@ -49,10 +49,13 @@ import { getPurchaseOrderBalanceMmk, getPurchaseOrderPaidMmk } from "../supplier
 //
 // Cost of goods
 // -------------
-// Per-line cost captured at sale time (migration 041) when present, else the
-// current `products.costMmk` (legacy rows; drifts when costs change). Units
-// given back by an approved PARTIAL refund return to stock (RETURN_IN), so
-// their cost is reversed too when the refunds are passed in.
+// Only the per-line cost captured at sale time (migration 041; with PCOST-A
+// laid on from sale_item_costs for a permitted person). Never today's
+// product cost and never 0: a line without its own snapshot makes the cost —
+// and every profit / margin built on it — UNAVAILABLE (null), as the server
+// report does (PFIN-B: COGS incomplete -> gross profit null). Units given
+// back by an approved PARTIAL refund return to stock (RETURN_IN), so their
+// cost is reversed too when the refunds are passed in.
 //
 // Days
 // ----
@@ -179,22 +182,22 @@ export const calculateSalesCount = (sales: unknown[]): number => sales.length;
 export const calculateCostOfGoods = (
   sales: Pick<Sale, "id">[],
   saleItems: CostLine[],
-  products: CostProduct[],
+  // Kept for callers; no longer a fallback (today's cost is not the cost of
+  // a past sale).
+  _products: CostProduct[],
   refunds: RefundForMetrics[] = []
-): number => {
+): number | null => {
+  void _products;
   const saleIds = new Set(sales.map((s) => s.id));
-  const productById = new Map(products.map((p) => [p.id, p]));
-  // Prefer the cost captured at sale time (migration 041); fall back to the
-  // product's current cost for sales made before the snapshot shipped.
-  const unitCost = (item: CostLine): number =>
-    item.unitCostMmkSnapshot ?? productById.get(item.productId)?.costMmk ?? 0;
 
   let cost = 0;
   // Per sale+product: base units sold and their cost, for refund reversal.
   const sold = new Map<string, { qty: number; cost: number }>();
   for (const item of saleItems) {
     if (!saleIds.has(item.saleId)) continue;
-    const lineCost = unitCost(item) * item.qtyUnits;
+    const unit = item.unitCostMmkSnapshot;
+    if (typeof unit !== "number" || !Number.isFinite(unit)) return null;   // no evidence: unavailable
+    const lineCost = unit * item.qtyUnits;
     cost += lineCost;
     const key = `${item.saleId}\u0000${item.productId}`;
     const prev = sold.get(key) ?? { qty: 0, cost: 0 };
@@ -218,10 +221,12 @@ export const calculateCostOfGoods = (
   return Math.max(Math.round(cost), 0);
 };
 
-export const calculateProfit = (revenue: number, cost: number): number => revenue - cost;
+/** null when the cost is unavailable (never a profit equal to the revenue). */
+export const calculateProfit = (revenue: number, cost: number | null): number | null =>
+  cost === null ? null : revenue - cost;
 
-export const calculateProfitMargin = (revenue: number, profit: number): number =>
-  revenue > 0 ? (profit / revenue) * 100 : 0;
+export const calculateProfitMargin = (revenue: number, profit: number | null): number | null =>
+  profit === null ? null : revenue > 0 ? (profit / revenue) * 100 : 0;
 
 /**
  * Average order value. Returns 0 when count = 0 (no Infinity).
@@ -236,7 +241,9 @@ export const calculateAvgOrderValue = (revenue: number, count: number): number =
 // ------------------------------------------------------------
 
 /**
- * Sum of (qty × current cost) for inventory in scope.
+ * Sum of (qty × current cost) for inventory in scope — a valuation at
+ * today's cost. null when any active product with stock in scope has no
+ * cost on this device (not permitted, or never entered): never valued at 0.
  *
  *   shopId = null   -> total across ALL shops (admin aggregate)
  *   shopId = "x"    -> just shop x's rows
@@ -248,14 +255,17 @@ export const calculateInventoryValue = (
   inventory: Inventory[],
   products: Product[],
   shopId: string | null
-): number => {
+): number | null => {
   const productById = new Map(products.map((p) => [p.id, p]));
   const scoped = shopId === null ? inventory : inventory.filter((i) => i.shopId === shopId);
-  return scoped.reduce((sum, inv) => {
+  let sum = 0;
+  for (const inv of scoped) {
     const product = productById.get(inv.productId);
-    if (!product || !product.isActive) return sum;
-    return sum + (product.costMmk || 0) * inv.qtyBaseUnits;
-  }, 0);
+    if (!product || !product.isActive || inv.qtyBaseUnits === 0) continue;
+    if (typeof product.costMmk !== "number") return null;
+    sum += product.costMmk * inv.qtyBaseUnits;
+  }
+  return sum;
 };
 
 export interface LowStockRow {
@@ -388,8 +398,9 @@ export interface TopProductRow {
   qty: number;
   /** Sum of `sale_items.lineTotalMmk` — pre-cart-discount. Documented. */
   revenue: number;
-  cost: number;
-  profit: number;
+  /** From each line's own cost snapshot; null when any line has none. */
+  cost: number | null;
+  profit: number | null;
 }
 
 /**
@@ -413,8 +424,9 @@ export const calculateTopProducts = (
     if (!saleIds.has(item.saleId)) continue;
     const product = productById.get(item.productId);
     if (!product) continue;
-    const cost = (product.costMmk || 0) * item.qtyUnits;
-    const row = map.get(product.id) ?? {
+    // the line's own snapshot (never today's cost); none -> unavailable
+    const cost = typeof item.unitCostMmkSnapshot === "number" ? item.unitCostMmkSnapshot * item.qtyUnits : null;
+    const row: TopProductRow = map.get(product.id) ?? {
       product,
       qty: 0,
       revenue: 0,
@@ -423,8 +435,8 @@ export const calculateTopProducts = (
     };
     row.qty += item.qtyUnits;
     row.revenue += item.lineTotalMmk;
-    row.cost += cost;
-    row.profit += item.lineTotalMmk - cost;
+    row.cost = row.cost === null || cost === null ? null : row.cost + cost;
+    row.profit = row.cost === null ? null : row.revenue - row.cost;
     map.set(product.id, row);
   }
   return [...map.values()].sort((a, b) => b.revenue - a.revenue).slice(0, limit);
@@ -492,8 +504,9 @@ export interface DailyRevenueCostProfitPoint {
   date: string;
   label: string;
   revenue: number;
-  cost: number;
-  profit: number;
+  /** null: a line of that day has no cost snapshot (unavailable, not 0). */
+  cost: number | null;
+  profit: number | null;
 }
 
 /**
@@ -877,9 +890,10 @@ export interface PerShopMetrics {
   shop: Shop;
   orders: number;
   revenue: number; // net
-  cost: number;
-  profit: number;
-  margin: number;
+  /** null: cost evidence incomplete (unavailable, not 0). */
+  cost: number | null;
+  profit: number | null;
+  margin: number | null;
   activeShifts: number;
   debt: number;
 }

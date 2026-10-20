@@ -18,7 +18,8 @@ import type { Inventory } from "../../types";
 import { applyRecordedWrites, beginWriteRecording, endWriteRecording } from "./localWrites";
 import { refreshAuthCacheSnapshot, touchAuthCache } from "../authCache";
 import { useAuthStore } from "../authStore";
-import { applyCostOverlay, fetchCostOverlay, overlayFromRows, scrubLocalCostCache, userMayViewCost } from "./costPrivacy";
+import { applyCostOverlay, fetchCostOverlay, overlayFromRows, userMayViewCost } from "./costPrivacy";
+import { prepareCachedSnapshot } from "./sensitiveCache";
 import {
   mapAuditLog, mapBarcode, mapBrand, mapBusinessProfile, mapCategory, mapInventory, mapMovement,
   mapPriceLevel, mapPriceTier, mapProduct, mapProductUnit, mapProductUnitPrice, mapPurchaseOrder,
@@ -75,7 +76,9 @@ export const useDataStore = create<DataState>()((...args) => {
       if (!get().isLoaded) return;
       if (typeof navigator !== "undefined" && navigator.onLine === false) return;
       try {
+        const pullUserId = useAuthStore.getState().currentUserId;
         const { changes, hadErrors } = await pullDeltaChanges(get());
+        if (useAuthStore.getState().currentUserId !== pullUserId) return;   // overtaken by a sign-out / switch
         if (Object.keys(changes).length > 0) set(changes);
         // `inventory` is outside delta-sync (no updated_at); while its
         // Realtime channel is not delivering, this periodic pull is what
@@ -105,12 +108,23 @@ export const useDataStore = create<DataState>()((...args) => {
       if (loadInFlight) return loadInFlight;
       if (get().isLoading) return;
       if (get().isLoaded && !options?.force) return;
-      loadInFlight = runLoad().finally(() => { loadInFlight = null; });
+      loadInFlight = runLoad().finally(() => {
+        loadInFlight = null;
+        // A load overtaken by a sign-out / account switch was discarded: the
+        // person now signed in gets their own (their screen waits on isLoaded).
+        if (staleLoadDiscarded) {
+          staleLoadDiscarded = false;
+          if (useAuthStore.getState().currentUserId) void get().loadData({ force: true });
+        }
+      });
       return loadInFlight;
     },
   };
 
   async function runLoad(): Promise<void> {
+    // Whose load this is: everything below (the mirror, the server pages) is
+    // for this person only. A sign-out or another sign-in meanwhile discards it.
+    const loadUserId = useAuthStore.getState().currentUserId;
     // Fast path: render immediately from the local mirror (works offline
     // and on a cold, slow connection). The network fetch below still runs
     // in the background to refresh it — isLoading stays true throughout so
@@ -118,13 +132,16 @@ export const useDataStore = create<DataState>()((...args) => {
     if (!get().isLoaded) {
       try {
         const rawCached = await readLocalSnapshot();
-        // P-4: the mirror may hold cost from an earlier session (another
-        // user, an older build, an older server). A user without
-        // report:shop_profit never gets it in memory, and it is scrubbed
-        // from the mirror (cost fields only — no row is deleted).
-        const cachedAllowed = rawCached ? userMayViewCost(rawCached.users, useAuthStore.getState().currentUserId) : false;
-        const cached = rawCached && !cachedAllowed ? applyCostOverlay(rawCached, null, false) : rawCached;
-        if (rawCached && !cachedAllowed) await scrubLocalCostCache().catch((err) => console.error("[DB] cost scrub failed:", err));
+        // P-4 / fix 3: the mirror may hold another session's data (another
+        // user, an older build, an older server): cost, purchase-order and
+        // supplier-payment money, audit messages. Only what this person may
+        // see reaches memory; the rest is scrubbed from the mirror (fields
+        // only — no row, queued operation or journal entry is deleted).
+        const cached = rawCached ? await prepareCachedSnapshot(rawCached, loadUserId) : null;
+        if (cached && useAuthStore.getState().currentUserId !== loadUserId) {
+          staleLoadDiscarded = true;
+          return;
+        }
         if (cached) {
           set({ ...cached, refundVoidRequests: cached.refunds, isLoaded: true });
           // The mirrored rows already carry what is queued (D-NEW-1 ledger).
@@ -340,6 +357,13 @@ export const useDataStore = create<DataState>()((...args) => {
         recorded.inventory, stockMarker, liveEvents.finish(),
         serverTimeBeforeLoad ? Date.parse(serverTimeBeforeLoad) : Number.NEGATIVE_INFINITY,
       );
+      // Overtaken by a sign-out or another sign-in while the pages were read:
+      // those rows belong to the previous session — never shown, never mirrored.
+      if (useAuthStore.getState().currentUserId !== loadUserId || costUserId !== loadUserId) {
+        staleLoadDiscarded = true;
+        set({ isLoading: false });
+        return;
+      }
       const snapshot = withCostForCurrentUser({ ...recorded, inventory: composed ? composed.rows : get().inventory });
       if (composed) get().noteStockLedger(composed.applied, new Map(Object.entries(composed.pendingConfirmation)));
       const ledgerForSnapshot = serializeLedger();
@@ -364,6 +388,12 @@ export const useDataStore = create<DataState>()((...args) => {
       // Persist BEFORE draining: the drain reconciles server rows into the
       // local mirror, and a persist still in flight would otherwise race
       // it (and used to clear every table, outbox included).
+      // A sign-out between showing the rows and mirroring them: logout has
+      // already scrubbed the mirror; this session's rows are not written back.
+      if (useAuthStore.getState().currentUserId !== loadUserId) {
+        staleLoadDiscarded = true;
+        return;
+      }
       try {
         const who = useAuthStore.getState();
         const meNow = who.currentUserId ? snapshot.users.find((u) => u.id === who.currentUserId) : undefined;
@@ -396,6 +426,7 @@ export const useDataStore = create<DataState>()((...args) => {
 });
 
 let loadInFlight: Promise<void> | null = null;
+let staleLoadDiscarded = false;
 /** Full loads that replaced the state with server data (verified reload). */
 let completedServerLoads = 0;
 

@@ -26,18 +26,22 @@ export const UnresolvedOperationPrompt = () => {
 
   if (!pending) return null;
   const { request } = pending;
+  const similar = request.overlap === "similar";
   return (
     <Modal
       open
       title={t("unresolved", "promptTitle")}
-      description={t("unresolved", "promptBody")}
+      description={t("unresolved", similar ? "promptSimilarBody" : "promptBody")}
       onClose={() => decide("cancel")}
       size="sm"
       footer={
         <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
           <Button variant="secondary" onClick={() => decide("cancel")}>{t("unresolved", "promptCancel")}</Button>
+          {request.allowAdditional && (
+            <Button variant="secondary" onClick={() => decide("additional")}>{t("unresolved", "promptAdditional")}</Button>
+          )}
           {request.allowNew && (
-            <Button variant="secondary" onClick={() => decide("new")}>{t("unresolved", "promptNew")}</Button>
+            <Button variant="secondary" onClick={() => decide("new")}>{t("unresolved", similar ? "promptReplace" : "promptNew")}</Button>
           )}
           {request.allowRetry && (
             <Button onClick={() => decide("retry")}>{t("unresolved", "promptRetry")}</Button>

@@ -26,7 +26,7 @@ that was not selected.
                              --version NNN --owner-confirmed-till-queues-empty [--lock-timeout 5s] --out DIR
 
 L.tsv: version <TAB> sha256 entries in statements (comma-joined, may be empty) <TAB> statements count
-F.tsv: key <TAB> value  (ledger_md5, ledger_cols, has_op_execute, idem_pk)
+F.tsv: key <TAB> value  (ledger_md5, ledger_cols, has_op_execute, has_v87, idem_pk)
 """
 import argparse
 import hashlib
@@ -138,11 +138,11 @@ def read_facts(path):
         if line.strip():
             k, _, val = line.partition("\t")
             facts[k] = val
-    for k in ("ledger_md5", "ledger_cols", "has_op_execute", "idem_pk"):
+    for k in ("ledger_md5", "ledger_cols", "has_op_execute", "has_v87", "idem_pk"):
         if k not in facts:
             raise Refuse(f"database fact {k} missing (unknown state)")
     # embedded in the guard SQL: exact formats only
-    if not (re.fullmatch(r"[0-9a-f]{32}", facts["ledger_md5"]) and facts["has_op_execute"] in ("t", "f")
+    if not (re.fullmatch(r"[0-9a-f]{32}", facts["ledger_md5"]) and facts["has_op_execute"] in ("t", "f") and facts["has_v87"] in ("t", "f")
             and re.fullmatch(r"[a-z_,]*", facts["idem_pk"]) and re.fullmatch(r"[a-z_,]*", facts["ledger_cols"])):
         raise Refuse("database facts are malformed (unknown state)")
     return facts
@@ -255,6 +255,12 @@ def plan_forward(a):
             problems.append(f"the {LINEAGE_VERSION} lineage is present (op_execute={facts['has_op_execute']}, ledger identity "
                             f"({facts['idem_pk']})) but {LINEAGE_VERSION} is not recorded: only {LINEAGE_VERSION} itself "
                             "(the documented forward recovery) may run; never 062–085")
+    if facts["has_v87"] == "t" and LINEAGE_VERSION in sel:
+        # 086's grant step re-owns and revokes EVERY public op_% function, op_execute_v87 / op_status_v87
+        # included: the v87 tills would be refused everything (audit 2026-10-20; supabase/tests/m086-rerun).
+        problems.append(f"087 is installed here (schema recovery / op_execute_v87 present): {LINEAGE_VERSION} must never be "
+                        f"re-run after 087 — its grant step would take the v87 executors away from every till. Forward "
+                        f"recovery for {LINEAGE_VERSION} exists only before 087 (or after an 087 rollback)")
     for v in sel:
         bad = non_transactional(rd(os.path.join(a.migrations, files[v])))
         if bad:

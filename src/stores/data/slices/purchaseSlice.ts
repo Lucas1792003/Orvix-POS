@@ -119,6 +119,11 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
 
     const now = op.createdAt;
     const lines = get().purchaseOrderItems.filter((i) => i.purchaseOrderId === purchaseOrderId);
+    // fix 3: unit costs are removed from this device at sign-out; the local
+    // totals would be NaN — never staged offline without them
+    if (lines.some((i) => typeof i.unitCostMmk !== "number")) {
+      throw new Error("This purchase order's prices are not on this device (they are cleared at sign-out). Connect to the server to receive it.");
+    }
     const inputByProduct = new Map(receivedItems.map((r) => [r.productId, r]));
 
     const updatedItems: PurchaseOrderItem[] = [];
@@ -226,6 +231,11 @@ export const createPurchaseSlice: StateCreator<DataState, [], [], PurchaseState>
     {
       if (po.status !== "RECEIVED") {
         throw new Error("Supplier payments can only be recorded against received purchase orders.");
+      }
+      // fix 3: amounts are removed from this device at sign-out; without them
+      // the outstanding balance is unknown — never guessed offline
+      if (typeof po.totalMmk !== "number") {
+        throw new Error("This purchase order's amounts are not on this device (they are cleared at sign-out). Connect to the server to record the payment.");
       }
       const outstanding = po.totalMmk - (po.paidMmk ?? 0);
       if (outstanding <= 0) throw new Error("Purchase order is already paid.");

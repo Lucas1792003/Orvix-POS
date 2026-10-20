@@ -14,9 +14,10 @@ export interface ProfitByShopRow {
   shopId: string;
   shopName: string;
   revenue: number;
-  cost: number;
-  profit: number;
-  margin: number;
+  /** null: cost evidence incomplete (unavailable, not 0). */
+  cost: number | null;
+  profit: number | null;
+  margin: number | null;
 }
 
 /**
