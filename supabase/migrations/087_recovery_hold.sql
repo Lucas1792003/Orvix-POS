@@ -48,10 +48,57 @@
 -- ============================================================
 
 -- ------------------------------------------------------------ 0/9 preflight
+-- v87.x correction (2026-10-19, before 087 was applied to any real server): the recovery roles must be protected from
+-- the Supabase privileged role BEFORE anything is created. supautils lets `postgres` (via supabase_privileged_role)
+-- ALTER any role that is not listed in supautils.reserved_roles — e.g. give recovery_owner LOGIN and a password and
+-- log in as it — and lets it create event triggers, which then run AS recovery_owner inside this file's
+-- `SET ROLE recovery_owner` DDL. Required: recovery_owner, recovery_authority and recovery_gate in
+-- supautils.reserved_roles (host configuration; deploy/lucashome/db-conf/20-recovery-reserved-roles.conf and
+-- docs/selfhost-migration/phase-g/recovery-roles-prerequisite.md), no event trigger that is owned by, or runs a
+-- function owned by, a non-superuser; then the roles are PROBED below (fail closed: any role that can still alter
+-- them stops the migration). Superusers are not constrained by any of this (infrastructure trust).
+-- FIRST, before any other statement: no event trigger can appear while this transaction runs (CREATE EVENT TRIGGER
+-- waits on this lock), and objects a non-superuser may plant in public / extensions (functions, operators) are never
+-- resolved by unqualified names in this migration (event trigger functions without their own search_path, too).
+LOCK TABLE pg_catalog.pg_event_trigger IN EXCLUSIVE MODE;
+SET LOCAL search_path = pg_catalog, pg_temp;
+-- every pre-existing event trigger is DISABLED for this transaction and re-enabled with its own mode at the end of this
+-- file: none of their code (nor anything it calls) can run as recovery_owner inside the SET ROLE DDL below
+DO $evt_off$
+DECLARE e record; v_saved jsonb := '[]';
+BEGIN
+  FOR e IN SELECT evtname, evtenabled FROM pg_catalog.pg_event_trigger WHERE evtenabled <> 'D' ORDER BY evtname LOOP
+    v_saved := v_saved || pg_catalog.jsonb_build_object('n', e.evtname::text, 'm', e.evtenabled::text);
+    EXECUTE pg_catalog.format('ALTER EVENT TRIGGER %I DISABLE', e.evtname);
+  END LOOP;
+  PERFORM pg_catalog.set_config('m087.event_triggers', v_saved::text, true);
+END $evt_off$;
 DO $pre$
+DECLARE v_reserved text[]; v_missing text[]; v_evt text; v_supautils boolean;
 BEGIN
   IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = session_user) THEN
     RAISE EXCEPTION '087 preflight: must run as the superuser migration runner (supabase_admin)';
+  END IF;
+  -- supautils present (loaded, or any of its settings defined): the recovery roles must be listed as reserved, exactly (no '*')
+  v_supautils := current_setting('supautils.privileged_role', true) IS NOT NULL OR current_setting('supautils.reserved_roles', true) IS NOT NULL
+    OR 'supautils' = ANY (ARRAY(SELECT btrim(x) FROM unnest(string_to_array(current_setting('session_preload_libraries') || ',' || current_setting('shared_preload_libraries'), ',')) x));
+  IF v_supautils AND current_setting('supautils.privileged_role', true) IS NULL THEN
+    RAISE EXCEPTION '087 preflight: supautils is loaded but supautils.privileged_role is not readable (renamed setting?): the protection of the recovery roles cannot be verified';
+  END IF;
+  IF v_supautils THEN
+    v_reserved := ARRAY(SELECT btrim(x) FROM unnest(string_to_array(coalesce(current_setting('supautils.reserved_roles', true), ''), ',')) x);
+    v_missing := ARRAY(SELECT r FROM unnest(ARRAY['recovery_owner', 'recovery_authority', 'recovery_gate']) r WHERE NOT r = ANY (v_reserved));
+    IF cardinality(v_missing) > 0 THEN
+      RAISE EXCEPTION '087 preflight: supautils.reserved_roles does not list %: the Supabase privileged role could alter them (log in as recovery_owner). Configure the reserved roles first (docs/selfhost-migration/phase-g/recovery-roles-prerequisite.md)',
+        array_to_string(v_missing, ', ');
+    END IF;
+  END IF;
+  -- no event trigger a non-superuser controls (it would run as recovery_owner inside this migration's DDL)
+  SELECT string_agg(e.evtname::text || ' (owner ' || e.evtowner::regrole::text || ', function owner ' || p.proowner::regrole::text || ')', ', ') INTO v_evt
+    FROM pg_event_trigger e JOIN pg_proc p ON p.oid = e.evtfoid
+   WHERE NOT (SELECT rolsuper FROM pg_roles WHERE oid = e.evtowner) OR NOT (SELECT rolsuper FROM pg_roles WHERE oid = p.proowner);
+  IF v_evt IS NOT NULL THEN
+    RAISE EXCEPTION '087 preflight: event trigger(s) controlled by a non-superuser exist: %. Remove them (superuser) before installing 087', v_evt;
   END IF;
   IF to_regprocedure('public.op_execute(uuid,text,jsonb,text)') IS NULL OR to_regprocedure('public.op_status(uuid,text,boolean,text,jsonb)') IS NULL THEN
     RAISE EXCEPTION '087 preflight: migration 086 (op_execute / op_status) is not applied';
@@ -65,6 +112,17 @@ BEGIN
   IF to_regclass('public.zz_recovery_canary') IS NOT NULL THEN
     RAISE EXCEPTION '087 preflight: public.zz_recovery_canary already exists';
   END IF;
+  -- every public relation this migration reads or guards is a plain table (a view swapped in by its owner would run
+  -- that owner's functions in this superuser transaction)
+  SELECT string_agg(t, ', ') INTO v_evt FROM unnest(ARRAY['brands','business_profile','categories','idempotency_keys','price_levels',
+      'product_barcodes','products','shops','suppliers','unit_types','users','organizations','audit_logs','inventory','inventory_movements',
+      'price_tiers','product_image_upload_sessions','product_unit_prices','purchase_orders','refund_void_requests','sales','shifts',
+      'supplier_payments','stock_transfers','stock_transfer_items','product_units','purchase_order_items','sale_items','reprint_logs',
+      'supplier_products','app_config','platform_admins']) t
+   WHERE NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relname = t AND c.relkind IN ('r', 'p'));
+  IF v_evt IS NOT NULL THEN
+    RAISE EXCEPTION '087 preflight: not plain tables in public: %', v_evt;
+  END IF;
 END $pre$;
 
 -- ACLs of every public relation and of the prune function BEFORE 087 changes any grant (the rollback restores these exactly)
@@ -77,21 +135,250 @@ CREATE TEMP TABLE m087_fnacl0 ON COMMIT DROP AS
 
 -- ------------------------------------------------------------ 1/9 roles and schema
 DO $r$ BEGIN   -- idempotent: a rolled-back 087 keeps its roles (they own the archived evidence)
+  -- v87.x: recovery roles may pre-exist ONLY as the roles of a rolled-back 087 (an archive schema they own); roles
+  -- created by anyone else (e.g. `postgres` before the roles were reserved) may carry planted objects or privileges
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('recovery_owner', 'recovery_authority', 'recovery_gate'))
+     AND NOT EXISTS (SELECT 1 FROM pg_namespace n JOIN pg_roles o ON o.oid = n.nspowner
+                      WHERE n.nspname ~ '^recovery_archived_087_[0-9]{8}t[0-9]{6}$' AND o.rolname = 'recovery_owner') THEN
+    RAISE EXCEPTION '087 preflight: recovery roles exist but no rolled-back 087 archive does: they were not created by 087. A superuser must drop them (after checking what they own) before installing';
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'recovery_owner') THEN
     CREATE ROLE recovery_owner NOLOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE BYPASSRLS; END IF;   -- owns every 087 object
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'recovery_authority') THEN
     CREATE ROLE recovery_authority LOGIN NOSUPERUSER NOINHERIT; END IF;                                  -- the OFF-HOST witness authority
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'recovery_gate') THEN
     CREATE ROLE recovery_gate LOGIN NOSUPERUSER NOINHERIT; END IF;                                       -- the read-only restore gate
-  ALTER ROLE recovery_authority LOGIN;    -- a rollback sets both NOLOGIN
-  ALTER ROLE recovery_gate LOGIN;
+  -- a rollback sets both NOLOGIN. v87.x: attributes normalised and any password cleared (a credential set while a
+  -- rolled-back install's roles were unprotected is not trusted): the owner provisions the logins after installing
+  ALTER ROLE recovery_authority LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD NULL VALID UNTIL 'infinity' CONNECTION LIMIT -1;
+  ALTER ROLE recovery_gate LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT PASSWORD NULL VALID UNTIL 'infinity' CONNECTION LIMIT -1;
 END $r$;
+-- v87.x: the recovery roles as they exist now (a rolled-back 087 keeps them): recovery_owner without login or password,
+-- no non-superuser member of any of them, no membership / setting / elevated attribute of their own, nothing of theirs
+-- outside a rolled-back 087 archive; then an ACTIVE probe: every role that could manage roles (the supautils privileged
+-- role and its members, and every non-superuser with CREATEROLE) tries to ALTER, ALTER ... SET, RENAME and DROP each
+-- recovery role and to GRANT it to itself, each attempt in its own rolled-back subtransaction. Any success stops the
+-- migration (fail closed).
+DO $probe$
+DECLARE v_bad text; r text; x text; v_hits text[] := '{}';
+  v_owner oid := (SELECT oid FROM pg_roles WHERE rolname = 'recovery_owner');
+  v_arch oid[];
+BEGIN
+  IF (SELECT rolcanlogin OR rolpassword IS NOT NULL OR rolsuper OR rolcreaterole FROM pg_authid WHERE rolname = 'recovery_owner') THEN
+    RAISE EXCEPTION '087 preflight: recovery_owner has a login, a password or elevated attributes (it may have been altered): a superuser must reset it (ALTER ROLE recovery_owner NOLOGIN PASSWORD NULL NOCREATEROLE) before installing';
+  END IF;
+  IF NOT (SELECT rolbypassrls FROM pg_roles WHERE rolname = 'recovery_owner') THEN   -- 087 creates it BYPASSRLS; a rollback keeps it
+    RAISE EXCEPTION '087 preflight: recovery_owner is not as 087 creates it (no BYPASSRLS): it was not created by 087 or has been altered; a superuser must investigate before installing';
+  END IF;
+  SELECT string_agg(m.member::regrole::text || ' in ' || m.roleid::regrole::text, ', ') INTO v_bad FROM pg_auth_members m
+   WHERE m.roleid IN (SELECT oid FROM pg_roles WHERE rolname IN ('recovery_owner', 'recovery_authority', 'recovery_gate'))
+     AND NOT (SELECT rolsuper FROM pg_roles WHERE oid = m.member);
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION '087 preflight: non-superuser members of the recovery roles: % (a superuser must revoke them before installing)', v_bad;
+  END IF;
+  -- the recovery roles themselves: no memberships, no role / database settings, no elevated attributes
+  SELECT string_agg(m.member::regrole::text || ' in ' || m.roleid::regrole::text, ', ') INTO v_bad FROM pg_auth_members m
+   WHERE m.member IN (SELECT oid FROM pg_roles WHERE rolname IN ('recovery_owner', 'recovery_authority', 'recovery_gate'));
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION '087 preflight: recovery roles are members of other roles: % (a superuser must revoke them before installing)', v_bad;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_db_role_setting s JOIN pg_roles g ON g.oid = s.setrole WHERE g.rolname IN ('recovery_owner', 'recovery_authority', 'recovery_gate'))
+     OR EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('recovery_owner', 'recovery_authority', 'recovery_gate')
+                  AND (rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolinherit)) THEN
+    RAISE EXCEPTION '087 preflight: a recovery role has per-role settings or elevated attributes (it may have been altered): a superuser must reset it before installing';
+  END IF;
+  -- the rolled-back 087 archives: the rollback's exact schema name, owned by recovery_owner. Any other schema with the archive
+  -- prefix is refused (a name alone can be forged).
+  v_arch := ARRAY(SELECT n.oid FROM pg_namespace n WHERE n.nspname ~ '^recovery_archived_087_[0-9]{8}t[0-9]{6}$' AND n.nspowner = v_owner);
+  SELECT string_agg(quote_ident(n.nspname) || ' (owner ' || n.nspowner::regrole::text || ')', ', ') INTO v_bad FROM pg_namespace n
+   WHERE n.nspname LIKE 'recovery\_archived\_087\_%' AND n.oid <> ALL (v_arch);
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION '087 preflight: a recovery archive schema is not as a 087 rollback leaves it: schema % (a superuser must investigate before installing)', v_bad;
+  END IF;
+  -- nothing owned by, granted to, or default-granted for a recovery role outside a rolled-back 087 archive schema (in any database)
+  SELECT string_agg(d.classid::regclass::text || ':' || d.objid::text || ' (' || d.deptype::text || ' ' || d.refobjid::regrole::text || ')', ', ') INTO v_bad
+    FROM pg_shdepend d
+   WHERE d.refclassid = 'pg_authid'::regclass
+     AND d.refobjid IN (SELECT oid FROM pg_roles WHERE rolname IN ('recovery_owner', 'recovery_authority', 'recovery_gate'))
+     AND (d.dbid <> (SELECT oid FROM pg_database WHERE datname = current_database()) OR NOT coalesce(
+           CASE d.classid
+             WHEN 'pg_namespace'::regclass THEN d.objid
+             WHEN 'pg_class'::regclass THEN (SELECT relnamespace FROM pg_class WHERE oid = d.objid)
+             WHEN 'pg_proc'::regclass THEN (SELECT pronamespace FROM pg_proc WHERE oid = d.objid)
+             WHEN 'pg_type'::regclass THEN (SELECT typnamespace FROM pg_type WHERE oid = d.objid)
+             WHEN 'pg_default_acl'::regclass THEN (SELECT nullif(defaclnamespace, 0) FROM pg_default_acl WHERE oid = d.objid)
+           END = ANY (v_arch), false));
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION '087 preflight: objects, grants or default privileges of the recovery roles exist outside a rolled-back 087 archive: % (a superuser must remove them before installing)', v_bad;
+  END IF;
+  -- ... and an archive holds only the kinds of objects the rollback leaves (allow-list of object kinds, measured on a real
+  -- rollback); anything else refuses:
+  -- schema privileges: the owner's, and USAGE (no grant option) for authenticated, recovery_authority, recovery_gate (087's grants);
+  -- relations: ALL of the 087 tables and no other table, sequences owned by a column of them, indexes on them; permanent, not
+  --   partitions, owned by recovery_owner, with no privilege (table, sequence, column) held by or granted by any other role;
+  -- types: the row types of those tables and their array types only, owned by recovery_owner, no privilege beyond the
+  --   PostgreSQL default (PUBLIC USAGE);
+  -- constraints: primary key, unique, check, not-null on those tables;
+  -- dependencies: of its objects only on objects of the same archive (built-in objects are pinned and never recorded): no
+  --   default, check, index expression, column type, collation or access method outside it; none of the schema itself
+  --   (e.g. extension membership);
+  -- nothing else in it or attached to it: function, operator, operator class / family, collation, conversion, text search
+  --   object, extension, statistics object, trigger, rule, policy, inheritance, publication, subscription target, default privilege.
+  SELECT string_agg(z.item, ', ') INTO v_bad FROM (
+    SELECT 'missing 087 table ' || quote_ident(n.nspname) || '.' || t AS item
+      FROM pg_namespace n CROSS JOIN unnest(ARRAY['settings', 'continuity', 'lease', 'anchor_permit', 'install', 'org_state', 'epoch_history', 'events',
+             'org_chain', 'chain_log', 'keys', 'v87_txn', 'executor_rpcs', 'tills', 'journal', 'quarantine', 'quota', 'till_reconciliations',
+             'decisions', 'acl_snapshot', 'fn_acl_snapshot', 'zz_recovery_canary']) t
+     WHERE n.oid = ANY (v_arch) AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.relnamespace = n.oid AND c.relname = t AND c.relkind = 'r')
+    UNION ALL
+    SELECT 'dependency of schema ' || quote_ident(n.nspname) || ' on ' || pg_describe_object(d.refclassid, d.refobjid, d.refobjsubid)
+      FROM pg_depend d JOIN pg_namespace n ON n.oid = d.objid WHERE d.classid = 'pg_namespace'::regclass AND d.objid = ANY (v_arch)
+    UNION ALL
+    SELECT 'schema privilege ' || a.privilege_type || ' of ' || n.nspname::text || ' for ' || CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END AS item
+      FROM pg_namespace n CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) a
+     WHERE n.oid = ANY (v_arch)
+       AND NOT (a.grantor = v_owner AND (a.grantee = v_owner OR (a.privilege_type = 'USAGE' AND NOT a.is_grantable
+                AND a.grantee IN (SELECT oid FROM pg_roles WHERE rolname IN ('authenticated', 'recovery_authority', 'recovery_gate')))))
+    UNION ALL
+    SELECT 'relation ' || c.oid::regclass::text || ' (kind ' || c.relkind::text || ', owner ' || c.relowner::regrole::text || ')' FROM pg_class c
+     WHERE c.relnamespace = ANY (v_arch)
+       AND NOT (c.relowner = v_owner AND c.relpersistence = 'p' AND NOT c.relispartition AND (
+             (c.relkind = 'r' AND c.relname IN ('settings', 'continuity', 'lease', 'anchor_permit', 'install', 'org_state', 'epoch_history', 'events',
+                'org_chain', 'chain_log', 'keys', 'v87_txn', 'executor_rpcs', 'tills', 'journal', 'quarantine', 'quota', 'till_reconciliations',
+                'decisions', 'acl_snapshot', 'fn_acl_snapshot', 'zz_recovery_canary'))
+          OR (c.relkind = 'S' AND EXISTS (SELECT 1 FROM pg_depend d JOIN pg_class t ON t.oid = d.refobjid
+                                           WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.refclassid = 'pg_class'::regclass
+                                             AND d.deptype = 'a' AND t.relnamespace = c.relnamespace AND t.relkind = 'r'))
+          OR (c.relkind = 'i' AND EXISTS (SELECT 1 FROM pg_index i JOIN pg_class t ON t.oid = i.indrelid
+                                           WHERE i.indexrelid = c.oid AND t.relnamespace = c.relnamespace AND t.relkind = 'r'))))
+    UNION ALL
+    SELECT 'privilege ' || a.privilege_type || ' on ' || c.oid::regclass::text || ' for ' || CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END
+      FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a
+     WHERE c.relnamespace = ANY (v_arch) AND (a.grantee <> v_owner OR a.grantor <> v_owner)
+    UNION ALL
+    SELECT 'column privilege ' || a.privilege_type || ' on ' || c.oid::regclass::text || '.' || t.attname::text || ' for '
+           || CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END
+      FROM pg_attribute t JOIN pg_class c ON c.oid = t.attrelid CROSS JOIN LATERAL aclexplode(t.attacl) a
+     WHERE c.relnamespace = ANY (v_arch) AND (a.grantee <> v_owner OR a.grantor <> v_owner)
+    UNION ALL
+    SELECT 'type ' || t.oid::regtype::text FROM pg_type t
+     WHERE t.typnamespace = ANY (v_arch)
+       AND NOT (t.typowner = v_owner
+                AND ((t.typtype = 'c' AND EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = t.typrelid AND c.relnamespace = t.typnamespace AND c.relkind = 'r'))
+                  OR (t.typcategory = 'A' AND EXISTS (SELECT 1 FROM pg_type e JOIN pg_class c ON c.oid = e.typrelid
+                                                       WHERE e.oid = t.typelem AND e.typarray = t.oid AND e.typtype = 'c'
+                                                         AND c.relnamespace = t.typnamespace AND c.relkind = 'r')))
+                AND NOT EXISTS (SELECT 1 FROM aclexplode(t.typacl) a        -- the default only: the owner's, and USAGE for PUBLIC
+                                 WHERE NOT (a.grantor = v_owner AND (a.grantee = v_owner OR (a.grantee = 0 AND a.privilege_type = 'USAGE' AND NOT a.is_grantable)))))
+    UNION ALL
+    SELECT 'constraint ' || k.conname::text || ' (' || k.contype::text || ')' FROM pg_constraint k
+     WHERE k.connamespace = ANY (v_arch)
+       AND NOT (k.contype IN ('p', 'u', 'c', 'n') AND k.contypid = 0
+                AND EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = k.conrelid AND c.relnamespace = k.connamespace AND c.relkind = 'r'))
+    UNION ALL
+    SELECT 'dependency of ' || pg_describe_object(d.classid, d.objid, d.objsubid) || ' on ' || pg_describe_object(d.refclassid, d.refobjid, d.refobjsubid)
+      FROM pg_depend d
+      JOIN LATERAL (SELECT CASE d.classid
+             WHEN 'pg_class'::regclass THEN (SELECT relnamespace FROM pg_class WHERE oid = d.objid)
+             WHEN 'pg_type'::regclass THEN (SELECT typnamespace FROM pg_type WHERE oid = d.objid)
+             WHEN 'pg_constraint'::regclass THEN (SELECT connamespace FROM pg_constraint WHERE oid = d.objid)
+             WHEN 'pg_attrdef'::regclass THEN (SELECT c.relnamespace FROM pg_attrdef f JOIN pg_class c ON c.oid = f.adrelid WHERE f.oid = d.objid)
+           END AS ns) o ON o.ns = ANY (v_arch)
+     WHERE d.classid IN ('pg_class'::regclass, 'pg_type'::regclass, 'pg_constraint'::regclass, 'pg_attrdef'::regclass)
+       AND o.ns IS DISTINCT FROM CASE d.refclassid
+             WHEN 'pg_namespace'::regclass THEN d.refobjid
+             WHEN 'pg_class'::regclass THEN (SELECT relnamespace FROM pg_class WHERE oid = d.refobjid)
+             WHEN 'pg_type'::regclass THEN (SELECT typnamespace FROM pg_type WHERE oid = d.refobjid)
+             WHEN 'pg_constraint'::regclass THEN (SELECT connamespace FROM pg_constraint WHERE oid = d.refobjid)
+           END
+    UNION ALL SELECT 'function ' || p.oid::regprocedure::text FROM pg_proc p WHERE p.pronamespace = ANY (v_arch)
+    UNION ALL SELECT 'operator ' || o.oid::regoperator::text FROM pg_operator o WHERE o.oprnamespace = ANY (v_arch)
+    UNION ALL SELECT 'operator class ' || opcname::text FROM pg_opclass WHERE opcnamespace = ANY (v_arch)
+    UNION ALL SELECT 'operator family ' || opfname::text FROM pg_opfamily WHERE opfnamespace = ANY (v_arch)
+    UNION ALL SELECT 'collation ' || collname::text FROM pg_collation WHERE collnamespace = ANY (v_arch)
+    UNION ALL SELECT 'conversion ' || conname::text FROM pg_conversion WHERE connamespace = ANY (v_arch)
+    UNION ALL SELECT 'text search configuration ' || cfgname::text FROM pg_ts_config WHERE cfgnamespace = ANY (v_arch)
+    UNION ALL SELECT 'text search dictionary ' || dictname::text FROM pg_ts_dict WHERE dictnamespace = ANY (v_arch)
+    UNION ALL SELECT 'text search parser ' || prsname::text FROM pg_ts_parser WHERE prsnamespace = ANY (v_arch)
+    UNION ALL SELECT 'text search template ' || tmplname::text FROM pg_ts_template WHERE tmplnamespace = ANY (v_arch)
+    UNION ALL SELECT 'extension ' || extname::text FROM pg_extension WHERE extnamespace = ANY (v_arch)
+    UNION ALL SELECT 'statistics object ' || s.stxname::text FROM pg_statistic_ext s
+               WHERE s.stxnamespace = ANY (v_arch) OR s.stxrelid IN (SELECT oid FROM pg_class WHERE relnamespace = ANY (v_arch))
+    UNION ALL SELECT 'trigger ' || t.tgname::text || ' on ' || t.tgrelid::regclass::text FROM pg_trigger t
+               WHERE t.tgrelid IN (SELECT oid FROM pg_class WHERE relnamespace = ANY (v_arch))
+    UNION ALL SELECT 'rule ' || w.rulename::text || ' on ' || w.ev_class::regclass::text FROM pg_rewrite w
+               WHERE w.ev_class IN (SELECT oid FROM pg_class WHERE relnamespace = ANY (v_arch))
+    UNION ALL SELECT 'policy ' || p.polname::text || ' on ' || p.polrelid::regclass::text FROM pg_policy p
+               WHERE p.polrelid IN (SELECT oid FROM pg_class WHERE relnamespace = ANY (v_arch))
+    UNION ALL SELECT 'inheritance ' || i.inhrelid::regclass::text || ' of ' || i.inhparent::regclass::text FROM pg_inherits i
+               WHERE i.inhrelid IN (SELECT oid FROM pg_class WHERE relnamespace = ANY (v_arch)) OR i.inhparent IN (SELECT oid FROM pg_class WHERE relnamespace = ANY (v_arch))
+    UNION ALL SELECT 'publication of ' || r.prrelid::regclass::text FROM pg_publication_rel r
+               WHERE r.prrelid IN (SELECT oid FROM pg_class WHERE relnamespace = ANY (v_arch))
+    UNION ALL SELECT 'publication of schema ' || n.pnnspid::regnamespace::text FROM pg_publication_namespace n WHERE n.pnnspid = ANY (v_arch)
+    UNION ALL SELECT 'subscription target ' || s.srrelid::regclass::text FROM pg_subscription_rel s
+               WHERE s.srrelid IN (SELECT oid FROM pg_class WHERE relnamespace = ANY (v_arch))
+    UNION ALL SELECT 'default privilege of ' || d.defaclrole::regrole::text || ' in ' || d.defaclnamespace::regnamespace::text FROM pg_default_acl d
+               WHERE d.defaclnamespace = ANY (v_arch)) z;
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION '087 preflight: a recovery archive schema is not as a 087 rollback leaves it: % (a superuser must investigate before installing)', v_bad;
+  END IF;
+  -- probed: every non-superuser that can manage roles (CREATEROLE) or is the supautils privileged role / a member of it
+  FOR r IN SELECT DISTINCT g.rolname FROM pg_roles g
+            WHERE NOT g.rolsuper AND (g.rolcreaterole OR g.rolname = current_setting('supautils.privileged_role', true)
+                  OR (current_setting('supautils.privileged_role', true) IS NOT NULL AND to_regrole(current_setting('supautils.privileged_role', true)) IS NOT NULL
+                      AND pg_has_role(g.oid, to_regrole(current_setting('supautils.privileged_role', true)), 'MEMBER'))) ORDER BY 1 LOOP
+    FOREACH x IN ARRAY ARRAY['recovery_owner', 'recovery_authority', 'recovery_gate'] LOOP
+      -- (becoming a recovery role needs membership — refused above from pg_auth_members; SET ROLE cannot be probed from
+      -- here: PostgreSQL authorises it against the SESSION user, the superuser runner)
+      BEGIN
+        EXECUTE format('SET LOCAL ROLE %I', r);
+        EXECUTE format('ALTER ROLE %I SET work_mem = %L', x, '1MB');
+        RAISE EXCEPTION USING MESSAGE = 'm087_probe_succeeded';
+      EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM = 'm087_probe_succeeded' THEN v_hits := v_hits || (r || ' can ALTER ROLE SET on ' || x); END IF;
+      END;
+      BEGIN
+        EXECUTE format('SET LOCAL ROLE %I', r);
+        EXECUTE format('ALTER ROLE %I RENAME TO %I', x, x || '_m087probe');
+        RAISE EXCEPTION USING MESSAGE = 'm087_probe_succeeded';
+      EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM = 'm087_probe_succeeded' THEN v_hits := v_hits || (r || ' can RENAME ' || x); END IF;
+      END;
+      BEGIN
+        EXECUTE format('SET LOCAL ROLE %I', r);
+        EXECUTE format('DROP ROLE %I', x);
+        RAISE EXCEPTION USING MESSAGE = 'm087_probe_succeeded';
+      EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM = 'm087_probe_succeeded' THEN v_hits := v_hits || (r || ' can DROP ' || x); END IF;
+      END;
+      BEGIN
+        EXECUTE format('SET LOCAL ROLE %I', r);
+        EXECUTE format('ALTER ROLE %I CONNECTION LIMIT 1', x);
+        RAISE EXCEPTION USING MESSAGE = 'm087_probe_succeeded';
+      EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM = 'm087_probe_succeeded' THEN v_hits := v_hits || (r || ' can ALTER ' || x); END IF;
+      END;
+      BEGIN
+        EXECUTE format('SET LOCAL ROLE %I', r);
+        EXECUTE format('GRANT %I TO %I', x, r);
+        RAISE EXCEPTION USING MESSAGE = 'm087_probe_succeeded';
+      EXCEPTION WHEN OTHERS THEN
+        IF SQLERRM = 'm087_probe_succeeded' THEN v_hits := v_hits || (r || ' can GRANT itself ' || x); END IF;
+      END;
+    END LOOP;
+  END LOOP;
+  IF session_user <> current_user THEN RAISE EXCEPTION '087 preflight: the probe did not restore the runner role'; END IF;
+  IF cardinality(v_hits) > 0 THEN
+    RAISE EXCEPTION '087 preflight: the recovery roles are NOT protected: %. Add them to supautils.reserved_roles (docs/selfhost-migration/phase-g/recovery-roles-prerequisite.md)',
+      array_to_string(v_hits, '; ');
+  END IF;
+END $probe$;
 GRANT SELECT ON public.shops, public.products, public.product_units, public.purchase_orders, public.sales, public.stock_transfers,
   public.suppliers, public.users, public.price_levels, public.organizations, public.idempotency_keys TO recovery_owner;
 CREATE SCHEMA recovery AUTHORIZATION recovery_owner;
 REVOKE ALL ON SCHEMA recovery FROM PUBLIC;
 GRANT USAGE ON SCHEMA recovery TO authenticated, recovery_authority, recovery_gate;   -- functions only; the schema is not exposed by PostgREST
-ALTER DEFAULT PRIVILEGES FOR ROLE recovery_owner IN SCHEMA recovery REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;   -- later 087 / 088 functions too
+ALTER DEFAULT PRIVILEGES FOR ROLE recovery_owner IN SCHEMA recovery REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;   -- records nothing (a per-schema default cannot revoke the built-in PUBLIC EXECUTE): every function is revoked explicitly below, and a later migration must do the same
 
 -- public-schema canary: renewed with the lease; a reload of the public schema brings back an old or copied row
 CREATE TABLE public.zz_recovery_canary (one boolean PRIMARY KEY DEFAULT true CHECK (one), seq int NOT NULL, issued_xid xid8 NOT NULL);
@@ -801,3 +1088,13 @@ SELECT recovery_guard.register_guards();
 INSERT INTO recovery.continuity SELECT true, 'hold', (SELECT system_identifier::text FROM pg_control_system()),
   (SELECT timeline_id FROM pg_control_checkpoint())::int, (SELECT oid FROM pg_database WHERE datname = current_database());
 NOTIFY pgrst, 'reload schema';
+-- v87.x: the event triggers disabled at the top of this file, re-enabled with their own mode (O / R / A)
+DO $evt_on$
+DECLARE e jsonb;
+BEGIN
+  FOR e IN SELECT * FROM pg_catalog.jsonb_array_elements(pg_catalog.current_setting('m087.event_triggers')::jsonb) LOOP
+    EXECUTE pg_catalog.format('ALTER EVENT TRIGGER %I %s', e->>'n',
+      CASE e->>'m' WHEN 'O' THEN 'ENABLE' WHEN 'R' THEN 'ENABLE REPLICA' WHEN 'A' THEN 'ENABLE ALWAYS' END);
+  END LOOP;
+END $evt_on$;
+RESET search_path;   -- v87.x: the pinned path ends with this migration (later files in the same runner transaction get the default)

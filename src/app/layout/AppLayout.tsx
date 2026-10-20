@@ -16,7 +16,7 @@ import { clearNeedsReauth, countPendingOutbox, drainOutbox, refreshSyncStatus } 
 import { subscribeInventoryRealtime, syncInventoryScope } from "../../stores/data/inventoryRealtime";
 import { ExportQueueDialog } from "../../components/sync/ExportQueueDialog";
 import { RecoveryBanner } from "../../components/sync/RecoveryBanner";
-import { loadRecoveryState, recoveryView } from "../../stores/data/recoveryState";
+import { loadRecoveryState, offlineFinancialOpsBlocked, recoveryView, useRecoveryStore } from "../../stores/data/recoveryState";
 import { runRecoveryCheck } from "../../stores/data/recovery87";
 import { useTranslation } from "../../hooks/useTranslation";
 
@@ -38,6 +38,10 @@ export const AppLayout = () => {
   const applyInventoryRealtimeDelete = useDataStore((state) => state.applyInventoryRealtimeDelete);
   const refreshInventoryFromServer = useDataStore((state) => state.refreshInventoryFromServer);
   const isOnline = useConnectivityStore((state) => state.isOnline);
+  // v87.x: on a server with migration 087 (or not known to be without it) new money entries need the server
+  // (the view re-renders this on every recovery-state change; the predicate is the same one the data layer enforces)
+  useRecoveryStore((state) => state.view);
+  const financialOfflineBlocked = offlineFinancialOpsBlocked();
   const pendingCount = useSyncStore((state) => state.pendingCount);
   const conflictCount = useSyncStore((state) => state.conflictCount);
   const quarantinedCount = useSyncStore((state) => state.quarantinedCount);
@@ -340,8 +344,11 @@ export const AppLayout = () => {
           </div>
         )}
         {!isOnline && (
-          <div className="rounded-full bg-slate-800 px-3 py-1 text-xs text-white shadow-lg">
-            Offline — showing cached data
+          <div className="rounded-full bg-slate-800 px-3 py-1 text-xs text-white shadow-lg" data-testid="offline-badge"
+            data-financial-blocked={financialOfflineBlocked ? "true" : "false"}>
+            {financialOfflineBlocked
+              ? "Offline — showing cached data. New sales and other money entries are switched off until this till reaches the server."
+              : "Offline — showing cached data"}
           </div>
         )}
         {showInventoryBadge && inventorySyncState === "stale" && (

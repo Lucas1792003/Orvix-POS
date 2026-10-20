@@ -4,7 +4,8 @@ import { classifyFailure } from "../../lib/failureClass";
 import { enqueueOutbox } from "./outbox";
 import { RpcError, runRequest, toRpcError, type RpcOutcome } from "./idempotentRpc";
 import { EPOCH_HEADER } from "../../lib/epochHeader";
-import { assertNewOperationAllowed, currentOpEpoch, isRecoveryBlocked } from "./recoveryState";
+import { isRecoveryBlocked, noteAuthorizationLost, offlineFinancialBlockedError, offlineFinancialOpsBlocked } from "./recoveryState";
+import { gateNewOperation } from "./recoveryGate";
 
 // Tables this helper knows how to mirror locally. Deliberately narrow — the
 // multi-row/batch catalog writes (product barcodes, product units, supplier
@@ -56,15 +57,28 @@ interface WriteTableRowInput {
 export async function writeTableRow(
   { table, op, row, appRow, id }: WriteTableRowInput,
 ): Promise<{ error: { message: string } | null }> {
-  // 087: created now, under the current epoch — or not at all (recovery mode).
-  const opEpoch = currentOpEpoch();
+  // 087: created now, under the current epoch — or not at all (recovery mode). v87.x: through the same gate as every
+  // other new operation (on an 087 server: online, and freshly authorised by the server in this process).
+  const created: { opEpoch: string | null } = { opEpoch: null };
   try {
-    assertNewOperationAllowed(opEpoch);
+    await gateNewOperation(created);
   } catch (err) {
     if (isRecoveryBlocked(err)) return { error: { message: err.message } };
     throw err;
   }
-  const queueForLater = async () => {
+  const opEpoch = created.opEpoch;
+  const queueForLater = async (mayHaveCommitted = false) => {
+    // v87.x: on an 087 server a write is never queued for later (it would be an offline change). Not delivered: nothing
+    // was saved, said so. Outcome unknown (timeout, lost reply): it may have been saved — never reported as "not saved".
+    if (offlineFinancialOpsBlocked()) {
+      noteAuthorizationLost();
+      if (mayHaveCommitted) {
+        return { error: { message: "Not confirmed — the server did not answer, so this change may or may not have been saved. It is not " +
+          "sent again automatically (offline changes are switched off on this server — recovery safeguard). Reconnect and check the " +
+          "current list before entering it again." } };
+      }
+      return { error: { message: offlineFinancialBlockedError("The server could not be reached.").message } };
+    }
     await enqueueOutbox({ kind: "table_write", name: `${table}.${op}`, table, op, row, id, shopId: null, opEpoch });
     await mirrorLocally(table, op, appRow, id);
     return { error: null };
@@ -86,7 +100,7 @@ export async function writeTableRow(
   if (outcome.error) {
     const { failure } = outcome.error;
     // (a recovery refusal holds — it is never queued for later)
-    if (failure.retryable && failure.hold === null) return queueForLater();
+    if (failure.retryable && failure.hold === null) return queueForLater(failure.mayHaveCommitted);
     return { error: { message: outcome.error.message } };
   }
   await mirrorLocally(table, op, appRow, id);

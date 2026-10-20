@@ -24,3 +24,7 @@ per-role `pg_hba.conf` rules: the database image trusts loopback connections wit
 Never commit or print `authority.key`.
 
 Tested by `tools/m087-verify` (parts x1, x2, x3).
+
+v87.x: every genesis and tick also refuses (server-wide, lease revoked) while the recovery roles are not protected —
+not in `supautils.reserved_roles`, a non-superuser event trigger, `recovery_owner` able to log in, or a non-superuser member
+(`PREREQ_*`; [`recovery-roles-prerequisite.md`](../../docs/selfhost-migration/phase-g/recovery-roles-prerequisite.md)).

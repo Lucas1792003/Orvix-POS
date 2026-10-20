@@ -66,7 +66,9 @@ export type RpcMode =
   /** The server applies the request, then the reply never arrives (crash after commit). */
   | "commit-then-hang"
   /** 086: refused because a prerequisite is missing — never recorded (op_not_recorded:dependency). */
-  | "dependency-error";
+  | "dependency-error"
+  /** The request never reached the server (connection refused): definitely not applied. */
+  | "not-delivered";
 
 export interface RecordedCall {
   name: string;
@@ -152,6 +154,10 @@ const canonical = (value: unknown): string => {
 const NETWORK_FAILURE = {
   data: null, status: 0, statusText: "",
   error: { message: "TypeError: Failed to fetch", details: "TypeError: Failed to fetch", hint: "", code: "" },
+};
+const NOT_DELIVERED = {
+  data: null, status: 0, statusText: "",
+  error: { message: "TypeError: connection refused", details: "connection refused", hint: "", code: "" },
 };
 
 function createFakeSupabase() {
@@ -438,6 +444,7 @@ function createFakeSupabase() {
     const org = caller.org;
     const ok = (data: unknown) => ({ data, error: null, status: 200, replayed: false });
     if (mode === "network-error" && RECOVERY_FNS.has(name)) return { ...NETWORK_FAILURE, replayed: false };
+    if (mode === "not-delivered" && RECOVERY_FNS.has(name)) return { ...NOT_DELIVERED, replayed: false };
     switch (name) {
       case "recovery_epoch": {
         const ctx = (args.p_ctx ?? {}) as Record<string, unknown>;
@@ -549,6 +556,8 @@ function createFakeSupabase() {
     switch (mode) {
       case "network-error":
         return { ...NETWORK_FAILURE, replayed: false };
+      case "not-delivered":
+        return { ...NOT_DELIVERED, replayed: false };
       case "commit-then-timeout": {
         const result = execute(name, args);
         return { ...NETWORK_FAILURE, replayed: result.replayed };

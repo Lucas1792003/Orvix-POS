@@ -23,6 +23,7 @@ UPSTREAM_ENVOY_DIR=<dir with the pinned upstream lds.template.yaml, envoy.yaml, 
 | `compat` | 086's live SQL suite with 087 installed. One failure is expected and accepted, and only that one: FS.10's cleanup DELETE of a ledger row is refused by 087's ledger protection (M3) after FS.10's assertions pass. |
 | `x3` | Restores of the real migration on the real database image. |
 | `x1` | Restore matrix on plain PostgreSQL. |
+| `archive` | The rolled-back archive allow-list (`archive/archive-allowlist.py`, v87.x): 087 rolled back (≥ 2 real archives, the first with x2's live evidence); each of 51 single deviations (object kinds, owners, table / column / schema / type privileges, grantors, default privileges, triggers, rules, policies, inheritance, publications, outside dependencies, extension membership, forged or incomplete archives, role attributes, other databases) must refuse the re-install naming itself with **nothing applied** (a fingerprint of everything 087 changes is identical before and after); then the archives are unchanged (`archive/inventory.sql`), the re-install commits held, a further rollback and re-install work, and the archived evidence is untouched. Runs last (it leaves 087 re-installed, without x2's lease and tills). Refuses connection strings, any container but `phf-iso-db` on loopback, and pre-existing resources of its own (`zz_m087_*`, extension `tcn`, database `zz_m087_other`); removes only those. |
 
 Requirements: those of `tools/security-audit` and `tools/m086-verify`, plus OpenSSL 3 (Ed25519) and Playwright's Chromium.
 

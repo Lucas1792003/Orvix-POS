@@ -31,7 +31,8 @@ import { resetWriteAheadForTests } from "./writeAhead";
 import { beginOperation, newIdempotencyKey, setExecutorCapabilityForTests } from "./idempotentRpc";
 import { getJournalRecord, journalCommitted, journalPrinted, listJournal } from "./opJournal";
 import {
-  isRecoveryBlocked, loadRecoveryState, recoveryView, resetRecoveryStateForTests, storedEpoch, storeTillCredential,
+  isRecoveryBlocked, loadRecoveryState, recoveryView, resetRecoveryStateForTests, storedEpoch, storeTillCredential, simulatePreV87xClientForTests,
+  OFFLINE_FINANCIAL_DISABLED,
 } from "./recoveryState";
 import {
   approveTill, chunkRecords, currentUploadPlan, refreshRecoveryEpoch, registerThisTill, runRecoveryCheck, uploadRecordOf, uploadTillJournal,
@@ -100,6 +101,7 @@ beforeEach(async () => {
   await restart();
 });
 afterEach(() => {
+  simulatePreV87xClientForTests(false);
   vi.unstubAllGlobals();
   registerOperationPrompt(null);
 });
@@ -171,16 +173,34 @@ describe("normal and offline sales", () => {
     expect(await rows()).toHaveLength(0);
   });
 
-  it("offline sale with a previously valid epoch: queued with that epoch, sent later with the same one", async () => {
+  it("v87.x: an offline sale on an 087 server is REFUSED — nothing staged, queued, journaled or sent; online it goes through", async () => {
+    await normalTill();
+    online(false);
+    const { get } = makeSaleStore();
+    const err = await get().createSale(saleInput()).catch((e) => e);
+    expect(isRecoveryBlocked(err)).toBe(true);
+    expect(err.code).toBe(OFFLINE_FINANCIAL_DISABLED);
+    expect(String(err.message)).toMatch(/^Not recorded — nothing was saved\. This till is offline\./);
+    expect(await rows()).toHaveLength(0);
+    expect(await localDb.sales.count()).toBe(0);
+    expect((await listJournal({ orgId: "org-1" })).records).toHaveLength(0);
+    expect(fake.calls.filter((c) => c.name !== "recovery_epoch")).toHaveLength(0);
+    online(true);
+    await get().createSale(saleInput());
+    expect(fake.server.sales).toHaveLength(1);
+    expect(await rows()).toHaveLength(0);
+  });
+
+  it("(pre-v87.x queue) an offline sale queued by the previous build keeps its epoch and is sent later with the same one", async () => {
     await normalTill();
     const epoch = storedEpoch()!.epoch;
     online(false);
+    simulatePreV87xClientForTests(true);
     const { get } = makeSaleStore();
     await get().createSale(saleInput());
+    simulatePreV87xClientForTests(false);
     const [row] = await rows();
     expect(row).toMatchObject({ status: "pending", opEpoch: epoch });
-    expect((await getJournalRecord(row.idempotencyKey!))).toMatchObject({ state: "never-sent", opEpoch: epoch });
-    expect(fake.calls.filter((c) => c.name !== "recovery_epoch")).toHaveLength(0);
     online(true);
     expect(await drainOutbox()).toBe("drained");
     expect((v87Calls()[0].args.p_ctx as Record<string, unknown>).op_epoch).toBe(epoch);
@@ -230,10 +250,12 @@ describe("recovery hold received while online", () => {
 describe("restart, network loss and resuming", () => {
   it("recovery mode survives a restart and a network loss; reconnecting does not clear it; only a verified epoch does", async () => {
     await normalTill();
-    // a sale queued offline BEFORE the till learns of the hold
+    // a sale queued offline BEFORE the till learns of the hold (by the previous build: v87.x refuses new ones)
     online(false);
     const { get } = makeSaleStore();
+    simulatePreV87xClientForTests(true);
     await get().createSale(saleInput());
+    simulatePreV87xClientForTests(false);
     online(true);
     fake.hold87Org("org-1");
     fake.release87Org("org-1");               // (released again WITHOUT an epoch change below)
@@ -381,7 +403,9 @@ describe("till reconciliation: journal upload, retry, conflict, quota, approval"
     const { get } = makeSaleStore();
     await get().createSale(saleInput());
     online(false);
-    await get().createSale(saleInput());                     // a queued, never-sent sale
+    simulatePreV87xClientForTests(true);                      // a queued, never-sent sale (left by the previous build)
+    await get().createSale(saleInput());
+    simulatePreV87xClientForTests(false);
     online(true);
     fake.hold87Org("org-1");                                  // recovery: new epoch, till unreconciled
     expect((await refreshRecoveryEpoch()).kind).toBe("refused");
@@ -499,7 +523,9 @@ describe("no automatic fencing, replay or replacement during recovery", () => {
   it("a replacement of an in-doubt sale is blocked while held (no op_status_v87 fence)", async () => {
     await normalTill();
     const op = beginOperation();
+    simulatePreV87xClientForTests(true);                      // an in-doubt row as the previous build queued it
     await enqueueOutbox({ kind: "rpc", name: "complete_sale", args: saleInputArgs(), idempotencyKey: op.idempotencyKey, shopId: "shop-1", opEpoch: op.opEpoch });
+    simulatePreV87xClientForTests(false);
     const [row] = await rows();
     await localDb.syncOutbox.update(row.localId, { inDoubt: true });
     fake.hold87Org("org-1");
@@ -843,7 +869,7 @@ describe("recovery state that could not be persisted", () => {
     expect(await rows()).toHaveLength(0);
   });
 
-  it("BOTH stores failed and the till restarts OFFLINE: a sale under the old epoch is queued but the server never executes it", async () => {
+  it("v87.x: BOTH stores failed and the till restarts OFFLINE: a new sale is REFUSED (the gap of v87 is closed) — nothing queued", async () => {
     await normalTill();
     const spy = failModeWrites();
     fake.hold87Org("org-1");
@@ -852,23 +878,29 @@ describe("recovery state that could not be persisted", () => {
     spy.mockRestore();
     online(false);
     await restart();
-    await get().createSale(saleInput());                                     // indistinguishable from the unwitnessed tail
-    const [queued] = await rows();
+    expect(recoveryView().mode).toBe("normal");                              // the hold was never persisted: the old epoch looks valid
+    const err = await get().createSale(saleInput()).catch((e) => e);
+    expect(isRecoveryBlocked(err)).toBe(true);
+    expect(err.code).toBe(OFFLINE_FINANCIAL_DISABLED);                        // ... but offline nothing is created on an 087 server
+    expect(await rows()).toHaveLength(0);
+    expect(await localDb.sales.count()).toBe(0);
     online(true);
     const sent = v87Calls().length;
     await drainOutbox();
-    expect(v87Calls()).toHaveLength(sent);                                   // the server was asked first: nothing sent
+    expect(v87Calls()).toHaveLength(sent);
     expect(fake.server.sales).toHaveLength(0);
-    expect(recoveryView().allowed).toBe(false);
-    const [row] = await rows();
-    expect(row).toMatchObject({ idempotencyKey: queued.idempotencyKey, opEpoch: queued.opEpoch, args: queued.args });   // kept unchanged
+    // online: the server is asked first and refuses (the hold) — still nothing saved
+    await expect(get().createSale(saleInput())).rejects.toSatisfy(isRecoveryBlocked);
+    expect(await rows()).toHaveLength(0);
   });
 
   it("pending operations and a stale epoch after an online restart: nothing is sent until the server authorises the till", async () => {
     await normalTill();
     online(false);
     const { get } = makeSaleStore();
+    simulatePreV87xClientForTests(true);                      // queued by the previous build
     await get().createSale(saleInput());
+    simulatePreV87xClientForTests(false);
     online(true);
     fake.hold87Org("org-1"); fake.release87Org("org-1");                     // a recovery happened while the till was away
     await restart();

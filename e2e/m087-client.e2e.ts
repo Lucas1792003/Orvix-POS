@@ -143,24 +143,25 @@ test("C1 a fresh till on an 087 server: blocked until the server verifies it; th
   }
 });
 
-test("C2 offline sale with the previously valid epoch: queued with it, synced with it", async () => {
+test("C2 v87.x: an offline sale on an 087 server is REFUSED with the cashier explanation; nothing queued; online again it is recorded", async () => {
   const T = await reopen("m087c-1");
   try {
     await T.gotoPos();
-    const epoch = serverEpoch();
     const salesBefore = await serverSales();
     await T.setOffline(true);
+    await expect(T.page.getByTestId("offline-badge")).toHaveAttribute("data-financial-blocked", "true", { timeout: 30_000 });
+    note("C2.offline-badge", (await T.page.getByTestId("offline-badge").innerText()).trim());
     await T.posAddByCard(P1);
-    const { receiptNo } = await T.posCheckout(5000);
-    const [row] = (await T.outbox() as any[]).filter((r: any) => r.name === "complete_sale");
-    expect(row).toMatchObject({ status: "pending", opEpoch: epoch });
+    const refused = await checkoutRefused(T);
+    expect(refused).toMatch(/offline entries are switched off/);
+    note("C2.offline-refused", refused);
+    expect((await T.outbox() as any[]).filter((r: any) => r.name === "complete_sale")).toHaveLength(0);
+    expect((await idbRecords(T, "opj:")).filter((r) => r.state === "never-sent")).toHaveLength(0);
     await T.setOffline(false);
-    await expect.poll(async () => (await T.outbox() as any[]).filter((r: any) => r.name === "complete_sale").length, { timeout: 120_000 }).toBe(0);
+    await T.posCheckout(5000);                                          // the same cart, now online: recorded
     expect(await serverSales()).toBe(salesBefore + 1);
-    expect(ledger(row.idempotencyKey)).toBe("committed");
-    const sent = T.rpcBodies.filter((b) => b.name === "op_execute_v87" && (b.body as any)?.p_key === row.idempotencyKey);
-    expect(sent.every((b) => (b.body as any).p_ctx.op_epoch === epoch)).toBe(true);
-    note("C2", { receiptNo, queuedWith: "the epoch it was created under", synced: "committed", resentWithSameEpoch: sent.length });
+    expect((await T.outbox() as any[]).filter((r: any) => r.name === "complete_sale")).toHaveLength(0);
+    note("C2", { offline: "refused, nothing queued", online: "recorded through op_execute_v87" });
   } finally {
     await T.close();
   }
@@ -170,12 +171,8 @@ test("C3 a hold received while ONLINE: the sale is refused (never turned into an
   let T = await reopen("m087c-1");
   try {
     await T.gotoPos();
-    // a sale queued offline BEFORE the hold (created under the current epoch)
-    await T.setOffline(true);
-    await T.posAddByCard(P1);
-    await T.posCheckout(5000);
-    const [queued] = (await T.outbox() as any[]).filter((r: any) => r.name === "complete_sale");
-    note("C3.queued-before-hold", { key: queued.idempotencyKey, opEpoch: queued.opEpoch });
+    // (v87.x: no sale can be queued offline before the hold any more — C2; the queues an older build left are covered
+    // by the unit suites recovery087*.test.ts)
     sql1(`select recovery.owner_hold_org('${org()}', 'v87 client e2e: simulated restore')`);
     const salesBefore = await serverSales();
     await T.setOffline(false);
@@ -183,9 +180,8 @@ test("C3 a hold received while ONLINE: the sale is refused (never turned into an
     note("C3.online-refused", await checkoutRefused(T));
     await expect(T.page.getByTestId("recovery-banner")).toBeVisible({ timeout: 60_000 });
     expect(["hold", "not-reconciled"]).toContain(await T.page.getByTestId("recovery-banner").getAttribute("data-mode"));
-    expect((await T.outbox() as any[]).filter((r: any) => r.name === "complete_sale" && r.idempotencyKey !== queued.idempotencyKey)).toHaveLength(0);
+    expect((await T.outbox() as any[]).filter((r: any) => r.name === "complete_sale")).toHaveLength(0);
     expect(await serverSales()).toBe(salesBefore);
-    expect(ledger(queued.idempotencyKey)).toBe("<none>");                // the queued sale was not executed either
     // network loss during the hold: still refused offline
     await T.setOffline(true);
     await T.gotoPos();
@@ -202,15 +198,14 @@ test("C3 a hold received while ONLINE: the sale is refused (never turned into an
     await T.posAddByCard(P1);
     note("C3.after-restart-refused", await checkoutRefused(T));
     expect(await serverSales()).toBe(salesBefore);
-    const kept = (await T.outbox() as any[]).find((r: any) => r.idempotencyKey === queued.idempotencyKey);
-    expect(kept).toMatchObject({ opEpoch: queued.opEpoch, args: queued.args });          // kept unchanged: key, args, epoch
+    expect((await T.outbox() as any[]).filter((r: any) => r.name === "complete_sale")).toHaveLength(0);
     note("C3.persisted-mode", { mode: mode?.mode, code: mode?.code });
   } finally {
     await T.close();
   }
 });
 
-test("C4 stale epoch after the restore: reconciliation, the old queued sale awaits an owner (never executed), new sales use the new epoch", async () => {
+test("C4 stale epoch after the restore: reconciliation; new sales use the new epoch", async () => {
   const oldEpoch = serverEpoch();
   sql1(`select recovery.zz_test_release_org('${org()}')`);           // 088 stand-in: released, the epoch stays advanced
   const T = await reopen("m087c-1");
@@ -218,11 +213,6 @@ test("C4 stale epoch after the restore: reconciliation, the old queued sale awai
     await reconcileTill(T, "C4", false);
     const epoch = serverEpoch();
     expect(epoch).toBe(oldEpoch);                                      // (the hold advanced it before; the release keeps it)
-    const queued = (await T.outbox() as any[]).find((r: any) => r.name === "complete_sale");
-    await expect.poll(async () => (await T.outbox() as any[]).find((r: any) => r.idempotencyKey === queued.idempotencyKey)?.heldReason, { timeout: 120_000 })
-      .toBe("awaiting-owner-review");
-    await expect(T.page.getByTestId("recovery-review-banner")).toBeVisible({ timeout: 60_000 });
-    expect(ledger(queued.idempotencyKey)).toBe("<none>");
     const salesBefore = await serverSales();
     await T.gotoPos();
     await T.posAddByCard(P1);
@@ -230,7 +220,7 @@ test("C4 stale epoch after the restore: reconciliation, the old queued sale awai
     const last = T.rpcBodies.filter((b) => b.name === "op_execute_v87").pop()!;
     expect((last.body as any).p_ctx.op_epoch).toBe(epoch);
     expect(await serverSales()).toBe(salesBefore + 1);
-    note("C4", { oldQueuedSale: "awaiting-owner-review, not in the ledger", newSale: "committed under the current epoch" });
+    note("C4", { newSale: "committed under the current epoch after reconciliation" });
   } finally {
     await T.close();
   }
@@ -345,6 +335,106 @@ test("E2 Electron: the recovery record lost from IndexedDB (a failed write) — 
     await T.posCheckout(5000);
     expect(await serverSales()).toBe(salesBefore + 1);
   } finally {
+    await T.close();
+  }
+});
+
+test("E3 v87.x Electron: relaunched OFFLINE in normal operation (valid epoch on disk, no hold): the sale is refused, nothing queued; online it is recorded", async () => {
+  rmSync(profile("m087c-e3"), { recursive: true, force: true });
+  let T = await Terminal.launchElectron(profile("m087c-e3"));
+  try {
+    await T.signIn(st.emails.cashA, pw, "/app");
+    await T.waitForApp();
+    await reconcileTill(T, "E3", true);
+    await T.gotoPos();
+    const salesBefore = await serverSales();
+    await T.close();
+    T = await Terminal.launchElectron(profile("m087c-e3"), { offline: true });
+    await T.goto("/app/pos");
+    await Promise.race([
+      T.page.locator("aside.sidebar").waitFor({ state: "visible", timeout: 60_000 }),
+      T.page.locator('input[type="email"]').waitFor({ state: "visible", timeout: 60_000 }),
+    ]);
+    if (await T.page.locator('input[type="email"]').isVisible()) { note("E3.session-lost-offline", true); await T.signIn(st.emails.cashA, pw, "/app"); }
+    await T.waitForApp();
+    await T.gotoPos();
+    await T.posAddByCard(P1);
+    const refused = await checkoutRefused(T);
+    expect(refused).toMatch(/offline entries are switched off/);
+    note("E3.offline-relaunch-refused", refused);
+    expect((await T.outbox() as any[]).filter((r: any) => r.name === "complete_sale")).toHaveLength(0);
+    expect(await serverSales()).toBe(salesBefore);
+    await T.close();
+    T = await Terminal.launchElectron(profile("m087c-e3"));
+    await T.goto("/app/pos");
+    await T.waitForApp();
+    await T.gotoPos();
+    await T.posAddByCard(P1);
+    await T.posCheckout(5000);
+    expect(await serverSales()).toBe(salesBefore + 1);
+  } finally {
+    await T.close();
+  }
+});
+
+test("Y1 v87.x: the network drops DURING a sale (the server committed, the reply is lost): 'pending confirmation', never 'recorded'; confirmed later with the same key", async () => {
+  const T = await reopen("m087c-1");
+  try {
+    await T.gotoPos();
+    const salesBefore = await serverSales();
+    const counter = { hits: 0 } as { hits: number; serverStatus?: number; cut?: number };
+    const glob = await T.routeCommitThenAbort("/rest/v1/rpc/op_execute_v87", counter);
+    await T.posAddByCard(P1);
+    await T.page.keyboard.press("F2");
+    const amount = T.page.getByLabel("Amount received");
+    await amount.waitFor({ state: "visible" });
+    await amount.fill("5000");
+    await T.toastsNow();
+    await amount.press("Enter");
+    const toast = await T.toast(/pending|confirm/i, 60_000);
+    expect(toast).not.toMatch(/Sale recorded/i);
+    await expect.poll(() => counter.cut ?? 0, { timeout: 60_000 }).toBeGreaterThan(0);
+    await T.unroutePath(glob);
+    const [row] = (await T.outbox() as any[]).filter((r: any) => r.name === "complete_sale");
+    expect(row?.inDoubt).toBe(true);
+    expect(await serverSales()).toBe(salesBefore + 1);                    // it did commit on the server
+    await expect.poll(async () => (await T.outbox() as any[]).filter((r: any) => r.name === "complete_sale").length, { timeout: 120_000 }).toBe(0);
+    expect(ledger(row.idempotencyKey)).toBe("committed");
+    expect(await serverSales()).toBe(salesBefore + 1);                    // confirmed with the SAME key: exactly once
+    note("C2c", { toast, confirmed: "same key, once" });
+  } finally {
+    await T.close();
+  }
+});
+
+test("Z1 v87.x: a second window offline is refused too (no window can bypass it) — last: two tabs refreshing one session can revoke it", async () => {
+  const T = await reopen("m087c-1");
+  let T2: Terminal | null = null;
+  try {
+    T2 = await T.openTab();
+    await T2.gotoPos();
+    const salesBefore = await serverSales();
+    await T.setOffline(true);                                            // both windows offline (the helper cuts one page at a time)
+    await T2.setOffline(true);
+    await T2.posAddByCard(P1);
+    await T2.page.keyboard.press("F2");
+    const amount = T2.page.getByLabel("Amount received");
+    await amount.waitFor({ state: "visible" });
+    await amount.fill("5000");
+    await amount.press("Enter");
+    // judged on what the second window SHOWS and on the till's storage (not on the first window's toast helper)
+    const refusal = T2.page.getByText(/Not recorded — nothing was saved\./).first();
+    const shown = await refusal.waitFor({ state: "visible", timeout: 30_000 }).then(() => true, () => false);
+    const seen = { refusalShown: shown, body: (await T2.page.locator("body").innerText()).replace(/\s+/g, " ").slice(0, 400),
+      queued: (await T.outbox() as any[]).filter((r: any) => r.name === "complete_sale").length };
+    note("C2b.second-window", seen);
+    expect(seen.queued).toBe(0);
+    expect(shown).toBe(true);
+    await T2.setOffline(false);
+    await T.setOffline(false);
+    expect(await serverSales()).toBe(salesBefore);
+  } finally {
+    await T2?.page.close().catch(() => undefined);
     await T.close();
   }
 });

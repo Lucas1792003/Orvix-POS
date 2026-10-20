@@ -61,6 +61,7 @@ ledger_has() { q "select count(*) from idempotency_keys where key = '$1'"; }
 {
 echo "== 087 stack suite: $(q 'select max(version) from supabase_migrations.schema_migrations') before install; orgs A=${ORG0:0:14} B=${ORG1:0:14}"
 echo; echo "---- 0 install through the real runner, coverage gate"
+bash "$HERE/lib/reserve-recovery-roles.sh" phf-iso-db > "$OUT/reserve-roles.log" || { echo "reserve-recovery-roles failed"; exit 1; }   # the host prerequisite (v87.x)
 runner --from 087 --to 087 > "$OUT/apply-087.log"; chkv "I0 apply-migrations.sh --from 087 --to 087: committed + recorded" 'COMMITTED.*newest 087' "$(grep -E 'COMMITTED|ledger now' "$OUT/apply-087.log")"
 docker exec -i $DB psql -X -U supabase_admin -d postgres -q -v ON_ERROR_STOP=1 < "$HERE/sql/test-helpers.sql" > "$OUT/helpers.log" 2>&1 || { echo "test helpers failed"; exit 1; }
 chkv "G1 every public table with an org-scoping column is guarded (not: phone_upload_org_rate, the canary)" '^0$' "$(q "select count(*) from pg_class c where c.relnamespace = 'public'::regnamespace and c.relkind = 'r'

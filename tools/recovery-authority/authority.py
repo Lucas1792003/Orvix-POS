@@ -8,6 +8,8 @@ append-only series (local state dir AND a mirror on a second store). The databas
   2. under a signed INTENT written BEFORE the renewal (record kind 'intent'); a separate signed 'renew' record confirms it.
      Each intent carries sha256 of a one-time secret token that only this process knows and presents to authority_renew;
      the database stores the hash of the token it was given.
+v87.x: no lease (genesis or renewal) while the recovery roles are exposed (PREREQ_* refusals, prereq_reasons():
+docs/selfhost-migration/phase-g/recovery-roles-prerequisite.md).
 A database lease whose seq and token hash do not match a signed intent of ours is a ROGUE renewal (server-wide refusal):
 someone holding the database credential cannot pass as the authority, not even by renewing under a seq we signed. A renewal
 that committed but whose confirmation was lost (crash) is confirmed later only if its intent is still the head of the series,
@@ -50,8 +52,9 @@ def psql(container, sql, **vars_):
     for k, v in vars_.items():
         args += ["-v", f"{k}={v}"]
     try:
-        # every statement ends server-side well before this client gives up (60 s): nothing can commit after a timeout here
-        r = subprocess.run(args, input="set statement_timeout = '30s';\n" + sql, capture_output=True, text=True, timeout=60)
+        # every statement ends server-side well before this client gives up (60 s): nothing can commit after a timeout here.
+        # v87.x: pg_catalog only — functions / operators a non-superuser plants in public can never answer these checks
+        r = subprocess.run(args, input="set statement_timeout = '30s';\nset search_path = pg_catalog, pg_temp;\n" + sql, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise Unreachable(type(e).__name__)
     if r.returncode:
@@ -175,6 +178,45 @@ def refuse(state, mirror, container, obs, reasons, held=(), renew_failed_for=Non
     sys.exit(20)
 
 
+PREREQ_SQL = """select jsonb_build_object(
+  'supautils', current_setting('supautils.privileged_role', true) is not null or current_setting('supautils.reserved_roles', true) is not null,
+  'unreserved', coalesce((select jsonb_agg(r order by r) from unnest(array['recovery_owner', 'recovery_authority', 'recovery_gate']) r
+                           where not r = any (array(select btrim(x) from unnest(string_to_array(coalesce(current_setting('supautils.reserved_roles', true), ''), ',')) x))), '[]'),
+  'event_triggers', coalesce((select jsonb_agg(e.evtname order by e.evtname) from pg_event_trigger e join pg_proc p on p.oid = e.evtfoid
+                               where not (select rolsuper from pg_roles where oid = e.evtowner) or not (select rolsuper from pg_roles where oid = p.proowner)), '[]'),
+  'owner_login', coalesce((select rolcanlogin from pg_roles where rolname = 'recovery_owner'), false),
+  'elevated', coalesce((select jsonb_agg(rolname::text order by rolname) from pg_roles where rolname in ('recovery_owner', 'recovery_authority', 'recovery_gate')
+                         and (rolsuper or rolcreaterole or rolcreatedb or rolreplication)), '[]'),
+  'member_of', coalesce((select jsonb_agg(m.member::regrole::text || ' in ' || m.roleid::regrole::text) from pg_auth_members m
+                          where m.member in (select oid from pg_roles where rolname in ('recovery_owner', 'recovery_authority', 'recovery_gate'))), '[]'),
+  'members', coalesce((select jsonb_agg(m.member::regrole::text || ' in ' || m.roleid::regrole::text) from pg_auth_members m
+                        where m.roleid in (select oid from pg_roles where rolname in ('recovery_owner', 'recovery_authority', 'recovery_gate'))
+                          and not (select rolsuper from pg_roles where oid = m.member)), '[]'))"""
+
+
+def prereq_reasons(container):
+    """v87.x: the recovery roles must stay out of reach of every non-superuser (docs/selfhost-migration/phase-g/
+    recovery-roles-prerequisite.md). Server-wide refusals: with supautils present, the three roles must be listed in
+    supautils.reserved_roles (else `postgres` can ALTER them into a login); no event trigger controlled by a
+    non-superuser; recovery_owner without login; no recovery role with superuser / CREATEROLE / CREATEDB / REPLICATION
+    or a member of another role; no non-superuser member of a recovery role. Runs with search_path = pg_catalog, pg_temp."""
+    p = json.loads(psql(container, PREREQ_SQL))
+    reasons = []
+    if p["supautils"] and p["unreserved"]:
+        reasons.append("PREREQ_RECOVERY_ROLES_NOT_RESERVED:" + ",".join(p["unreserved"]))
+    if p["event_triggers"]:
+        reasons.append("PREREQ_NON_SUPERUSER_EVENT_TRIGGER:" + ",".join(p["event_triggers"]))
+    if p["owner_login"]:
+        reasons.append("PREREQ_RECOVERY_OWNER_CAN_LOG_IN")
+    if p["elevated"]:
+        reasons.append("PREREQ_RECOVERY_ROLE_ELEVATED:" + ",".join(p["elevated"]))
+    if p["member_of"]:
+        reasons.append("PREREQ_RECOVERY_ROLE_MEMBERSHIP:" + ",".join(p["member_of"]))
+    if p["members"]:
+        reasons.append("PREREQ_NON_SUPERUSER_MEMBER:" + ",".join(p["members"]))
+    return reasons
+
+
 def verify_db(container, obs, base, seen):
     """reasons why `obs` is not a continuation of the accepted record `base` and of every signed observation `seen`"""
     reasons, held = [], []
@@ -253,6 +295,9 @@ def main():
         refuse(state, mirror, container, None, [f"EVIDENCE_UNREADABLE:{type(e).__name__}:{str(e)[:80]}"])
     try:
         body_all = [r["body"] for r in load(state)]
+        pre = prereq_reasons(container)
+        if pre:                                    # never a lease (genesis or renewal) while the recovery roles are exposed
+            refuse(state, mirror, container, obs, pre)
         if cmd == "genesis":
             nxt = 1
             tok, tok_h = new_token()

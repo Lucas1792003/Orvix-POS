@@ -8,7 +8,14 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd); DB=phf-iso-db; OUT=$(mkdir -p "$1" && cd "$1" && pwd)
 OPENSSL=${OPENSSL:-/opt/homebrew/opt/openssl@3/bin/openssl}
 q() { docker exec -i "$DB" psql -X -U supabase_admin -d postgres -v ON_ERROR_STOP=1 -At -c "$1"; }
-[ "$(q "select to_regnamespace('recovery') is null")" = t ] || { echo "087 already installed here"; exit 0; }
+if [ "$(q "select to_regnamespace('recovery') is null")" != t ]; then
+  # already installed: only the CURRENT 087 text counts (a stack left with an earlier 087 would test the wrong server)
+  want="sha256:$(shasum -a 256 "$ROOT/supabase/migrations/087_recovery_hold.sql" | cut -c1-64)"
+  [ "$(q "select '$want' = any (statements) from supabase_migrations.schema_migrations where version = '087'")" = t ] \
+    || { echo "087 installed here is NOT the current file (checksum differs): re-create the stack"; exit 1; }
+  echo "087 already installed here (current file)"; exit 0
+fi
+bash "$ROOT/tools/m087-verify/lib/reserve-recovery-roles.sh" "$DB" > /dev/null   # the host prerequisite (v87.x)
 ( cd "$ROOT" && APPLY_MIGRATIONS_TEST_CONTAINER=$DB bash deploy/lucashome/apply-migrations.sh --from 087 --to 087 ) > "$OUT/apply-087.log" 2>&1
 grep -q 'COMMITTED' "$OUT/apply-087.log" || { tail -5 "$OUT/apply-087.log"; exit 1; }
 docker exec -i "$DB" psql -X -U supabase_admin -d postgres -q -v ON_ERROR_STOP=1 < "$ROOT/tools/m087-verify/sql/test-helpers.sql" > /dev/null

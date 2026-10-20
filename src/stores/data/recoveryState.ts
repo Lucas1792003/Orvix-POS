@@ -187,8 +187,31 @@ function readBlockRecord(origin: string, org: string): ModeRecord | null | "unre
 
 /** The server authorised this till (issued its epoch) since this process started. */
 let verifiedThisProcess = false;
+/** When it last did, and for which backend / organisation / till (monotonic clock: a wall-clock change never extends
+ *  it). Memory only: a restart, a reload or another window starts without one, so a stale epoch on disk never counts
+ *  as a fresh authorisation. */
+let verifiedAt: { origin: string; orgId: string; tillId: string; at: number } | null = null;
+const monotonicNow = (): number => (typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now());
 export function verifiedSinceStart(): boolean {
   return verifiedThisProcess;
+}
+/** The server issued THIS till its epoch, for the organisation signed in now on this backend, within the last `ms`
+ *  milliseconds, in THIS process. */
+export function verifiedWithin(ms: number): boolean {
+  if (!verifiedThisProcess || !verifiedAt) return false;
+  const m = current();
+  if (verifiedAt.origin !== m.origin || verifiedAt.orgId !== m.orgId || verifiedAt.tillId !== m.tillId) return false;
+  const age = monotonicNow() - verifiedAt.at;
+  return age >= 0 && age <= ms;
+}
+/** v87.x: a request of this till did not reach the server (or its reply was lost): the next new financial operation
+ *  must reach the server first (a recent authorisation no longer counts). */
+export function noteAuthorizationLost(): void {
+  verifiedAt = null;
+}
+/** Tests only: the last authorisation happened `ms` earlier than recorded (inert outside the unit-test build). */
+export function ageAuthorizationForTests(ms: number): void {
+  if (import.meta.env?.MODE === "test" && verifiedAt) verifiedAt = { ...verifiedAt, at: verifiedAt.at - ms };
 }
 
 // ---- in-memory view of the signed-in organisation ----------------------------
@@ -512,6 +535,7 @@ export async function noteEpochIssued(
     // the server authorised this till: the backup record of a blocking state goes (after the Dexie commit)
     clearBlockRecord(mem.origin, org);
     verifiedThisProcess = true;
+    verifiedAt = { origin: mem.origin, orgId: org, tillId: mem.tillId, at: monotonicNow() };
   }
   if (result === "normal") await noteRecoveryPresent();
   publish();
@@ -621,6 +645,50 @@ export function assertNewOperationAllowed(stamped: string | null | undefined): v
   }
 }
 
+// ---- v87.x emergency safeguard: no NEW offline financial operations on an 087 server ----------------------------
+// A v87 till cannot mark an offline sale as provisional: it would be shown as recorded although the server has not seen
+// it and, after a recovery, may never execute it (docs/selfhost-migration/phase-g/v87-client.md, "Offline financial
+// operations"). So on a backend that has migration 087 — or whose 087 status is NOT established (unknown, unreadable
+// state, any recovery mode) — a new financial operation is created only while the server can be reached and has
+// authorised this till recently in this process; it is never staged, queued or shown offline. Only a backend that
+// answered explicitly that it has no 087 keeps the pre-087 offline rules. Operations already queued are untouched.
+
+/** Code of the refusal (RecoveryBlockedError.code). */
+export const OFFLINE_FINANCIAL_DISABLED = "OFFLINE_FINANCIAL_DISABLED";
+
+/** Tests only: behave like the build BEFORE v87.x (offline operations queued on 087 servers), to create the queues
+ *  such a build left behind on a till. Inert outside the unit-test build. */
+let preV87xForTests = false;
+export function simulatePreV87xClientForTests(on: boolean): void {
+  if (import.meta.env?.MODE === "test") preV87xForTests = on;
+}
+
+/** How long a backend's "no 087" answer keeps the pre-087 offline rules. Older (a till that has not reached the server
+ *  since — 087 may have been installed meanwhile): the status counts as not established, so new financial operations
+ *  need the server again (the online gate re-asks after ABSENT_RECHECK_MS, recoveryGate.ts). */
+export const ABSENT_OFFLINE_TRUST_MS = 30 * 60_000;
+
+/** New financial operations must not be created, staged or queued offline on this backend. */
+export function offlineFinancialOpsBlocked(): boolean {
+  if (preV87xForTests && import.meta.env?.MODE === "test") return false;
+  const m = current();
+  if (m.unreadable) return true;
+  if (m.mode?.mode && m.mode.mode !== "normal" && m.mode.mode !== "no-epoch") return true;   // a recovery refusal, on any backend
+  if (m.capability !== "absent") return true;
+  if (pinned === "absent") return false;   // unit suites emulating a pre-087 backend
+  const at = m.capabilityAt ? Date.parse(m.capabilityAt) : NaN;
+  const age = Date.now() - at;
+  return !(age >= 0 && age <= ABSENT_OFFLINE_TRUST_MS);   // stale, missing or future-dated: not established
+}
+
+/** What the cashier is told: nothing was saved; why; what to do. */
+export function offlineFinancialBlockedError(reason: string): RecoveryBlockedError {
+  const mode = computeView(current()).mode;
+  return new RecoveryBlockedError(mode === "legacy-server" ? "uncertain" : mode, OFFLINE_FINANCIAL_DISABLED,
+    `Not recorded — nothing was saved. ${reason} On this server, sales, money entries and other changes can only be made while the ` +
+    "till is connected and the server has confirmed it; offline entries are switched off (recovery safeguard). Reconnect, then enter it again.");
+}
+
 /** True while automatic sending must stop (any recovery state on a backend
  *  that has 087, or a recovery refusal on any backend). */
 export function recoveryBlocksSending(): boolean {
@@ -633,6 +701,7 @@ export function recoveryBlocksSending(): boolean {
 export function resetRecoveryStateForTests(capability: Capability | null = "absent"): void {
   pinned = capability === "unknown" ? null : capability;
   verifiedThisProcess = false;
+  verifiedAt = null;
   mem = fresh();
   if (capability === "unknown") mem.capability = "unknown";
   publish();

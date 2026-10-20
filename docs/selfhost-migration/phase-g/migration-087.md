@@ -15,6 +15,14 @@ reprices anything. **It has no normal release of a hold** (see "Not in 087").
 **Migration 088** owns the rest: restoring financial outcomes, receipt-number continuity, bulk approval, safe reopening of an
 organisation, and `restore` / `re-reject` decisions.
 
+## Host prerequisite (v87.x, 2026-10-19)
+
+087 installs only where the recovery roles are protected from the Supabase privileged role: `recovery_owner`,
+`recovery_authority`, `recovery_gate` listed in `supautils.reserved_roles`, no event trigger controlled by a
+non-superuser, and an active probe proving no non-superuser can alter or acquire the roles (fail closed; nothing applied
+otherwise). The authority refuses to renew while any of this stops holding. Why, the configuration file and the
+deployment checklist: [`recovery-roles-prerequisite.md`](./recovery-roles-prerequisite.md).
+
 ## Why
 
 A database restored from any backup (physical, PITR, logical, same-server reload) loses the operations committed after that
@@ -390,8 +398,16 @@ Also required:
 
 **Preconditions:**
 - Studio isolation applied, and `SUPABASE_DB_URL` (`postgres`) removed from edge functions.
-- Every self-hosted till on the v87 client. RC1–RC3, v1.0.15, Batch 2A and Phase 0 builds withdrawn and unable to log in to
-  the self-hosted server (D7, D10). Till queues drained before cutover.
+- Every self-hosted till on the **v87.x** client (offline financial operations switched off on 087 servers; `v87-client.md`,
+  "Offline financial operations"). The earlier v87 build, RC1–RC3, v1.0.15, Batch 2A and Phase 0 builds withdrawn and unable
+  to log in to the self-hosted server (D7, D10); the server cannot tell v87 from v87.x, so a till downgraded to v87 regains
+  offline sales — withdraw the v87 installer. Till queues drained before cutover.
+- v87.x: the **host prerequisite** done and verified first (`recovery-roles-prerequisite.md`: reserved-roles file mounted, db
+  container recreated — a short restart outside this window — `show supautils.reserved_roles` lists the three roles without
+  `*`). Without it, step 3 refuses and nothing is applied.
+- v87.x cutover: every till **online and signed in** when the window starts, and kept from offline trading for at least
+  `ABSENT_OFFLINE_TRUST_MS` (30 min) before step 3. A till's earlier "no 087" answer keeps the pre-087 offline rules for up to
+  30 minutes; an offline sale it takes in that time reaches the 087 server as a legacy operation (held for owner review).
 - The authority on a real second device: key generated there; mirror on another store; scram credentials for
   `recovery_authority` and `recovery_gate` only on that device; $0 alerting on every refusal or unreachable record and before
   the lease expires.
@@ -402,12 +418,15 @@ Also required:
 2. Pinned backup.
 3. `apply-migrations.sh --from 087 --to 087` (one transaction plus its ledger row; installs held, no lease).
 4. `owner_anchor` (two people).
-5. Authority `genesis`. If it fails **before** the database committed the genesis (`authority_observe` still shows no lease),
+5. v87.x: provision the `recovery_authority` / `recovery_gate` credentials (087 clears any password on these roles, also on a
+   re-install after a rollback). Authority `genesis` (it refuses with `PREREQ_*` while the host prerequisite does not hold). If it fails **before** the database committed the genesis (`authority_observe` still shows no lease),
    archive its state and mirror and retry. If the database committed it (a crash before the confirmation), do **not** retry
    genesis (it would get `GENESIS_ALREADY_DONE`): run a normal tick, which confirms it late, or re-baseline (two people).
 6. MFA admins register tills; each till uploads a complete journal and is approved.
 7. Smoke test with a v87 till.
-8. `owner_open` (two people).
+8. v87.x: before `owner_open`, every till has seen the 087 server (registered and reconciled in step 6; its offline badge
+   shows `data-financial-blocked="true"`), or 30 minutes have passed since step 3 — an unregistered till's earlier "no 087"
+   answer has then aged out. `owner_open` (two people).
 9. Restore the normal gateway.
 
 ## Rollback
@@ -427,9 +446,12 @@ Tested: x2 B0–B9.
 4. 086 behaves as before (x2 B6).
 5. Re-applying 087 is supported (x2 B7, B9), and so is a second rollback (B8).
 6. Before a re-apply, archive the authority series and mirror, and **rotate the `recovery_authority` / `recovery_gate`
-   credentials**: a re-apply sets both roles LOGIN again with their old passwords.
+   credentials**: a re-apply (v87.x) sets both roles LOGIN again with their passwords **cleared** — provision new ones before
+   genesis.
 7. The archived schemas keep `USAGE` for `authenticated`, `recovery_authority` and `recovery_gate`; no table grants and no
-   functions remain, so this is hygiene only.
+   functions remain, so this is hygiene only. A re-apply accepts the kept roles only while every archive still has the
+   shape the rollback left (allow-list: `recovery-roles-prerequisite.md`, item 4); a changed archive refuses the re-apply
+   until a superuser reverts the change.
 
 ## Verification (`tools/m087-verify/run.sh`, disposable only)
 

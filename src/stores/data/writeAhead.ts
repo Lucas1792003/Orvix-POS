@@ -11,12 +11,17 @@ import {
 import { callRpc, currentActorId, RpcError, stampOperationArgs, v87Routing, type OperationContext } from "./idempotentRpc";
 import { replyProblem } from "./replyShapes";
 import { getJournalRecord, journalReplacement } from "./opJournal";
-import { gateNewOperation, recoveryRefusalError } from "./recoveryGate";
-import { RecoveryBlockedError } from "./recoveryState";
+import { assertOfflineQueueAllowed, gateNewOperation, recoveryRefusalError } from "./recoveryGate";
+import { RecoveryBlockedError, noteAuthorizationLost, offlineFinancialBlockedError, offlineFinancialOpsBlocked } from "./recoveryState";
 import type { LocalRowBatch } from "./localWrites";
 import {
   askAboutUnresolved, PendingConfirmationError, UnresolvedOperationError, type UnresolvedOperationInfo,
 } from "./operationPrompt";
+
+/** v87.x: an operation whose outcome is unknown on an 087 server — held for confirmation, never staged. */
+class HeldOnRecoveryServer extends Error {
+  constructor() { super(""); }
+}
 
 export { PendingConfirmationError } from "./operationPrompt";
 
@@ -276,6 +281,9 @@ async function stageAndCommit<T>(
   outbox: (entry: EnqueueInput) => Parameters<typeof persistStaged>[1],
   ownId: string | null = null,
 ): Promise<T> {
+  // v87.x, at the shared staging layer too: an OFFLINE staging is refused on an 087 server whoever asks for it
+  // ("in-doubt" staging stays: an attempt that may have committed, shown as pending confirmation, same key)
+  if (mode === "offline") assertOfflineQueueAllowed("This till is offline.");
   const stage = new Stage(mode, ownId);
   const result = await spec.stage(stage);
   if (!stage.entry) throw new Error(`${spec.name}: the offline path staged no outbox entry.`);
@@ -300,6 +308,10 @@ async function run<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>
       `Operation awaiting owner review: ${review.length} earlier ${review.length === 1 ? "operation on this till waits" : "operations on this till wait"} for the owner's review after a server recovery, and this one may depend on ${review.length === 1 ? "it" : "them"}. Nothing was saved or sent. Ask the owner to review the Sync page.`);
   }
   if (offline || spec.needsProvisionalRefs) {
+    // v87.x: never a new offline operation on an 087 server (nothing saved; the cashier is told why)
+    assertOfflineQueueAllowed(spec.needsProvisionalRefs
+      ? "It depends on an entry that has not reached the server yet (e.g. a shift opened offline) — let that finish first (Sync)."
+      : "This till is offline.");
     return stageAndCommit(spec, "offline", (entry) => ({
       put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey, opEpoch: spec.op.opEpoch }, { staged: true }),
     }));
@@ -310,6 +322,8 @@ async function run<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>
   // them under the offline rules; if those refuse it, nothing is sent.
   // Entries it is proven independent of (dependencies.ts) do not hold it.
   if ((await blockingEarlierWork({ kind: "rpc", name: spec.name, args, shopId: spec.shopId, actorId: currentActorId() })).length) {
+    // v87.x: queuing it behind them would make it an offline operation — refused on an 087 server
+    assertOfflineQueueAllowed("Earlier entries on this till have not reached the server yet — let them finish (Sync), then enter it again.");
     let result: T;
     try {
       result = await stageAndCommit(spec, "offline", (entry) => ({
@@ -411,6 +425,8 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
   if (!(await localDb.syncOutbox.get(localId))) {
     throw notConfirmed("this operation is being confirmed elsewhere on this till.");
   }
+  // v87.x: the server was not reached (or its reply was lost): a recent authorisation no longer counts
+  noteAuthorizationLost();
 
   const pendingChanges = (inDoubt: boolean, entry: EnqueueInput): Partial<SyncOutboxEntry> => ({
     status: "pending", syncingSince: undefined, attempts: 1, failureKind: "transient", lastError: error!.message,
@@ -424,6 +440,12 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
   });
 
   if (!failure.mayHaveCommitted) {
+    // v87.x: definitely not applied, and on an 087 server it is NOT turned into an offline operation: the attempt is
+    // discarded (nothing ran on the server, nothing stays queued) and the cashier is told it was not recorded.
+    if (offlineFinancialOpsBlocked()) {
+      await discardWriteAhead(localId, "offline-disabled-087", { code: error.code ?? null, message: error.message });
+      throw offlineFinancialBlockedError("The server could not be reached (the request did not arrive).");
+    }
     // Definitely not applied: the ordinary offline path, with its checks.
     try {
       return await stageAndCommit(spec, "offline", (entry) => ({ update: { localId, changes: pendingChanges(false, entry) } }), localId);
@@ -435,7 +457,10 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
 
   // Outcome unknown: the row is kept either way. It is staged locally only
   // under the ordinary offline rules (sign-in window, local stock).
+  // v87.x: on an 087 server it is NEVER staged (a staged operation is resent automatically and shown as pending, like
+  // an offline sale): it goes straight to the held path below — same key, the queue asks the server what happened.
   try {
+    if (offlineFinancialOpsBlocked()) throw new HeldOnRecoveryServer();
     await stageAndCommit(spec, "in-doubt", (entry) => ({ update: { localId, changes: pendingChanges(true, entry) } }), localId);
   } catch (err) {
     // Not staged (offline rules refused it, or the local write failed). The
@@ -458,7 +483,7 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
     if (error.code === "REPLY_UNAVAILABLE") {
       throw notConfirmed("the server applied it, but this till cannot read its reply; it is being confirmed from the server's records.");
     }
-    console.error(`[sync] ${spec.name}: outcome unknown and not staged locally; kept for confirmation:`, err);
+    if (!(err instanceof HeldOnRecoveryServer)) console.error(`[sync] ${spec.name}: outcome unknown and not staged locally; kept for confirmation:`, err);
     throw new PendingConfirmationError(
       `Not recorded on this till: the server did not answer, so it may or may not have received this${
         err instanceof Error && err.message ? ` (${err.message})` : ""}. It will NOT be sent again: the till asks the server ` +

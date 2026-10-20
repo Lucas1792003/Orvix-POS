@@ -5,12 +5,13 @@
 #   KEEP=1 ...                                      leave the stack up
 # Parts: stack (lib/stack.sh), x2 (stack suite: the real migration through the real runner), browser (Chromium), legacy
 # (client-generation harness on the captured responses), compat (086's live SQL suite with 087 installed), x3 (restores of
-# the real migration on the real database image), x1 (restore matrix on plain PostgreSQL). Nothing here contacts lucashome,
-# hosted Supabase or any real backup. Upstream Envoy files: UPSTREAM_ENVOY_DIR, else fetched from the pinned commit.
+# the real migration on the real database image), x1 (restore matrix on plain PostgreSQL), archive (the rolled-back archive
+# allow-list; last: it rolls 087 back and re-installs it). Nothing here contacts lucashome, hosted Supabase or any real backup.
+# Upstream Envoy files: UPSTREAM_ENVOY_DIR, else fetched from the pinned commit.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$HERE/../.." && pwd)
 TAG=${1:-run-$(date +%Y%m%dT%H%M%S)}; RES="$HERE/results/$TAG"; mkdir -p "$RES"; RES=$(cd "$RES" && pwd)
-PARTS="${PARTS:-stack x2 browser legacy compat x3 x1}"
+PARTS="${PARTS:-stack x2 browser legacy compat x3 x1 archive}"
 case "${DOCKER_HOST:-unix://}" in unix://*) ;; *) echo "REFUSE: local docker only"; exit 3;; esac
 FAILED=0; say() { echo "$*" | tee -a "$RES/summary.txt"; }
 cleanup() {
@@ -49,6 +50,7 @@ for part in $PARTS; do
     compat) bash "$HERE/compat.sh" "$RES" > "$RES/compat.log" 2>&1 && say "compat: $(grep -E 'm086-sql' "$RES/compat.log")" || { say "compat: FAILED ($(grep -E 'm086-sql' "$RES/compat.log"))"; FAILED=1; } ;;
     x3)     bash "$HERE/x3-restores.sh" "$RES" > "$RES/x3.log" 2>&1; result "$RES/x3/X3.txt" "x3 restores (real migration, real image)" ;;
     x1)     bash "$HERE/x1/x1-plainpg.sh" "$RES" > "$RES/x1.log" 2>&1; result "$RES/x1/X1.txt" "x1 restore matrix (plain PostgreSQL)" ;;
+    archive) python3 -I "$HERE/archive/archive-allowlist.py" "$RES" > "$RES/archive.log" 2>&1; result "$RES/archive/ARCHIVE.txt" "archive allow-list (rolled-back 087)" ;;
     *) say "unknown part $part"; FAILED=1 ;;
   esac
 done

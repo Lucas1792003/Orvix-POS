@@ -46,6 +46,40 @@ The till secret is stored in plain text on the device, as 087 intends: the till 
 | `ORG_UNRESOLVED` (one operation) | — | retried later |
 | `recovery_epoch` succeeds | `normal` | Safe to resume (after a blocked state) |
 
+## Offline financial operations (v87.x, 2026-10-19)
+
+A v87 till could not mark an offline sale as provisional: it showed "Sale recorded" and a receipt although the server had
+not seen the sale and, after a recovery, might never execute it. So on a backend that **has 087 — or whose 087 status is
+not established** (never asked, unreadable state, any recovery mode) — the till creates a NEW financial operation only
+while it can reach the server and the server has issued it its epoch **within the last 2 minutes in this process**, for
+this backend, organisation and till (monotonic clock; else it asks `recovery_epoch` first; unreachable or refused = not
+recorded). Any request that does not reach the server, or whose reply is lost, ends that authorisation: the next operation
+asks the server again. A "no 087" answer older than 30 minutes (`ABSENT_OFFLINE_TRUST_MS`) counts as not established
+(087 may have been installed since). Never offline, never queued:
+
+| Path | Before v87.x | v87.x on an 087 server |
+|---|---|---|
+| Sale, shift open/close, stock adjustment, PO receipt, supplier payment, transfer dispatch/receipt, refund/void request (write-ahead) while offline | staged + queued, shown as recorded | refused, nothing saved |
+| ... depending on an entry still queued (e.g. a shift opened offline) | staged + queued | refused |
+| ... that would queue behind unsent entries | queued behind them | refused |
+| ... sent but definitely not delivered (connection refused) | turned into an offline sale | attempt discarded, "not recorded" |
+| ... sent, reply lost / "Failed to fetch" (outcome unknown) | staged locally (stock, cart cleared), resent automatically, "pending" | HELD for confirmation: not staged, not applied locally, never resent; the queue asks the server with the same key (op_status) and fences it if the server never saw it |
+| Table writes (categories, brands, unit types, price tiers, shops, users, suppliers) offline / not delivered | queued for later | refused, not saved |
+| ... reply lost (outcome unknown) | queued for later | not queued; "Not confirmed — may or may not have been saved … check before entering it again" |
+| Online-only operations (approvals, lump sums, POs, payments, voids, ...) | refused offline | refused offline (unchanged) |
+| A restart, reload or second window with a valid epoch on disk, offline | allowed (the v87 limit below) | refused: only an authorisation in THIS process counts |
+
+The shared layers enforce it (`recoveryGate.ts` gate with fresh authorisation; `writeAhead.ts` run / staging;
+`tableWrite.ts`; `outbox.ts` `enqueueOutbox`), not the UI. The cashier sees "Not recorded — nothing was saved. … On this
+server, sales, money entries and other changes can only be made while the till is connected and the server has confirmed
+it; offline entries are switched off (recovery safeguard)." The offline badge says so while offline (same predicate as the
+data layer). Operations already
+queued (by an earlier build) are kept with their key, epoch and arguments and sent only after a fresh authorisation;
+journals and printed-receipt evidence are untouched. A backend that answered explicitly that it has no 087 keeps the
+pre-087 offline rules (for 30 minutes after that answer, renewed whenever the till asks again online). Read-only offline
+use is unchanged. The tests-only switches (`simulatePreV87xClientForTests`, `ageAuthorizationForTests`) are inert outside the
+unit-test build.
+
 ## Operations from before an epoch (legacy and old operations)
 
 On an 087 server, a queued operation **without** an epoch (an older build's queue, or one queued while the server had no
@@ -82,9 +116,8 @@ administrator; the old credential is archived.
   a second, independent store (`localStorage`, `r87:block:<origin>:<org>`), then to IndexedDB; on load the backup record
   wins over a stored "normal", and only an epoch issued by the server (or the owner's witness clear / rollback
   confirmation) removes it. After **every start** an online till asks the server (`recovery_epoch`) before its first new
-  operation and before the outbox sends anything. Residual case: if **both** stores fail and the till then restarts
-  **offline**, it may queue sales under its last epoch — the same as the unwitnessed tail: on reconnect the server is
-  asked first, nothing is sent, and the server would never execute a stale epoch.
+  operation and before the outbox sends anything. The former residual case — **both** stores fail and the till restarts
+  **offline** — is closed by v87.x: offline nothing new is created on an 087 server at all.
 - **`WITNESS_BEHIND`** is sticky: it is decided against the stored state (after asking the server twice) and cleared
   only by the owner (Sync › Recovery, a written statement); the till's witness is archived, never overwritten. While the
   server is AHEAD of the till in the same epoch, the till keeps its own witness: its next operation carries it and the
@@ -100,6 +133,7 @@ administrator; the old credential is archived.
 
 ## Verification
 
+- `src/stores/data/recovery087x.offline.test.ts`: the v87.x offline safeguard (every path in the table above).
 - `src/stores/data/recovery087.client.test.ts`: the client against the fake server's 087 emulation
   (`testing/fakeSupabase.ts`, `enable087()`), including every finding of the independent reviews.
 - `tools/m087-client-verify/run.sh`: the real app in real Chromium (persistent profile, crash + restart) and in the real

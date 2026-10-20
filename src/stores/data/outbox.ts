@@ -13,7 +13,8 @@ import {
 } from "./idempotentRpc";
 import { recoveryCodeOf } from "../../lib/failureClass";
 import {
-  currentOpEpoch, recoveryBlocksSending, recoveryCapability, recoveryMessage, recoveryView, setRecoveryOrgSource, verifiedSinceStart,
+  currentOpEpoch, offlineFinancialBlockedError, offlineFinancialOpsBlocked, recoveryBlocksSending, recoveryCapability, recoveryMessage, recoveryView,
+  setRecoveryOrgSource, verifiedSinceStart,
 } from "./recoveryState";
 import { runRecoveryCheck } from "./recovery87";
 import { replyProblem } from "./replyShapes";
@@ -177,6 +178,8 @@ async function deadParent(entry: SyncOutboxEntry): Promise<boolean> {
  * `p_idempotency_key` so the replay payload is exactly what gets sent.
  */
 export async function enqueueOutbox(entry: EnqueueInput): Promise<void> {
+  // v87.x: this queues a NEW operation for later — never on an 087 server (rows already queued are not touched)
+  if (offlineFinancialOpsBlocked()) throw offlineFinancialBlockedError("It cannot be queued for later on this server.");
   const row = buildOutboxRow(entry);
   // The read-max + put run in one transaction so two enqueues cannot be
   // handed the same seq.
@@ -366,7 +369,7 @@ export async function discardWriteAhead(
     }
     const state = reason === "REJECTED" || reason === "CONTRACT" ? "rejected" : reason === "ABANDONED" ? "abandoned" : "not-applied";
     await journalDecided(row, state, {
-      source: reason === "offline-path-refused" ? "client" : "reply",
+      source: reason === "offline-path-refused" || reason === "offline-disabled-087" ? "client" : "reply",
       code: evidence.code ?? null, message: evidence.message ? evidence.message.slice(0, 500) : null,
       recordedOnServer: evidence.serverOutcome === "rejected" || evidence.serverOutcome === "abandoned",
     }, `discarded at the counter: ${reason}`);
