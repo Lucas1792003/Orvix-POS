@@ -1,17 +1,17 @@
 {
     "data": {
-        "asOf": "2026-10-20T13:36:27.390476+00:00",
+        "asOf": "2026-10-20T14:11:07.112597+00:00",
         "shift": {
-            "id": "shift-77e9a81991fb435ba17b6f98a4bf0c71",
+            "id": "shift-a0de3e3163664f69a5e5e624e55f7399",
             "shopId": "shop-f",
             "status": "CLOSED",
-            "endedAt": "2026-10-20T13:36:25.796335+00:00",
+            "endedAt": "2026-10-20T14:11:05.638007+00:00",
             "cashierId": "u-cash-f2",
-            "startedAt": "2026-10-20T13:26:25.781833+00:00",
+            "startedAt": "2026-10-20T14:01:05.626042+00:00",
             "closingCashMmk": 19200,
             "openingCashMmk": 20000,
             "varianceReason": "paid r1 and r2 from this drawer",
-            "closeRecordedAt": "2026-10-20T13:36:25.796335+00:00",
+            "closeRecordedAt": "2026-10-20T14:11:05.638007+00:00",
             "closeTimeSource": "SERVER_LEDGER",
             "storedVarianceMmk": -2800,
             "storedExpectedCashMmk": 22000
@@ -50,7 +50,7 @@
                 {
                     "id": "refund-legacy-r5",
                     "kind": "REFUND",
-                    "saleId": "sale-663d32563eec477fbe284525d3f7da47",
+                    "saleId": "sale-d7a7f7f2aa4d4c528719c748a30382cb",
                     "amountMmk": 1000,
                     "receiptNo": "SF-20261020-0001"
                 }

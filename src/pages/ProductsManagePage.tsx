@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useCanViewCost } from "../lib/useCanViewCost";
 import type { ChangeEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuthStore } from "../stores/authStore";
@@ -40,6 +41,7 @@ type CategoryColor = Category["color"];
 const PAGE_SIZE = 10;
 
 export const ProductsManagePage = () => {
+  const canViewCost = useCanViewCost();
   const navigate = useNavigate();
   const { t } = useTranslation();
   const toast = useToast();
@@ -682,8 +684,8 @@ export const ProductsManagePage = () => {
               <TH>{t("products", "product")}</TH>
               <TH>{t("common", "category")}</TH>
               <TH className="text-right">{t("common", "price")}</TH>
-              <TH className="text-right">{t("products", "cost")}</TH>
-              <TH className="text-right">{t("products", "gpPct")}</TH>
+              {canViewCost && <TH className="text-right">{t("products", "cost")}</TH>}
+              {canViewCost && <TH className="text-right">{t("products", "gpPct")}</TH>}
               <TH className="text-right">
                 {t("products", "stock")}
                 <span className="block text-[10px] font-normal text-slate-400">
@@ -757,10 +759,10 @@ export const ProductsManagePage = () => {
                       <Badge tone={getCategoryColor(product.category)}>{product.category}</Badge>
                     </TD>
                     <TD className="text-right font-medium text-emerald-600">{formatMmk(product.priceMmk)}</TD>
-                    <TD className="text-right text-slate-500">
+                    {canViewCost && <TD className="text-right text-slate-500">
                       {product.costMmk ? formatMmk(product.costMmk) : "-"}
-                    </TD>
-                    <TD className="text-right">
+                    </TD>}
+                    {canViewCost && <TD className="text-right">
                       {gpPct === null ? (
                         <span className="text-slate-400">-</span>
                       ) : (
@@ -776,7 +778,7 @@ export const ProductsManagePage = () => {
                           {gpPct.toFixed(1)}%
                         </span>
                       )}
-                    </TD>
+                    </TD>}
                     <TD className="text-right">
                       <span className={isLowStock ? "font-medium text-amber-600" : ""}>
                         {stock} {product.unitType}

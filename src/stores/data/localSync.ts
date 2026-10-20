@@ -1,6 +1,7 @@
 import { LEDGER_STATE_KEY } from "./stockLedger";
 import { localDb, SNAPSHOT_TABLE_NAMES, type StoredBusinessProfile } from "../../lib/localDb";
 import { recordVanished, SALES_LOAD_CAP, SNAPSHOT_SCOPE_KEY, vanishedRows } from "./opJournal";
+import { stripLineCost } from "./costPrivacy";
 import type { DataState } from "./types";
 import type { BusinessProfile } from "../../types";
 
@@ -51,7 +52,9 @@ export async function persistSnapshotToLocal(
       if (lostSales.length) {
         const lost = new Set(lostSales.map((s) => s.id));
         const itemsBySale = new Map<string, typeof oldItems>();
-        for (const i of oldItems) if (lost.has(i.saleId)) itemsBySale.set(i.saleId, [...(itemsBySale.get(i.saleId) ?? []), i]);
+        // P-4: the evidence outlives logout (scrubLocalCostCache does not
+        // touch syncState), so it never keeps the line cost snapshot.
+        for (const i of oldItems) if (lost.has(i.saleId)) itemsBySale.set(i.saleId, [...(itemsBySale.get(i.saleId) ?? []), stripLineCost(i)]);
         await recordVanished("sales", lostSales, (id) => itemsBySale.get(id) ?? [], scope?.orgId ?? null);
       }
       const lostPayments = vanishedRows(oldPayments, snapshot.supplierPayments, { visibleShops });

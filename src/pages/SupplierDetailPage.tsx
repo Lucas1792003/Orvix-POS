@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useCanViewCost } from "../lib/useCanViewCost";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useAuthStore } from "../stores/authStore";
 import { useAppStore } from "../stores/appStore";
@@ -57,6 +58,7 @@ const SupplierNotFound = () => {
 };
 
 export const SupplierDetailPage = () => {
+  const canViewCost = useCanViewCost();
   const { supplierId } = useParams<{ supplierId: string }>();
   const navigate = useNavigate();
   const toast = useToast();
@@ -528,7 +530,7 @@ export const SupplierDetailPage = () => {
                   <td className="px-4 py-3 font-mono text-xs text-slate-500">{product.sku ?? "-"}</td>
                   <td className="px-4 py-3 text-slate-600">{product.category}</td>
                   <td className="px-4 py-3 text-right tabular-nums text-slate-600">
-                    {product.costMmk != null ? formatMmk(product.costMmk) : "-"}
+                    {canViewCost && product.costMmk != null ? formatMmk(product.costMmk) : "-"}
                   </td>
                   <td className="px-4 py-3 text-right tabular-nums text-slate-900">
                     {formatMmk(product.priceMmk)}

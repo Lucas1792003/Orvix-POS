@@ -2,6 +2,8 @@ import { supabase } from "../../lib/supabase";
 import { localDb } from "../../lib/localDb";
 import type { LocalSnapshot } from "./localSync";
 import { fetchServerTime, PAGE_SIZE, quoteFilterValue } from "./fetchAll";
+import { fetchProductCosts, fetchUnitCosts, overlayFromRows, stripProductCost, stripUnitCost, userMayViewCost } from "./costPrivacy";
+import { useAuthStore } from "../authStore";
 import {
   mapBrand, mapCategory, mapPriceLevel, mapProduct, mapProductUnit, mapProductUnitPrice,
   mapPurchaseOrder, mapShift, mapStockTransfer, mapSupplier, mapUnitType,
@@ -167,7 +169,9 @@ export interface DeltaPullResult {
  * (never been through a full load) is skipped, not treated as an error.
  */
 export async function pullDeltaChanges(
-  currentState: Pick<LocalSnapshot, (typeof DELTA_TABLES)[number]["stateKey"]>,
+  // `users` decides whether cost may be laid onto product pages (P-4); the
+  // store passes its whole state.
+  currentState: Pick<LocalSnapshot, (typeof DELTA_TABLES)[number]["stateKey"]> & Partial<Pick<LocalSnapshot, "users">>,
 ): Promise<DeltaPullResult> {
   const changes: Partial<LocalSnapshot> = {};
   let hadErrors = false;
@@ -226,7 +230,7 @@ export async function pullDeltaChanges(
           hadErrors = true;
           break;
         }
-        const rows = raw.map(mapper);
+        const rows = await withPermittedCost(table, raw.map(mapper), currentState);
         merged = mergeById(merged, rows);
         pulled += rows.length;
         // Mirror first, cursor second: a crash in between re-reads this page.
@@ -246,6 +250,30 @@ export async function pullDeltaChanges(
   );
 
   return { changes, hadErrors };
+}
+
+/**
+ * P-4: products / product_units pages carry no cost on a PCOST-A server
+ * (NULL legacy columns). For a user with report:shop_profit the permitted
+ * cost rows of those ids are laid on; for anyone else every cost field is
+ * removed (an older server still returns the legacy columns).
+ */
+async function withPermittedCost<T>(table: string, rows: T[], state: Partial<LocalSnapshot>): Promise<T[]> {
+  if (table !== "products" && table !== "product_units") return rows;
+  const allowed = userMayViewCost(state.users ?? [], useAuthStore.getState().currentUserId);
+  if (table === "products") {
+    const list = rows as unknown as { id: string; costMmk?: number }[];
+    if (!allowed) return list.map(stripProductCost) as unknown as T[];
+    // unreadable right now: keep the cost already held for these ids
+    const costs = await fetchProductCosts(list.map((r) => r.id))
+      .catch(() => overlayFromRows(state.products ?? [], [], []).products);
+    return (costs ? list.map((r) => (costs.has(r.id) ? { ...r, costMmk: costs.get(r.id) } : r)) : list) as unknown as T[];
+  }
+  const list = rows as unknown as { id: string; purchasePriceMmk?: number }[];
+  if (!allowed) return list.map(stripUnitCost) as unknown as T[];
+  const costs = await fetchUnitCosts(list.map((r) => r.id))
+    .catch(() => overlayFromRows([], state.productUnits ?? [], []).units);
+  return (costs ? list.map((r) => (costs.has(r.id) ? { ...r, purchasePriceMmk: costs.get(r.id) } : r)) : list) as unknown as T[];
 }
 
 /** 1,000 pages × 1,000 rows per table per pull; beyond that the next pull continues. */

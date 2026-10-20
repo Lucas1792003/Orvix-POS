@@ -1,17 +1,17 @@
 {
     "data": {
-        "asOf": "2026-10-20T13:36:27.205315+00:00",
+        "asOf": "2026-10-20T14:11:06.912587+00:00",
         "shift": {
-            "id": "shift-93e676247fe54f859fc81ea368336b5a",
+            "id": "shift-95ad807dbeec4e559683161efd2ffb47",
             "shopId": "shop-f",
             "status": "CLOSED",
-            "endedAt": "2026-10-20T13:31:26.702348+00:00",
+            "endedAt": "2026-10-20T14:06:06.45668+00:00",
             "cashierId": "u-cash-f2",
-            "startedAt": "2026-10-20T13:16:26.697092+00:00",
+            "startedAt": "2026-10-20T13:51:06.450593+00:00",
             "closingCashMmk": 6000,
             "openingCashMmk": 5000,
             "varianceReason": null,
-            "closeRecordedAt": "2026-10-20T13:36:26.702348+00:00",
+            "closeRecordedAt": "2026-10-20T14:11:06.45668+00:00",
             "closeTimeSource": "SERVER_LEDGER",
             "storedVarianceMmk": 0,
             "storedExpectedCashMmk": 6000
@@ -57,40 +57,40 @@
             "count": 4,
             "items": [
                 {
-                    "id": "refund-6b7ec2f3aa4a4ead82105b3f0e75d563",
+                    "id": "refund-82d31af1b90748c7ac0da5260d334680",
                     "kind": "REFUND",
-                    "saleId": "sale-777bcc4cd0154d1a9f46062c203410ba",
+                    "saleId": "sale-eadb85d73ff6472b907fa14cc92f2f20",
                     "amountMmk": 1000,
                     "receiptNo": "SF-20261019-0001",
-                    "approvedAt": "2026-10-20T13:36:25.790131+00:00",
-                    "saleShiftId": "shift-4b9c76c70996415f8cadb5261757a91e"
+                    "approvedAt": "2026-10-20T14:11:05.632451+00:00",
+                    "saleShiftId": "shift-85db23a6fb4c411093260a6a834c19f1"
                 },
                 {
-                    "id": "refund-09971aaccbb34682bcd1ed825016f539",
+                    "id": "refund-486c1098807a4ff39231d0b660974866",
                     "kind": "REFUND",
-                    "saleId": "sale-05307163fab8449d9e2bba9507bf62ba",
+                    "saleId": "sale-e68ff8682e1a409f9022509cb2e5286b",
                     "amountMmk": 1800,
                     "receiptNo": "SF-20261019-0002",
-                    "approvedAt": "2026-10-20T13:36:25.79281+00:00",
-                    "saleShiftId": "shift-4b9c76c70996415f8cadb5261757a91e"
+                    "approvedAt": "2026-10-20T14:11:05.634276+00:00",
+                    "saleShiftId": "shift-85db23a6fb4c411093260a6a834c19f1"
                 },
                 {
-                    "id": "refund-cf37f43c2e0149d9b6d554d30108a035",
+                    "id": "refund-5d62f92573a141b8bafdb37d9eb7c7d0",
                     "kind": "REFUND",
-                    "saleId": "sale-663d32563eec477fbe284525d3f7da47",
+                    "saleId": "sale-d7a7f7f2aa4d4c528719c748a30382cb",
                     "amountMmk": 1000,
                     "receiptNo": "SF-20261020-0001",
-                    "approvedAt": "2026-10-20T13:36:25.79392+00:00",
-                    "saleShiftId": "shift-77e9a81991fb435ba17b6f98a4bf0c71"
+                    "approvedAt": "2026-10-20T14:11:05.635315+00:00",
+                    "saleShiftId": "shift-a0de3e3163664f69a5e5e624e55f7399"
                 },
                 {
-                    "id": "sale-9bb4a531768d4b9d8041b710d494212a",
+                    "id": "sale-fe04bc68b4974b3f86cb27ba46647c6b",
                     "kind": "VOID",
-                    "saleId": "sale-9bb4a531768d4b9d8041b710d494212a",
+                    "saleId": "sale-fe04bc68b4974b3f86cb27ba46647c6b",
                     "amountMmk": 2000,
                     "receiptNo": "SF-20261020-0002",
-                    "approvedAt": "2026-10-20T13:36:25.794747+00:00",
-                    "saleShiftId": "shift-77e9a81991fb435ba17b6f98a4bf0c71"
+                    "approvedAt": "2026-10-20T14:11:05.636213+00:00",
+                    "saleShiftId": "shift-a0de3e3163664f69a5e5e624e55f7399"
                 }
             ],
             "amountMmk": 5800

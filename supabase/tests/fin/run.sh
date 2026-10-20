@@ -116,9 +116,12 @@ apply_one() {    # $1 = file, $2 = label
   su_psql --single-transaction -f - < "$1" > "$WORK/$(basename "$1" .sql).$2.log" 2>&1 \
     && echo "applied $(basename "$1") ($2)" || { tail -10 "$WORK/$(basename "$1" .sql).$2.log"; fail "$(basename "$1") ($2)"; }
 }
-apply_pfin() {   # $1 = pass label. PFIN-A and PFIN-B only; PFIN-C (held) is applied separately, and only with FIN_WITH_HELD=1
+PCOST="${FIN_WITH_PCOST:-1}"   # provisional cost privacy (P-4); FIN_WITH_PCOST=0 = the pre-PCOST control
+apply_pfin() {   # $1 = pass label. PFIN-A, PFIN-B (+ PCOST-A); PFIN-C (held) is applied separately, and only with FIN_WITH_HELD=1
   apply_one "$PROV/PFIN-A_report_indexes.sql" "$1"
   apply_one "$PROV/PFIN-B_financial_reports.sql" "$1"
+  [ "$PCOST" = "1" ] && apply_one "$PROV/PCOST-A_cost_privacy.sql" "$1"
+  return 0
 }
 chk() {          # $1 = name, $2 = SQL boolean
   local n; n="$(printf '%s' "$1" | sed "s/'/''/g")"
@@ -160,13 +163,35 @@ su_psql -Atc "DROP INDEX public.sales_shift_idx" >/dev/null
 chk "the refused PFIN-A runs left nothing behind" "$N_IDX = 0"
 
 apply_one "$PROV/PFIN-B_financial_reports.sql" b-alone
-chk "independence: PFIN-B alone (no PFIN-A indexes) installs its 7 functions, no trigger" "$N_IDX = 0 AND $N_FN = 7 AND $N_TRG = 0"
+chk "independence: PFIN-B alone (no PFIN-A indexes) installs its 8 functions, no trigger" "$N_IDX = 0 AND $N_FN = 8 AND $N_TRG = 0"
 chk "independence: PFIN-B alone answers a report (ADMIN, shop A, today)" \
   "(SELECT jsonb_typeof(public.fin_report_summary('shop-a', current_date, current_date, 'SALE_DATE')->'totals') = 'object' FROM (SELECT test.login('a0000000-0000-4000-8000-000000000001')) l)"
 apply_one "$PROV/PFIN-B.rollback.sql" b-alone-rb
-chk "independence: PFIN-B rollback alone removes all 7 functions" "$N_FN = 0 AND $N_IDX = 0"
+chk "independence: PFIN-B rollback alone removes all 8 functions" "$N_FN = 0 AND $N_IDX = 0"
 
-log "PFIN-A + PFIN-B (superuser, one transaction each), twice (idempotency), then rolled back B -> A and re-applied"
+if [ "$PCOST" = "1" ]; then
+  log "PCOST-A alone: costs moved to the gated tables, rolled back (copied back), re-applied"
+  COSTS="(select string_agg(id || '=' || coalesce(cost_mmk::text, '-'), ',' order by id) from products) || '|' || (select string_agg(id || '=' || coalesce(purchase_price_mmk::text, '-'), ',' order by id) from product_units)"
+  BEFORE_COSTS="$(su_psql -Atc "select $COSTS")"
+  # a till's write transaction is open: the move must wait for it (lock), and
+  # past lock_timeout give up cleanly with nothing moved -- never copy around it
+  su_psql -Atc "BEGIN; UPDATE products SET name = name WHERE id = 'prod-1'; SELECT pg_sleep(8); COMMIT;" > "$WORK/pcost_locker.log" 2>&1 &
+  LOCKER=$!
+  sleep 1
+  expect_refusal "$PROV/PCOST-A_cost_privacy.sql" "lock timeout" \
+    "PCOST-A waits for live writers on the guarded tables and, past lock_timeout, fails cleanly" pcost-locked
+  wait "$LOCKER"
+  chk "PCOST-A refused under the lock moved nothing (no side tables, legacy costs intact)" \
+    "to_regclass('public.product_costs') IS NULL AND $COSTS = '$(printf '%s' "$BEFORE_COSTS" | sed "s/'/''/g")'"
+  apply_one "$PROV/PCOST-A_cost_privacy.sql" pcost-alone
+  chk "PCOST-A alone: legacy columns NULL, every cost in product_costs / product_unit_costs" \
+    "NOT EXISTS (SELECT 1 FROM products WHERE cost_mmk IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM product_units WHERE purchase_price_mmk IS NOT NULL) AND (SELECT count(*) FROM product_costs) > 0"
+  apply_one "$PROV/PCOST-A.rollback.sql" pcost-rb
+  chk "PCOST-A rollback copies every cost back exactly and removes the side tables" \
+    "$COSTS = '$(printf '%s' "$BEFORE_COSTS" | sed "s/'/''/g")' AND to_regclass('public.product_costs') IS NULL AND to_regproc('public.cost_redirect_products') IS NULL"
+fi
+
+log "PFIN-A + PFIN-B (+ PCOST-A) (superuser, one transaction each), twice (idempotency), then rolled back B -> A and re-applied"
 apply_pfin first
 apply_pfin second
 apply_one "$PROV/PFIN-B.rollback.sql" rb
@@ -174,7 +199,7 @@ apply_one "$PROV/PFIN-A.rollback.sql" rb
 chk "rollback: B then A leave no fin_ function and no PFIN-A index" "$N_FN = 0 AND $N_IDX = 0"
 apply_pfin reapply
 chk "checkpoint state: PFIN-A + PFIN-B installed, PFIN-C absent (no fin_ trigger, no fin_guard function)" \
-  "$N_IDX = 5 AND $N_FN = 7 AND $N_TRG = 0 AND to_regproc('public.fin_guard_refund_net_paid') IS NULL"
+  "$N_IDX = 5 AND $N_FN = 8 AND $N_TRG = 0 AND to_regproc('public.fin_guard_refund_net_paid') IS NULL"
 
 run_sql_test() {
   f="$1"; name="$(basename "$f" .sql)"
@@ -258,6 +283,7 @@ if [ -n "$EXPORT_DIR" ]; then
 fi
 run_sql_test "$SQL/f05_outcomes.sql"
 run_sql_test "$SQL/f07_privileges.sql"
+[ "$PCOST" = "1" ] && run_sql_test "$SQL/f08_cost_privacy.sql"
 
 if [ "$HELD" = "1" ]; then
   log "HELD: PFIN-C applied to the populated database, its tests, and the PFIN-B rollback guard"
@@ -267,7 +293,7 @@ if [ "$HELD" = "1" ]; then
     chk "held: PFIN-B rollback refuses while PFIN-C is installed" "false"
   else
     ok=false; grep -q 'PFIN-B rollback: PFIN-C is still installed' "$WORK/rbB_held.log" && ok=true
-    chk "held: PFIN-B rollback refuses while PFIN-C is installed" "$ok AND $N_FN = 8"
+    chk "held: PFIN-B rollback refuses while PFIN-C is installed" "$ok AND $N_FN = 9"
   fi
 fi
 
@@ -279,6 +305,14 @@ if su_psql --single-transaction -f - < "$REPO/supabase/migrations/087_recovery_h
   log "PFIN-A/B re-applied under 087 (superuser)"
   apply_pfin under087
   [ "$HELD" = "1" ] && apply_one "$HELD_MIG" under087
+  if [ "$PCOST" = "1" ]; then
+    chk "PCOST-A re-applied during the 087 hold: nothing to move, legacy columns still NULL, costs kept" \
+      "NOT EXISTS (SELECT 1 FROM products WHERE cost_mmk IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM sale_items WHERE unit_cost_mmk_snapshot IS NOT NULL) AND (SELECT cost_mmk FROM product_costs WHERE product_id = 'prod-1') = 600"
+    chk "PCOST-A redirect triggers are part of the 087 snapshot (products, product_units, sale_items, purchase_order_items)" \
+      "(SELECT count(*) FROM recovery_guard.snapshot WHERE relname IN ('products','product_units','sale_items','purchase_order_items') AND fingerprint LIKE '%zzc_cost_%') = 4"
+    chk "no unexplained 087 drift after the PCOST-A re-apply" \
+      "NOT EXISTS (SELECT 1 FROM recovery_guard.snapshot g WHERE g.fingerprint IS DISTINCT FROM recovery_guard.fingerprint(g.relid))"
+  fi
   log "PFIN-A under 087: refuses over unexplained drift; rollback + re-apply under 087"
   su_psql -Atc "CREATE INDEX zz_fin_drift_probe ON public.sales (paid_mmk)" >/dev/null
   expect_refusal "$PROV/PFIN-A_report_indexes.sql" "differ from the 087 snapshot; refusing to re-register over unexplained drift" \

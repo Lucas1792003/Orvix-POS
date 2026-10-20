@@ -101,7 +101,8 @@ SELECT test.check('table grants match hosted-grants.txt exactly (065)',
     SELECT table_name, grantee, string_agg(privilege_type, ',' ORDER BY privilege_type) AS privs
       FROM information_schema.role_table_grants
      WHERE table_schema = 'public' AND grantee IN ('anon','authenticated','service_role')
-       AND table_name NOT IN ('idempotency_keys', 'app_config')  -- both new after the snapshot; app_config (080) checked in t16
+       AND table_name NOT IN ('idempotency_keys', 'app_config',  -- both new after the snapshot; app_config (080) checked in t16
+                              'product_costs', 'product_unit_costs', 'sale_item_costs')  -- provisional PCOST-A; checked in supabase/tests/fin/sql/f08
      GROUP BY 1,2
     EXCEPT SELECT table_name, grantee, privs FROM test.expected_grants
   ) AND NOT EXISTS (

@@ -24,9 +24,9 @@ SELECT test.check('f06 no PFIN function uses a name 087 protects (%_v87, recover
                AND (proname LIKE '%\_v87' OR proname LIKE 'recovery\_%')));
 
 SELECT test.check('f06 every PFIN-B function is owned by postgres (never by the superuser runner that applied it)',
-  (SELECT bool_and(proowner = 'postgres'::regrole) AND count(*) = 7 FROM pg_proc
+  (SELECT bool_and(proowner = 'postgres'::regrole) AND count(*) = 8 FROM pg_proc
     WHERE pronamespace = 'public'::regnamespace AND proname IN ('fin_report_scope', 'fin_items', 'fin_sale_line_net',
-      'fin_approval_times', 'fin_refund_lines', 'fin_report_summary', 'fin_shift_reconciliation')));
+      'fin_approval_times', 'fin_refund_lines', 'fin_report_summary', 'fin_shift_reconciliation', 'fin_line_costs')));
 -- regprocedure text depends on search_path: compare as recovery_guard.ddl_guard does
 SET search_path = pg_catalog, pg_temp;
 SELECT test.check('f06 the 087 function registry is unchanged by the PFIN re-apply (no drift blessed)',

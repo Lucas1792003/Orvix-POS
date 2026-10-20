@@ -1,8 +1,8 @@
 {
     "data": {
-        "asOf": "2026-10-20T13:36:26.913783+00:00",
+        "asOf": "2026-10-20T14:11:06.633866+00:00",
         "shift": {
-            "id": "shift-4b9c76c70996415f8cadb5261757a91e",
+            "id": "shift-85db23a6fb4c411093260a6a834c19f1",
             "shopId": "shop-f",
             "status": "CLOSED",
             "endedAt": "2026-10-19T17:30:30+00:00",
@@ -11,7 +11,7 @@
             "closingCashMmk": 59700,
             "openingCashMmk": 50000,
             "varianceReason": null,
-            "closeRecordedAt": "2026-10-20T13:36:25.780635+00:00",
+            "closeRecordedAt": "2026-10-20T14:11:05.624842+00:00",
             "closeTimeSource": "SERVER_LEDGER",
             "storedVarianceMmk": 0,
             "storedExpectedCashMmk": 59700
@@ -35,20 +35,20 @@
             "count": 2,
             "items": [
                 {
-                    "id": "refund-6b7ec2f3aa4a4ead82105b3f0e75d563",
+                    "id": "refund-82d31af1b90748c7ac0da5260d334680",
                     "kind": "REFUND",
-                    "saleId": "sale-777bcc4cd0154d1a9f46062c203410ba",
+                    "saleId": "sale-eadb85d73ff6472b907fa14cc92f2f20",
                     "amountMmk": 1000,
                     "receiptNo": "SF-20261019-0001",
-                    "approvedAt": "2026-10-20T13:36:25.790131+00:00"
+                    "approvedAt": "2026-10-20T14:11:05.632451+00:00"
                 },
                 {
-                    "id": "refund-09971aaccbb34682bcd1ed825016f539",
+                    "id": "refund-486c1098807a4ff39231d0b660974866",
                     "kind": "REFUND",
-                    "saleId": "sale-05307163fab8449d9e2bba9507bf62ba",
+                    "saleId": "sale-e68ff8682e1a409f9022509cb2e5286b",
                     "amountMmk": 1800,
                     "receiptNo": "SF-20261019-0002",
-                    "approvedAt": "2026-10-20T13:36:25.79281+00:00"
+                    "approvedAt": "2026-10-20T14:11:05.634276+00:00"
                 }
             ],
             "amountMmk": 2800

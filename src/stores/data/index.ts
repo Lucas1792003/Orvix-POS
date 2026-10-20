@@ -18,6 +18,7 @@ import type { Inventory } from "../../types";
 import { applyRecordedWrites, beginWriteRecording, endWriteRecording } from "./localWrites";
 import { refreshAuthCacheSnapshot, touchAuthCache } from "../authCache";
 import { useAuthStore } from "../authStore";
+import { applyCostOverlay, fetchCostOverlay, overlayFromRows, scrubLocalCostCache, userMayViewCost } from "./costPrivacy";
 import {
   mapAuditLog, mapBarcode, mapBrand, mapBusinessProfile, mapCategory, mapInventory, mapMovement,
   mapPriceLevel, mapPriceTier, mapProduct, mapProductUnit, mapProductUnitPrice, mapPurchaseOrder,
@@ -116,7 +117,14 @@ export const useDataStore = create<DataState>()((...args) => {
     // callers can show a non-blocking "syncing" indicator.
     if (!get().isLoaded) {
       try {
-        const cached = await readLocalSnapshot();
+        const rawCached = await readLocalSnapshot();
+        // P-4: the mirror may hold cost from an earlier session (another
+        // user, an older build, an older server). A user without
+        // report:shop_profit never gets it in memory, and it is scrubbed
+        // from the mirror (cost fields only — no row is deleted).
+        const cachedAllowed = rawCached ? userMayViewCost(rawCached.users, useAuthStore.getState().currentUserId) : false;
+        const cached = rawCached && !cachedAllowed ? applyCostOverlay(rawCached, null, false) : rawCached;
+        if (rawCached && !cachedAllowed) await scrubLocalCostCache().catch((err) => console.error("[DB] cost scrub failed:", err));
         if (cached) {
           set({ ...cached, refundVoidRequests: cached.refunds, isLoaded: true });
           // The mirrored rows already carry what is queued (D-NEW-1 ledger).
@@ -269,9 +277,27 @@ export const useDataStore = create<DataState>()((...args) => {
         setShopId(null);
       }
 
-      const serverSnapshot: LocalSnapshot = {
+      const loadedUsers = (users.data ?? []).map(mapUser);
+      const costUserId = useAuthStore.getState().currentUserId;
+      const costAllowed = userMayViewCost(loadedUsers, costUserId);
+      // The awaits below can outlive the session: if the permitted user
+      // logged out (or another signed in) meanwhile, strip cost again before
+      // it reaches memory or the mirror, which logout has already scrubbed.
+      const withCostForCurrentUser = <S extends LocalSnapshot>(snap: S): S =>
+        costAllowed && useAuthStore.getState().currentUserId !== costUserId ? applyCostOverlay(snap, null, false) : snap;
+      // P-4: permitted cost from the gated tables (none for anyone else);
+      // never fails the load (cost is not needed to sell or count stock).
+      const costOverlay = costAllowed
+        ? await fetchCostOverlay(((sales.data ?? []) as { id: string }[]).map((s) => s.id)).catch((err) => {
+            // keep the cost already held rather than showing it as missing
+            console.warn("[cost] keeping cached cost:", err instanceof Error ? err.message : err);
+            const s = get();
+            return overlayFromRows(s.products, s.productUnits, s.saleItems);
+          })
+        : null;
+      const serverSnapshot: LocalSnapshot = applyCostOverlay({
         shops: shopsList,
-        users: (users.data ?? []).map(mapUser),
+        users: loadedUsers,
         categories: (categories.data ?? []).map(mapCategory),
         brands: (brands.data ?? []).map(mapBrand),
         unitTypes: (unitTypes.data ?? []).map(mapUnitType),
@@ -299,7 +325,7 @@ export const useDataStore = create<DataState>()((...args) => {
         refunds: (refunds.data ?? []).map(mapRefund),
         auditLogs: (auditLogs.data ?? []).map(mapAuditLog),
         businessProfile: businessProfileRes.data ? mapBusinessProfile(businessProfileRes.data) : null,
-      };
+      }, costOverlay, costAllowed);
       // Keep offline-created rows that are still queued for replay visible
       // (and mirrored) across the reload — see mergeProvisionalRows — and
       // re-apply writes that completed while the reads were in flight.
@@ -314,7 +340,7 @@ export const useDataStore = create<DataState>()((...args) => {
         recorded.inventory, stockMarker, liveEvents.finish(),
         serverTimeBeforeLoad ? Date.parse(serverTimeBeforeLoad) : Number.NEGATIVE_INFINITY,
       );
-      const snapshot = { ...recorded, inventory: composed ? composed.rows : get().inventory };
+      const snapshot = withCostForCurrentUser({ ...recorded, inventory: composed ? composed.rows : get().inventory });
       if (composed) get().noteStockLedger(composed.applied, new Map(Object.entries(composed.pendingConfirmation)));
       const ledgerForSnapshot = serializeLedger();
       set({ ...snapshot, refundVoidRequests: snapshot.refunds, isLoading: false, isLoaded: true });
@@ -341,7 +367,7 @@ export const useDataStore = create<DataState>()((...args) => {
       try {
         const who = useAuthStore.getState();
         const meNow = who.currentUserId ? snapshot.users.find((u) => u.id === who.currentUserId) : undefined;
-        await persistSnapshotToLocal(snapshot, ledgerForSnapshot, {
+        await persistSnapshotToLocal(withCostForCurrentUser(snapshot), ledgerForSnapshot, {
           userId: who.currentUserId ?? null, role: who.currentRole ?? null, orgId: who.currentOrgId ?? null, shopId: meNow?.shopId ?? null,
           permissions: JSON.stringify([[...(meNow?.grantedPermissions ?? [])].sort(), [...(meNow?.revokedPermissions ?? [])].sort()]),
         });

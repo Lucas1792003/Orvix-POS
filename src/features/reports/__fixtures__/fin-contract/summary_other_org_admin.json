@@ -2,7 +2,7 @@
     "data": {
         "basis": {
             "to": "2026-10-20",
-            "asOf": "2026-10-20T13:36:26.413651+00:00",
+            "asOf": "2026-10-20T14:11:06.189565+00:00",
             "from": "2026-10-19",
             "fromUtc": "2026-10-18T17:30:00+00:00",
             "timezone": "Asia/Yangon",
@@ -27,16 +27,16 @@
             },
             {
                 "date": "2026-10-20",
-                "cogsMmk": 600,
+                "cogsMmk": 3000,
                 "voidMmk": 0,
                 "refundMmk": 0,
                 "saleCount": 5,
                 "voidCount": 0,
                 "refundCount": 0,
-                "cogsComplete": false,
+                "cogsComplete": true,
                 "grossSalesMmk": 5000,
                 "netRevenueMmk": 5000,
-                "grossProfitMmk": null
+                "grossProfitMmk": 2000
             }
         ],
         "scope": {
@@ -48,17 +48,17 @@
             "profitVisible": true
         },
         "totals": {
-            "cogsMmk": 600,
+            "cogsMmk": 3000,
             "voidMmk": 0,
             "refundMmk": 0,
             "saleCount": 5,
             "voidCount": 0,
             "refundCount": 0,
-            "cogsComplete": false,
+            "cogsComplete": true,
             "grossSalesMmk": 5000,
             "netRevenueMmk": 5000,
-            "grossProfitMmk": null,
-            "linesMissingCost": 4,
+            "grossProfitMmk": 2000,
+            "linesMissingCost": 0,
             "adjustmentsMissingCost": 0
         },
         "evidence": {

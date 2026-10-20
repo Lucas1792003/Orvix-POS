@@ -1,17 +1,17 @@
 {
     "data": {
-        "asOf": "2026-10-20T13:36:27.295228+00:00",
+        "asOf": "2026-10-20T14:11:07.010277+00:00",
         "shift": {
-            "id": "shift-dc364ec0cc0a4d488aefe9e2894e280a",
+            "id": "shift-78a5ea5c198a4ca2a990124ae6c927f1",
             "shopId": "shop-f",
             "status": "CLOSED",
-            "endedAt": "2026-10-20T13:39:26.717335+00:00",
+            "endedAt": "2026-10-20T14:14:06.47855+00:00",
             "cashierId": "u-cash-f2",
-            "startedAt": "2026-10-20T13:26:26.714011+00:00",
+            "startedAt": "2026-10-20T14:01:06.473836+00:00",
             "closingCashMmk": 4000,
             "openingCashMmk": 1000,
             "varianceReason": null,
-            "closeRecordedAt": "2026-10-20T13:36:26.717335+00:00",
+            "closeRecordedAt": "2026-10-20T14:11:06.47855+00:00",
             "closeTimeSource": "SERVER_LEDGER",
             "storedVarianceMmk": 0,
             "storedExpectedCashMmk": 4000
@@ -30,12 +30,12 @@
             "count": 1,
             "items": [
                 {
-                    "id": "refund-944632b1259c4372af97950b59070006",
+                    "id": "refund-48b899a9de724c1d84b40435b11c119e",
                     "kind": "REFUND",
-                    "saleId": "sale-964510d57a7d4cd89a94b466b359db32",
+                    "saleId": "sale-68ee62c523f14e28a20dd800aee668a2",
                     "amountMmk": 1000,
                     "receiptNo": "SF-20261020-0005",
-                    "approvedAt": "2026-10-20T13:36:26.768549+00:00"
+                    "approvedAt": "2026-10-20T14:11:06.533394+00:00"
                 }
             ],
             "amountMmk": 1000
@@ -65,49 +65,49 @@
             "count": 5,
             "items": [
                 {
-                    "id": "refund-6b7ec2f3aa4a4ead82105b3f0e75d563",
+                    "id": "refund-82d31af1b90748c7ac0da5260d334680",
                     "kind": "REFUND",
-                    "saleId": "sale-777bcc4cd0154d1a9f46062c203410ba",
+                    "saleId": "sale-eadb85d73ff6472b907fa14cc92f2f20",
                     "amountMmk": 1000,
                     "receiptNo": "SF-20261019-0001",
-                    "approvedAt": "2026-10-20T13:36:25.790131+00:00",
-                    "saleShiftId": "shift-4b9c76c70996415f8cadb5261757a91e"
+                    "approvedAt": "2026-10-20T14:11:05.632451+00:00",
+                    "saleShiftId": "shift-85db23a6fb4c411093260a6a834c19f1"
                 },
                 {
-                    "id": "refund-09971aaccbb34682bcd1ed825016f539",
+                    "id": "refund-486c1098807a4ff39231d0b660974866",
                     "kind": "REFUND",
-                    "saleId": "sale-05307163fab8449d9e2bba9507bf62ba",
+                    "saleId": "sale-e68ff8682e1a409f9022509cb2e5286b",
                     "amountMmk": 1800,
                     "receiptNo": "SF-20261019-0002",
-                    "approvedAt": "2026-10-20T13:36:25.79281+00:00",
-                    "saleShiftId": "shift-4b9c76c70996415f8cadb5261757a91e"
+                    "approvedAt": "2026-10-20T14:11:05.634276+00:00",
+                    "saleShiftId": "shift-85db23a6fb4c411093260a6a834c19f1"
                 },
                 {
-                    "id": "refund-cf37f43c2e0149d9b6d554d30108a035",
+                    "id": "refund-5d62f92573a141b8bafdb37d9eb7c7d0",
                     "kind": "REFUND",
-                    "saleId": "sale-663d32563eec477fbe284525d3f7da47",
+                    "saleId": "sale-d7a7f7f2aa4d4c528719c748a30382cb",
                     "amountMmk": 1000,
                     "receiptNo": "SF-20261020-0001",
-                    "approvedAt": "2026-10-20T13:36:25.79392+00:00",
-                    "saleShiftId": "shift-77e9a81991fb435ba17b6f98a4bf0c71"
+                    "approvedAt": "2026-10-20T14:11:05.635315+00:00",
+                    "saleShiftId": "shift-a0de3e3163664f69a5e5e624e55f7399"
                 },
                 {
-                    "id": "sale-9bb4a531768d4b9d8041b710d494212a",
+                    "id": "sale-fe04bc68b4974b3f86cb27ba46647c6b",
                     "kind": "VOID",
-                    "saleId": "sale-9bb4a531768d4b9d8041b710d494212a",
+                    "saleId": "sale-fe04bc68b4974b3f86cb27ba46647c6b",
                     "amountMmk": 2000,
                     "receiptNo": "SF-20261020-0002",
-                    "approvedAt": "2026-10-20T13:36:25.794747+00:00",
-                    "saleShiftId": "shift-77e9a81991fb435ba17b6f98a4bf0c71"
+                    "approvedAt": "2026-10-20T14:11:05.636213+00:00",
+                    "saleShiftId": "shift-a0de3e3163664f69a5e5e624e55f7399"
                 },
                 {
-                    "id": "refund-d9c96693cf214a69b60e2de3a91bb96d",
+                    "id": "refund-5e325774fcc14341967afe4f97d20a17",
                     "kind": "REFUND",
-                    "saleId": "sale-485c4c4916524aca9ab39814a9043d20",
+                    "saleId": "sale-9ff45c0b333544e3b1652eeee458cef7",
                     "amountMmk": 1000,
                     "receiptNo": "SF-20261020-0004",
-                    "approvedAt": "2026-10-20T13:36:26.700214+00:00",
-                    "saleShiftId": "shift-93e676247fe54f859fc81ea368336b5a"
+                    "approvedAt": "2026-10-20T14:11:06.454869+00:00",
+                    "saleShiftId": "shift-95ad807dbeec4e559683161efd2ffb47"
                 }
             ],
             "amountMmk": 6800

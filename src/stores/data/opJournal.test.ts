@@ -404,6 +404,14 @@ describe("protecting local evidence from a server snapshot (continuity)", () => 
     expect(vanishedRows(old, newRows, { cap: 1, visibleShops: new Set(["shop-1"]) })).toEqual([]);
   });
 
+  it("P-4: vanished sale evidence keeps the line but never its cost snapshot (it outlives the logout scrub)", async () => {
+    await persistSnapshotToLocal(emptySnapshot({ sales: [serverSale("sale-1", "2026-10-18T01:00:00Z"), serverSale("sale-2", "2026-10-18T02:00:00Z")], saleItems: [{ id: "si-2", saleId: "sale-2", qtyUnits: 1, unitCostMmkSnapshot: 600 }] as never }), undefined, scopeA);
+    await persistSnapshotToLocal(emptySnapshot({ sales: [serverSale("sale-1", "2026-10-18T01:00:00Z")] }), undefined, scopeA);
+    const v = await listVanished();
+    expect(v[0]).toMatchObject({ table: "sales", related: [{ id: "si-2", qtyUnits: 1 }] });
+    expect((v[0].related as object[])[0]).not.toHaveProperty("unitCostMmkSnapshot");
+  });
+
   it("a full load from a RESTORED server keeps the vanished sale as evidence, pauses automatic sync, and an owner resumes it", async () => {
     await persistSnapshotToLocal(emptySnapshot({ sales: [serverSale("sale-1", "2026-10-18T01:00:00Z"), serverSale("sale-2", "2026-10-18T02:00:00Z")], saleItems: [{ id: "si-2", saleId: "sale-2" }] as never }), undefined, scopeA);
     // the server was restored to before sale-2 (the same user's next load)

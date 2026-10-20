@@ -9,6 +9,7 @@ END $r$;
 DROP FUNCTION IF EXISTS public.fin_report_summary(text, date, date, text);
 DROP FUNCTION IF EXISTS public.fin_shift_reconciliation(text);
 DROP FUNCTION IF EXISTS public.fin_refund_lines(text[]);
+DROP FUNCTION IF EXISTS public.fin_line_costs(text[]);
 DROP FUNCTION IF EXISTS public.fin_approval_times(text, text[]);
 DROP FUNCTION IF EXISTS public.fin_sale_line_net(text[]);
 DROP FUNCTION IF EXISTS public.fin_items(jsonb);

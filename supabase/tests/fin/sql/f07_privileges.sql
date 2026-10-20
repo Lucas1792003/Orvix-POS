@@ -50,11 +50,11 @@ SELECT test.check('f07 exact EXECUTE grantees: entry points {authenticated, post
      FROM pg_proc p, LATERAL (SELECT array_agg(a.grantee::regrole::text ORDER BY a.grantee::regrole::text) AS g
                                 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a) x
     WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('fin_report_summary', 'fin_shift_reconciliation',
-      'fin_report_scope', 'fin_items', 'fin_sale_line_net', 'fin_approval_times', 'fin_refund_lines')));
+      'fin_report_scope', 'fin_items', 'fin_sale_line_net', 'fin_approval_times', 'fin_refund_lines', 'fin_line_costs')));
 SELECT test.check('f07 helpers (scope, items, line net, approval times, refund lines) not executable by anon or authenticated',
   (SELECT bool_and(NOT has_function_privilege('anon', p.oid, 'EXECUTE') AND NOT has_function_privilege('authenticated', p.oid, 'EXECUTE'))
      FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace
-      AND p.proname IN ('fin_report_scope', 'fin_items', 'fin_sale_line_net', 'fin_approval_times', 'fin_refund_lines')));
+      AND p.proname IN ('fin_report_scope', 'fin_items', 'fin_sale_line_net', 'fin_approval_times', 'fin_refund_lines', 'fin_line_costs')));
 -- 5. the definer reads every table it needs as its owner, unfiltered (no FORCE RLS, owner = postgres or SELECT granted)
 SELECT test.check('f07 postgres can read every table the reports use, and none has FORCE ROW LEVEL SECURITY (no silent filtering)',
   (SELECT bool_and(has_table_privilege('postgres', c.oid, 'SELECT') AND NOT c.relforcerowsecurity) FROM pg_class c

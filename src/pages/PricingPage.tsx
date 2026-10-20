@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useCanViewCost } from "../lib/useCanViewCost";
 import { useAuthStore } from "../stores/authStore";
 import { useAppStore } from "../stores/appStore";
 import { useDataStore } from "../stores/dataStore";
@@ -18,6 +19,7 @@ import { reportError } from "../lib/errors";
 import type { PriceTier } from "../types";
 
 export const PricingPage = () => {
+  const canViewCost = useCanViewCost();
   const toast = useToast();
   const currentUserId = useAuthStore((state) => state.currentUserId);
   const currentUser = useDataStore((state) => state.users.find((u) => u.id === currentUserId));
@@ -236,7 +238,8 @@ export const PricingPage = () => {
                   <div className="min-w-0">
                     <h4 className="font-medium">{product.name}</h4>
                     <p className="text-sm text-slate-500">
-                      Base Price: MMK {product.priceMmk.toLocaleString()} | Cost: MMK {(product.costMmk ?? 0).toLocaleString()}
+                      Base Price: MMK {product.priceMmk.toLocaleString()}
+                      {canViewCost && product.costMmk !== undefined && <> | Cost: MMK {product.costMmk.toLocaleString()}</>}
                     </p>
                   </div>
                   {isAdmin && (

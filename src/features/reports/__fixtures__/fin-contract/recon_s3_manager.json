@@ -1,13 +1,13 @@
 {
     "data": {
-        "asOf": "2026-10-20T13:36:27.110944+00:00",
+        "asOf": "2026-10-20T14:11:06.822906+00:00",
         "shift": {
-            "id": "shift-34f6215c6a9f4f88a8bc415b4a3da7ea",
+            "id": "shift-c78f0b80ab2e4ac9aab15c6a762b2dd5",
             "shopId": "shop-f",
             "status": "OPEN",
             "endedAt": null,
             "cashierId": "u-cash-f1",
-            "startedAt": "2026-10-20T13:36:26.68925+00:00",
+            "startedAt": "2026-10-20T14:11:06.443117+00:00",
             "closingCashMmk": null,
             "openingCashMmk": 10000,
             "varianceReason": null,
@@ -57,22 +57,22 @@
             "count": 2,
             "items": [
                 {
-                    "id": "refund-d9c96693cf214a69b60e2de3a91bb96d",
+                    "id": "refund-5e325774fcc14341967afe4f97d20a17",
                     "kind": "REFUND",
-                    "saleId": "sale-485c4c4916524aca9ab39814a9043d20",
+                    "saleId": "sale-9ff45c0b333544e3b1652eeee458cef7",
                     "amountMmk": 1000,
                     "receiptNo": "SF-20261020-0004",
-                    "approvedAt": "2026-10-20T13:36:26.700214+00:00",
-                    "saleShiftId": "shift-93e676247fe54f859fc81ea368336b5a"
+                    "approvedAt": "2026-10-20T14:11:06.454869+00:00",
+                    "saleShiftId": "shift-95ad807dbeec4e559683161efd2ffb47"
                 },
                 {
-                    "id": "refund-944632b1259c4372af97950b59070006",
+                    "id": "refund-48b899a9de724c1d84b40435b11c119e",
                     "kind": "REFUND",
-                    "saleId": "sale-964510d57a7d4cd89a94b466b359db32",
+                    "saleId": "sale-68ee62c523f14e28a20dd800aee668a2",
                     "amountMmk": 1000,
                     "receiptNo": "SF-20261020-0005",
-                    "approvedAt": "2026-10-20T13:36:26.768549+00:00",
-                    "saleShiftId": "shift-dc364ec0cc0a4d488aefe9e2894e280a"
+                    "approvedAt": "2026-10-20T14:11:06.533394+00:00",
+                    "saleShiftId": "shift-78a5ea5c198a4ca2a990124ae6c927f1"
                 }
             ],
             "amountMmk": 2000

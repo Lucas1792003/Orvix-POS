@@ -196,7 +196,7 @@ export const PurchaseOrderCreateModal = ({
               <option key={product.id} value={product.id}>
                 {product.name}
                 {product.purchaseType ? ` [${product.purchaseType}]` : ""}
-                {" "}(Cost: MMK {product.costMmk?.toLocaleString() ?? 0})
+                {product.costMmk !== undefined ? ` (Cost: MMK ${product.costMmk.toLocaleString()})` : ""}
               </option>
             ))}
           </Select>

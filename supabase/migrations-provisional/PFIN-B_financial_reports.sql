@@ -56,7 +56,7 @@
 --                    exactly: integer discount shares floor(D·t/S), leftover
 --                    MMK of discount to the largest remainder, ties by item id
 --                    ascending (C collation = JavaScript string order).
---   COGS             Σ qty_units × unit_cost_mmk_snapshot (per base unit,
+--   COGS             Σ qty_units × unit cost snapshot (per base unit,
 --                    041), reversed for refunded / voided quantities at the
 --                    sale's own snapshot cost. Never today's product cost.
 --                    Lines or adjustments without a snapshot make COGS
@@ -233,6 +233,32 @@ AS $$
 $$;
 
 -- ------------------------------------------------------------
+-- Cost snapshot of every line of the given sales (per base unit). The one
+-- place the reports read cost: sale_item_costs (the confidential table of the
+-- provisional cost-privacy migration PCOST-A) when it exists, else the legacy
+-- sale_items.unit_cost_mmk_snapshot column. PL/pgSQL resolves the table only
+-- when that branch runs, so PFIN-B installs with or without PCOST-A, in either
+-- order, and re-applying PFIN-B never loses the PCOST-A source.
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.fin_line_costs(p_sale_ids text[])
+RETURNS TABLE (sale_id text, item_id text, product_id text, qty_units integer, unit_cost_mmk integer)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF to_regclass('public.sale_item_costs') IS NULL THEN
+    RETURN QUERY
+      SELECT si.sale_id, si.id, si.product_id, si.qty_units, si.unit_cost_mmk_snapshot
+        FROM sale_items si WHERE si.sale_id = ANY (p_sale_ids);
+  ELSE
+    RETURN QUERY
+      SELECT si.sale_id, si.id, si.product_id, si.qty_units, COALESCE(c.unit_cost_mmk, si.unit_cost_mmk_snapshot)
+        FROM sale_items si LEFT JOIN sale_item_costs c ON c.sale_item_id = si.id
+       WHERE si.sale_id = ANY (p_sale_ids);
+  END IF;
+END;
+$$;
+
+-- ------------------------------------------------------------
 -- Server-attested approval time of refund requests ('REFUND', request ids)
 -- or voids ('VOID', sale ids). Missing id = no evidence.
 -- ------------------------------------------------------------
@@ -293,9 +319,9 @@ AS $$
   ),
   cost AS (
     SELECT si.sale_id, si.product_id,
-           count(*) = count(si.unit_cost_mmk_snapshot) AND sum(si.qty_units) > 0 AS costed,
-           sum(si.qty_units::numeric * si.unit_cost_mmk_snapshot) AS qc, sum(si.qty_units)::numeric AS q
-      FROM sale_items si WHERE si.sale_id = ANY (CAST((SELECT ids FROM sale_ids) AS text[])) GROUP BY 1, 2
+           count(*) = count(si.unit_cost_mmk) AND sum(si.qty_units) > 0 AS costed,
+           sum(si.qty_units::numeric * si.unit_cost_mmk) AS qc, sum(si.qty_units)::numeric AS q
+      FROM fin_line_costs(CAST((SELECT ids FROM sale_ids) AS text[])) si GROUP BY 1, 2
   ),
   cum AS (
     SELECT it.*,
@@ -374,9 +400,9 @@ BEGIN
   ),
   sr_cost AS (
     SELECT si.sale_id,
-           COALESCE(sum(si.qty_units::bigint * si.unit_cost_mmk_snapshot), 0)::bigint AS cogs,
-           count(*) FILTER (WHERE si.unit_cost_mmk_snapshot IS NULL) AS missing
-      FROM sale_items si WHERE si.sale_id IN (SELECT id FROM sr) GROUP BY si.sale_id
+           COALESCE(sum(si.qty_units::bigint * si.unit_cost_mmk), 0)::bigint AS cogs,
+           count(*) FILTER (WHERE si.unit_cost_mmk IS NULL) AS missing
+      FROM fin_line_costs(ARRAY(SELECT id FROM sr)) si GROUP BY si.sale_id
   ),
   -- approved partial refunds: of sales in the range, plus (approval basis)
   -- those approved in the range for in-scope sales of any date
@@ -417,9 +443,9 @@ BEGIN
      WHERE s.shop_id = ANY (v_shops) AND (v_cashier IS NULL OR s.cashier_id = v_cashier)
   ),
   vcost AS (
-    SELECT si.sale_id, COALESCE(sum(si.qty_units::bigint * si.unit_cost_mmk_snapshot), 0)::bigint AS cogs,
-           bool_or(si.unit_cost_mmk_snapshot IS NULL) AS missing
-      FROM sale_items si WHERE si.sale_id IN (SELECT id FROM vs) GROUP BY si.sale_id
+    SELECT si.sale_id, COALESCE(sum(si.qty_units::bigint * si.unit_cost_mmk), 0)::bigint AS cogs,
+           bool_or(si.unit_cost_mmk IS NULL) AS missing
+      FROM fin_line_costs(ARRAY(SELECT id FROM vs)) si GROUP BY si.sale_id
   ),
   vtime AS (SELECT * FROM fin_approval_times('VOID', ARRAY(SELECT id FROM vs))),
   adj AS (
@@ -802,6 +828,7 @@ ALTER FUNCTION public.fin_report_scope(text) OWNER TO postgres;
 ALTER FUNCTION public.fin_items(jsonb) OWNER TO postgres;
 ALTER FUNCTION public.fin_sale_line_net(text[]) OWNER TO postgres;
 ALTER FUNCTION public.fin_approval_times(text, text[]) OWNER TO postgres;
+ALTER FUNCTION public.fin_line_costs(text[]) OWNER TO postgres;
 ALTER FUNCTION public.fin_refund_lines(text[]) OWNER TO postgres;
 ALTER FUNCTION public.fin_report_summary(text, date, date, text) OWNER TO postgres;
 ALTER FUNCTION public.fin_shift_reconciliation(text) OWNER TO postgres;
@@ -810,9 +837,10 @@ REVOKE ALL ON FUNCTION public.fin_report_scope(text) FROM PUBLIC, anon, authenti
 REVOKE ALL ON FUNCTION public.fin_items(jsonb) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.fin_sale_line_net(text[]) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.fin_approval_times(text, text[]) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.fin_line_costs(text[]) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.fin_refund_lines(text[]) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.fin_report_scope(text), public.fin_items(jsonb), public.fin_sale_line_net(text[]),
-  public.fin_approval_times(text, text[]), public.fin_refund_lines(text[]) TO service_role;
+  public.fin_approval_times(text, text[]), public.fin_refund_lines(text[]), public.fin_line_costs(text[]) TO service_role;
 
 REVOKE ALL ON FUNCTION public.fin_report_summary(text, date, date, text) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION public.fin_shift_reconciliation(text) FROM PUBLIC, anon;

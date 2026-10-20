@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useCanViewCost } from "../lib/useCanViewCost";
 import { useNavigate, useParams } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -104,6 +105,7 @@ const FormSection = ({
 };
 
 export const ProductFormPage = () => {
+  const canViewCost = useCanViewCost();
   const navigate = useNavigate();
   const { productId: routeProductId } = useParams<{ productId?: string }>();
   const toast = useToast();
@@ -1298,6 +1300,7 @@ export const ProductFormPage = () => {
                             two-line label compact enough that the row
                             doesn't grow taller than needed. */}
                         <div className="grid items-end gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                          {canViewCost && (
                           <label className="block">
                             <span className="mb-1 block text-xs font-medium leading-tight text-slate-500">{t("productForm", "purchaseCost")}</span>
                             <MoneyInput
@@ -1307,6 +1310,7 @@ export const ProductFormPage = () => {
                               placeholder={t("productForm", "optional")}
                             />
                           </label>
+                          )}
 
                           {activePriceLevels.length > 0 ? (
                             activePriceLevels.map((level) => {

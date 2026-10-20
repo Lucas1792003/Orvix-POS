@@ -231,3 +231,39 @@ describe("createSale offline", () => {
     expect(entries[0].lastError).toMatch(/NOT recorded.*Insufficient stock for Tea Mix/);
   });
 });
+
+describe("P-4: complete_sale reply cost", () => {
+  // An older server returns the line's unit_cost_mmk_snapshot to the cashier
+  // who made the sale; it must not reach the store or the mirror for a user
+  // without report:shop_profit (an owner keeps it).
+  const replyWithCost = {
+    sale: { id: "sale-server-c", receiptNo: "R-300", shopId: "shop-1", totalMmk: 2000 },
+    items: [{ id: "si-server-c", saleId: "sale-server-c", unitCostMmkSnapshot: 600 }],
+    movements: [{ id: "mv-server-c", shopId: "shop-1", productId: "p1" }],
+    inventory: [{ shopId: "shop-1", productId: "p1", qtyBaseUnits: 8 }],
+    auditLogs: [{ id: "au-server-c" }],
+  };
+  const users = [
+    { id: "user-1", role: "CASHIER", isActive: true },
+    { id: "owner-1", role: "ADMIN", isActive: true },
+  ];
+
+  it.each([
+    ["user-1", undefined],
+    ["owner-1", 600],
+  ])("replayed as %s: line cost in store and mirror = %s; the sale itself is applied either way", async (who, expected) => {
+    const { useAuthStore } = await import("../../authStore");
+    useAuthStore.setState({ currentUserId: who });
+    const { get } = makeStore({ users });
+    await get().createSale({ ...baseInput, cartItems: [cartItem()] });
+    vi.stubGlobal("navigator", { onLine: true });
+    rpc.mockResolvedValue({ data: replyWithCost, error: null });
+    await drainOutbox();
+    expect(get().sales.map((s: { id: string }) => s.id)).toEqual(["sale-server-c"]);
+    const line = get().saleItems.find((i: { id?: string }) => i.id === "si-server-c");
+    expect(line?.unitCostMmkSnapshot).toBe(expected);
+    expect((await localDb.saleItems.get("si-server-c"))?.unitCostMmkSnapshot).toBe(expected);
+    expect(await localDb.syncOutbox.count()).toBe(0);
+    useAuthStore.setState({ currentUserId: null });
+  });
+});

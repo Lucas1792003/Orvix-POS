@@ -27,9 +27,15 @@ SELECT 'vs-' || g, 'shop-v', 'shift-v-hist', 'SV-' || lpad(g::text, 6, '0'), 'u-
   FROM generate_series(1, 30000) g;
 INSERT INTO sale_items (id, sale_id, product_id, qty_units, unit_price_mmk, line_total_mmk, unit_cost_mmk_snapshot)
 SELECT 'vi-' || g || '-' || l, 'vs-' || g, (ARRAY['prod-1', 'prod-2', 'prod-3'])[l], l, 1000, 1000 * l,
-       CASE WHEN g % 50 = 0 AND l = 1 THEN NULL ELSE (ARRAY[600, 1200, 1800])[l] / l END
+       (ARRAY[600, 1200, 1800])[l] / l
   FROM generate_series(1, 30000) g, generate_series(1, 3) l
  WHERE l <= 1 + (g % 3);
+-- every 50th sale also sold the product WITHOUT a cost (prod-nc): a line with no
+-- cost snapshot (with PCOST-A the insert trigger takes the product's cost, so
+-- "missing" must be a product that has none, as it is for a real sale)
+INSERT INTO sale_items (id, sale_id, product_id, qty_units, unit_price_mmk, line_total_mmk, unit_cost_mmk_snapshot)
+SELECT 'vi-' || g || '-nc', 'vs-' || g, 'prod-nc', 1, 500, 500, NULL
+  FROM generate_series(50, 30000, 50) g;
 UPDATE sales s SET subtotal_mmk = x.after_disc,
                    total_mmk = x.after_disc - round(x.after_disc * s.cart_discount_pct / 100)::int,
                    discount_mmk = round(x.after_disc * s.cart_discount_pct / 100)::int,

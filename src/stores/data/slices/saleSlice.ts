@@ -10,7 +10,8 @@ import { deleteLocalRows, putLocalRows } from "../localWrites";
 import { Stage, submitOfflineCapable } from "../writeAhead";
 import { rememberSaleOperation } from "../opJournal";
 import { assertStockKnown, serverStockRows } from "../stockLedger";
-import { assertOfflineWriteEligible } from "../../authStore";
+import { assertOfflineWriteEligible, useAuthStore } from "../../authStore";
+import { stripLineCost, userMayViewCost } from "../costPrivacy";
 
 // Shape returned by the complete_sale RPC (keys are already camelCase).
 interface CompleteSaleResult {
@@ -122,8 +123,15 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   // permission, shop scope, the open shift, stock and overrides, then writes
   // the sale, items, inventory, movements and audit rows in one transaction.
   // Apply complete_sale's (validated) reply to the store and the mirror.
+  // P-4: an older server returns the line cost snapshot to the cashier; never
+  // keep it (memory or mirror) for a user without report:shop_profit.
+  const withoutHiddenCost = (result: CompleteSaleResult): CompleteSaleResult =>
+    userMayViewCost(get().users ?? [], useAuthStore.getState().currentUserId)
+      ? result
+      : { ...result, items: result.items.map(stripLineCost) };
+
   const applyCompleteSale = async (data: unknown, ackId: string): Promise<string> => {
-    const result = data as CompleteSaleResult;
+    const result = withoutHiddenCost(data as CompleteSaleResult);
     // Server rows + the effects of other unresolved entries (stockLedger.ts).
     const shownStock = serverStockRows(result.inventory, ackId);
 
@@ -357,7 +365,7 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   // Called by the outbox once a queued complete_sale actually runs — swaps
   // the provisional sale/items/movements for the server's authoritative rows.
   reconcileCompleteSale: (data, provisional, ackId) => {
-    const result = data as CompleteSaleResult;
+    const result = withoutHiddenCost(data as CompleteSaleResult);
     // Server rows + the effects of other unresolved entries (stockLedger.ts).
     const shownStock = serverStockRows(result.inventory, ackId ?? null);
     const provisionalSaleIds = new Set(provisional.find((p) => p.table === "sales")?.ids ?? []);

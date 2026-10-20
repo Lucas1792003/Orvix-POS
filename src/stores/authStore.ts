@@ -616,6 +616,16 @@ export const useAuthStore = create<AuthState>()((set) => ({
     // -> authStore).
     const { useDataStore } = await import("./dataStore");
     useDataStore.setState({ isLoaded: false, isLoading: false, loadError: null });
+    // P-4: purchase cost / COGS must not outlive the session that was allowed
+    // to see it (the next person on this device may not be). Only the cost
+    // fields are removed — offline sales, the outbox and its journal stay.
+    const { scrubLocalCostCache, stripProductCost, stripUnitCost, stripLineCost } = await import("./data/costPrivacy");
+    useDataStore.setState((s) => ({
+      products: s.products.map(stripProductCost),
+      productUnits: s.productUnits.map(stripUnitCost),
+      saleItems: s.saleItems.map(stripLineCost),
+    }));
+    await scrubLocalCostCache().catch((err) => console.error("[auth] cost scrub on logout failed:", err));
   },
 
   requestAdminCode: async () => {
