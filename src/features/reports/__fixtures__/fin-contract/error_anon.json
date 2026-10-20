@@ -1,0 +1,6 @@
+{
+    "error": {
+        "code": "42501",
+        "message": "permission denied for function fin_report_summary"
+    }
+}

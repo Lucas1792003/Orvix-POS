@@ -1,0 +1,6 @@
+{
+    "error": {
+        "code": "P0001",
+        "message": "Shop not found in your organization"
+    }
+}

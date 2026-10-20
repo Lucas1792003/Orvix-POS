@@ -8,6 +8,7 @@ import { Tabs } from "../components/ui/Tabs";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Modal } from "../components/ui/Modal";
+import { ReasonDialog } from "../components/ui/ReasonDialog";
 import { Select } from "../components/ui/Select";
 import { SearchInput } from "../components/forms/SearchInput";
 import { TransferReceiveModal } from "../components/transfers/TransferReceiveModal";
@@ -15,6 +16,7 @@ import { useToast } from "../components/ui/Toast";
 import { useTranslation } from "../hooks/useTranslation";
 import { formatDateTime, getEffectiveShopId } from "../lib/utils";
 import { reportError } from "../lib/errors";
+import { classifySubmitFailure } from "../lib/submitOutcome";
 import { mayAlreadyBeRecorded, outcomeToast } from "../lib/outcomeToast";
 import { getActiveProductUnits, getDefaultProductUnit } from "../features/catalog/productUnits";
 import { convertToBaseQuantity, formatStockQuantity } from "../features/inventory/stockDisplay";
@@ -80,6 +82,7 @@ export const TransfersPage = () => {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showDetailModal, setShowDetailModal] = useState<string | null>(null);
   const [receiveTransferId, setReceiveTransferId] = useState<string | null>(null);
+  const [reasonDialog, setReasonDialog] = useState<{ kind: "reject" | "cancel"; transferId: string } | null>(null);
 
   // Create transfer form state
   const [newTransfer, setNewTransfer] = useState({
@@ -212,18 +215,44 @@ export const TransfersPage = () => {
     }
   };
 
-  const handleReject = async (transferId: string) => {
-    if (!currentUserId) return;
-    const reason = prompt("Enter rejection reason:");
-    if (!reason) return;
+  // Reject / cancel ask for a required reason in a ReasonDialog, not
+  // window.prompt() — Electron has no prompt(), so both actions silently did
+  // nothing on the desktop app (ORV-013). One dialog at a time: a second
+  // Reject/Cancel click while it is open is ignored, so the typed reason can
+  // never be sent for a different transfer.
+  const openReasonDialog = (kind: "reject" | "cancel", transferId: string) => {
+    if (!currentUserId || reasonDialog) return;
+    setReasonDialog({ kind, transferId });
+  };
+  const handleReject = (transferId: string) => openReasonDialog("reject", transferId);
+
+  // Outcome handling (lib/submitOutcome.ts):
+  //  - success → the dialog closes;
+  //  - "pending": outcome unknown (may already be recorded) → "pending
+  //    confirmation" toast, the dialog closes so it is not entered again;
+  //  - "not-sent": an earlier attempt is unresolved, nothing was sent → info
+  //    toast, rethrow: the dialog stays open with the typed reason;
+  //  - "failed": confirmed failure (incl. an 087 recovery refusal: nothing
+  //    recorded) → error toast, rethrow: the dialog stays open for a retry.
+  const submitWithReason = async (kind: "reject" | "cancel", transferId: string, reason: string) => {
+    const failTitle = t("transfers", kind === "reject" ? "failReject" : "failCancel");
+    if (!currentUserId) {
+      // Signed out while the dialog was open: say so, never close silently.
+      toast({ variant: "error", title: failTitle });
+      throw new Error("Not signed in");
+    }
     try {
-      await rejectTransfer({ transferId, actorId: currentUserId, reason });
+      if (kind === "reject") await rejectTransfer({ transferId, actorId: currentUserId, reason });
+      else await cancelTransfer({ transferId, actorId: currentUserId, reason });
     } catch (error) {
-      toast({
-        variant: "error",
-        title: t("transfers", "failReject"),
-        description: reportError("TransfersPage.reject", error, t("transfers", "failReject")),
-      });
+      const item = outcomeToast(error, t, failTitle, failTitle);
+      const outcome = classifySubmitFailure(error);
+      if (outcome === "pending") {
+        toast(item);
+        return;
+      }
+      toast(outcome === "failed" ? { ...item, description: reportError(`TransfersPage.${kind}`, error, failTitle) } : item);
+      throw error;
     }
   };
 
@@ -240,27 +269,15 @@ export const TransfersPage = () => {
     }
   };
 
-  const handleCancel = async (transferId: string) => {
-    if (!currentUserId) return;
-    const reason = prompt("Enter cancellation reason:");
-    if (!reason) return;
-    try {
-      await cancelTransfer({ transferId, actorId: currentUserId, reason });
-    } catch (error) {
-      toast({
-        variant: "error",
-        title: t("transfers", "failCancel"),
-        description: reportError("TransfersPage.cancel", error, t("transfers", "failCancel")),
-      });
-    }
-  };
+  const handleCancel = (transferId: string) => openReasonDialog("cancel", transferId);
 
   const addItemToTransfer = (productId: string) => {
     const unit = getFirstAvailableUnit(productId);
     const availableBase = getAvailableBase(productId);
     const alreadyRequestedBase = getTransferProductBaseTotal(newTransfer.items, productId, productUnits);
     if (!unit || availableBase - alreadyRequestedBase < unit.baseQuantity) {
-      alert(t("transfers", "noStock"));
+      // In-app toast rather than a blocking browser alert().
+      toast({ variant: "warning", title: t("transfers", "noStock") });
       return;
     }
     setNewTransfer((prev) => ({
@@ -732,6 +749,22 @@ export const TransfersPage = () => {
         transferId={receiveTransferId}
         onClose={() => setReceiveTransferId(null)}
         currentUserId={currentUserId}
+      />
+
+      <ReasonDialog
+        // A new target remounts the dialog: no reason or error carried over.
+        key={reasonDialog ? `${reasonDialog.kind}:${reasonDialog.transferId}` : "closed"}
+        open={reasonDialog !== null}
+        title={t("transfers", reasonDialog?.kind === "cancel" ? "cancelTitle" : "rejectTitle")}
+        label={t("transfers", reasonDialog?.kind === "cancel" ? "cancelReason" : "rejectReasonLabel")}
+        confirmLabel={t("transfers", reasonDialog?.kind === "cancel" ? "cancel" : "reject")}
+        cancelLabel={t("common", "back")}
+        requiredMessage={t("transfers", "reasonRequired")}
+        destructive
+        onConfirm={(reason) =>
+          reasonDialog ? submitWithReason(reasonDialog.kind, reasonDialog.transferId, reason) : undefined
+        }
+        onClose={() => setReasonDialog(null)}
       />
     </Card>
   );

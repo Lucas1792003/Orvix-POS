@@ -46,7 +46,16 @@ import {
   recentTransfers,
   resolveDashboardScope,
   scopeSales,
+  netRefundedLines,
 } from "./dashboardMetrics";
+
+// Dashboard days are business days in Asia/Yangon (UTC+06:30, no DST —
+// ORV-069). Fixtures are built from Yangon wall-clock times so every case
+// passes whatever time zone the test machine is in.
+const YGN_OFFSET_MS = 6.5 * 3_600_000;
+/** A Date at Yangon wall-clock time; month 0-based like `new Date(y, m, d, h)`. */
+const ygnDate = (y: number, m: number, d: number, h = 0, min = 0): Date =>
+  new Date(Date.UTC(y, m, d, h, min) - YGN_OFFSET_MS);
 
 // ------------------------------------------------------------
 // Fixtures
@@ -145,13 +154,15 @@ describe("scopeSales", () => {
     sale({ id: "refunded-a", shopId: "shop-a", status: "REFUNDED" }),
   ];
 
-  it("excludes VOID and REFUNDED sales", () => {
+  it("excludes VOID but keeps REFUNDED (partly refunded) sales — ORV-034", () => {
+    // approve_refund_request (070) marks the WHOLE sale REFUNDED on any
+    // approved partial refund; dropping it lost the units that were kept.
     const out = scopeSales(sales, null);
-    expect(out.map((s) => s.id).sort()).toEqual(["n-a", "n-b"]);
+    expect(out.map((s) => s.id).sort()).toEqual(["n-a", "n-b", "refunded-a"]);
   });
 
   it("restricts to a single shop when shopId is provided", () => {
-    expect(scopeSales(sales, "shop-a").map((s) => s.id)).toEqual(["n-a"]);
+    expect(scopeSales(sales, "shop-a").map((s) => s.id)).toEqual(["n-a", "refunded-a"]);
     expect(scopeSales(sales, "shop-b").map((s) => s.id)).toEqual(["n-b"]);
   });
 
@@ -239,6 +250,56 @@ describe("calculateNetRevenue", () => {
     ];
     expect(calculateNetRevenue(sales, refunds)).toBe(0);
   });
+
+  it("counts a partly refunded (REFUNDED) sale net of its refund — ORV-034", () => {
+    const sales = scopeSales(
+      [
+        sale({ id: "kept", totalMmk: 5000 }),
+        sale({ id: "partly", status: "REFUNDED", totalMmk: 10000 }),
+        sale({ id: "voided", status: "VOID", totalMmk: 7000 }),
+      ],
+      null,
+    );
+    const refunds: RefundVoidRequest[] = [
+      refund({ id: "r1", saleId: "partly", items: [{ productId: "p", qtyUnits: 1, amountMmk: 3000 }] }),
+    ];
+    // 5000 + (10000 − 3000); the void contributes nothing.
+    expect(calculateNetRevenue(sales, refunds)).toBe(12000);
+  });
+
+  it("nets a fully refunded sale to 0 without touching other sales", () => {
+    const sales: Sale[] = [
+      sale({ id: "all-back", status: "REFUNDED", totalMmk: 4000 }),
+      sale({ id: "other", totalMmk: 6000 }),
+    ];
+    const refunds: RefundVoidRequest[] = [
+      refund({ id: "a", saleId: "all-back", items: [{ productId: "p", qtyUnits: 1, amountMmk: 1500 }] }),
+      refund({ id: "b", saleId: "all-back", items: [{ productId: "q", qtyUnits: 2, amountMmk: 2500 }] }),
+    ];
+    expect(calculateNetRevenue(sales, refunds)).toBe(6000);
+  });
+});
+
+describe("calculateRefundDeductions — per-sale cap", () => {
+  it("never deducts more than a sale's own total (pre-090 over-refunds, ORV-002)", () => {
+    const sales: Sale[] = [sale({ id: "s1", totalMmk: 900 }), sale({ id: "s2", totalMmk: 5000 })];
+    const refunds: RefundVoidRequest[] = [
+      // Priced from the pre-cart-discount line total: 1000 > 900 paid.
+      refund({ id: "r", saleId: "s1", items: [{ productId: "p", qtyUnits: 1, amountMmk: 1000 }] }),
+    ];
+    expect(calculateRefundDeductions(sales, refunds)).toBe(900);
+    // s2's revenue is intact: 900 − 900 + 5000.
+    expect(calculateNetRevenue(sales, refunds)).toBe(5000);
+  });
+
+  it("ignores negative amounts and missing items", () => {
+    const sales: Sale[] = [sale({ id: "s1", totalMmk: 1000 })];
+    const refunds: RefundVoidRequest[] = [
+      refund({ id: "neg", saleId: "s1", items: [{ productId: "p", qtyUnits: 1, amountMmk: -500 }] }),
+      refund({ id: "none", saleId: "s1", items: undefined }),
+    ];
+    expect(calculateRefundDeductions(sales, refunds)).toBe(0);
+  });
 });
 
 // ------------------------------------------------------------
@@ -262,6 +323,32 @@ describe("calculateCostOfGoods", () => {
     const sales = [sale({ id: "s1" })];
     const items = [item({ saleId: "s1", productId: "ghost", qtyUnits: 9 })];
     expect(calculateCostOfGoods(sales, items, products)).toBe(0);
+  });
+
+  it("reverses the cost of units returned by approved PARTIAL refunds", () => {
+    const sales = [sale({ id: "s1", status: "REFUNDED" })];
+    const items = [
+      item({ saleId: "s1", productId: "p1", qtyUnits: 4, unitCostMmkSnapshot: 500 }),
+      item({ saleId: "s1", productId: "p2", qtyUnits: 2 }),
+    ];
+    const refunds = [
+      refund({ id: "ok", saleId: "s1", items: [{ productId: "p1", qtyUnits: 1, amountMmk: 1000 }] }),
+      refund({ id: "pending", saleId: "s1", status: "REQUESTED", items: [{ productId: "p2", qtyUnits: 2, amountMmk: 1 }] }),
+    ];
+    // (4 − 1) × 500 snapshot + 2 × 400 current (pending refund ignored).
+    expect(calculateCostOfGoods(sales, items, products, refunds)).toBe(3 * 500 + 2 * 400);
+    // Without refunds the old behaviour holds.
+    expect(calculateCostOfGoods(sales, items, products)).toBe(4 * 500 + 2 * 400);
+  });
+
+  it("caps the reversal at what that sale sold of the product", () => {
+    const sales = [sale({ id: "s1", status: "REFUNDED" })];
+    const items = [item({ saleId: "s1", productId: "p1", qtyUnits: 2 })];
+    const refunds = [
+      refund({ id: "x", saleId: "s1", items: [{ productId: "p1", qtyUnits: 5, amountMmk: 0 }] }),
+      refund({ id: "y", saleId: "s1", items: [{ productId: "not-sold", qtyUnits: 3, amountMmk: 0 }] }),
+    ];
+    expect(calculateCostOfGoods(sales, items, products, refunds)).toBe(0);
   });
 });
 
@@ -476,7 +563,7 @@ describe("calculateCategoryRevenue", () => {
 });
 
 describe("calculateSalesByCategoryPercent", () => {
-  const NOW = new Date(2026, 4, 24, 12, 0, 0, 0);
+  const NOW = ygnDate(2026, 4, 24, 12);
   const products: Product[] = [
     product({ id: "p1", category: "beer" }),
     product({ id: "p2", category: "juice" }),
@@ -484,8 +571,8 @@ describe("calculateSalesByCategoryPercent", () => {
 
   it("excludes VOID sales and returns category percentages", () => {
     const sales: Sale[] = [
-      sale({ id: "s1", shopId: "shop-a", createdAt: new Date(2026, 4, 24, 9).toISOString() }),
-      sale({ id: "void", shopId: "shop-a", status: "VOID", createdAt: new Date(2026, 4, 24, 10).toISOString() }),
+      sale({ id: "s1", shopId: "shop-a", createdAt: ygnDate(2026, 4, 24, 9).toISOString() }),
+      sale({ id: "void", shopId: "shop-a", status: "VOID", createdAt: ygnDate(2026, 4, 24, 10).toISOString() }),
     ];
     const items: SaleItem[] = [
       item({ saleId: "s1", productId: "p1", lineTotalMmk: 3000 }),
@@ -502,8 +589,8 @@ describe("calculateSalesByCategoryPercent", () => {
 
   it("respects shop scope", () => {
     const sales: Sale[] = [
-      sale({ id: "s-a", shopId: "shop-a", createdAt: new Date(2026, 4, 24, 9).toISOString() }),
-      sale({ id: "s-b", shopId: "shop-b", createdAt: new Date(2026, 4, 24, 9).toISOString() }),
+      sale({ id: "s-a", shopId: "shop-a", createdAt: ygnDate(2026, 4, 24, 9).toISOString() }),
+      sale({ id: "s-b", shopId: "shop-b", createdAt: ygnDate(2026, 4, 24, 9).toISOString() }),
     ];
     const items: SaleItem[] = [
       item({ saleId: "s-a", productId: "p1", lineTotalMmk: 1000 }),
@@ -520,7 +607,7 @@ describe("calculateSalesByCategoryPercent", () => {
 
   it("percentage total is approximately 100", () => {
     const sales: Sale[] = [
-      sale({ id: "s1", shopId: "shop-a", createdAt: new Date(2026, 4, 24, 9).toISOString() }),
+      sale({ id: "s1", shopId: "shop-a", createdAt: ygnDate(2026, 4, 24, 9).toISOString() }),
     ];
     const items: SaleItem[] = [
       item({ saleId: "s1", productId: "p1", lineTotalMmk: 1 }),
@@ -538,13 +625,13 @@ describe("calculateSalesByCategoryPercent", () => {
 });
 
 describe("calculateDailyRevenueCostProfitTrend", () => {
-  const NOW = new Date(2026, 4, 24, 12, 0, 0, 0);
+  const NOW = ygnDate(2026, 4, 24, 12);
   const products: Product[] = [product({ id: "p1", costMmk: 600 })];
 
   it("excludes VOID sales from revenue, cost, and profit", () => {
     const sales: Sale[] = [
-      sale({ id: "s1", shopId: "shop-a", totalMmk: 10000, createdAt: new Date(2026, 4, 24, 9).toISOString() }),
-      sale({ id: "void", shopId: "shop-a", status: "VOID", totalMmk: 99000, createdAt: new Date(2026, 4, 24, 10).toISOString() }),
+      sale({ id: "s1", shopId: "shop-a", totalMmk: 10000, createdAt: ygnDate(2026, 4, 24, 9).toISOString() }),
+      sale({ id: "void", shopId: "shop-a", status: "VOID", totalMmk: 99000, createdAt: ygnDate(2026, 4, 24, 10).toISOString() }),
     ];
     const items: SaleItem[] = [
       item({ saleId: "s1", productId: "p1", qtyUnits: 5 }),
@@ -561,8 +648,8 @@ describe("calculateDailyRevenueCostProfitTrend", () => {
   });
 
   it("groups by day and subtracts approved partial refunds from revenue", () => {
-    const dayOne = new Date(2026, 4, 23, 9).toISOString();
-    const dayTwo = new Date(2026, 4, 24, 9).toISOString();
+    const dayOne = ygnDate(2026, 4, 23, 9).toISOString();
+    const dayTwo = ygnDate(2026, 4, 24, 9).toISOString();
     const sales: Sale[] = [
       sale({ id: "s1", shopId: "shop-a", totalMmk: 10000, createdAt: dayOne }),
       sale({ id: "s2", shopId: "shop-a", totalMmk: 5000, createdAt: dayOne }),
@@ -581,8 +668,9 @@ describe("calculateDailyRevenueCostProfitTrend", () => {
     expect(rows.map((row) => row.date)).toEqual(["2026-05-23", "2026-05-24"]);
     expect(rows[0]).toMatchObject({
       revenue: 14000,
-      cost: 7200,
-      profit: 6800,
+      // 10 × 600 + (2 − 1 refunded) × 600: the returned unit's cost is reversed.
+      cost: 6600,
+      profit: 7400,
     });
     expect(rows[1]).toMatchObject({
       revenue: 8000,
@@ -592,7 +680,7 @@ describe("calculateDailyRevenueCostProfitTrend", () => {
   });
 
   it("respects admin all-shops vs selected-shop scope", () => {
-    const createdAt = new Date(2026, 4, 24, 9).toISOString();
+    const createdAt = ygnDate(2026, 4, 24, 9).toISOString();
     const sales: Sale[] = [
       sale({ id: "s-a", shopId: "shop-a", totalMmk: 10000, createdAt }),
       sale({ id: "s-b", shopId: "shop-b", totalMmk: 7000, createdAt }),
@@ -668,35 +756,40 @@ describe("calculateSupplierDebt", () => {
 // ============================================================
 describe("dateRangeStart + filterSalesByRange", () => {
   // Pin the clock to mid-day so today/week boundaries are deterministic.
-  const NOW = new Date(2026, 4, 15, 12, 0, 0, 0);
+  const NOW = ygnDate(2026, 4, 15, 12);
 
-  it("today starts at local midnight", () => {
-    const d = dateRangeStart("today", NOW);
-    expect(d.getFullYear()).toBe(2026);
-    expect(d.getMonth()).toBe(4);
-    expect(d.getDate()).toBe(15);
-    expect(d.getHours()).toBe(0);
+  it("today starts at business (Yangon) midnight", () => {
+    expect(dateRangeStart("today", NOW).toISOString()).toBe("2026-05-14T17:30:00.000Z");
   });
 
-  it("week starts seven days ago at local midnight (rolling)", () => {
-    const d = dateRangeStart("week", NOW);
-    expect(d.getDate()).toBe(8);
-    expect(d.getMonth()).toBe(4);
-    expect(d.getHours()).toBe(0);
+  it("week starts seven days ago at business midnight (rolling)", () => {
+    expect(dateRangeStart("week", NOW).toISOString()).toBe("2026-05-07T17:30:00.000Z");
   });
 
-  it("month starts at the first day of the local month", () => {
-    const d = dateRangeStart("month", NOW);
-    expect(d.getDate()).toBe(1);
-    expect(d.getMonth()).toBe(4);
-    expect(d.getHours()).toBe(0);
+  it("month starts at business midnight on the 1st", () => {
+    expect(dateRangeStart("month", NOW).toISOString()).toBe("2026-04-30T17:30:00.000Z");
+  });
+
+  it("puts an early-morning Yangon sale on today, not on the previous UTC day (ORV-069)", () => {
+    // 01:00 Yangon on the 15th is 18:30 UTC on the 14th.
+    const earlyToday = ygnDate(2026, 4, 15, 1).toISOString();
+    expect(earlyToday.slice(0, 10)).toBe("2026-05-14");
+    const sales: Sale[] = [sale({ id: "early", createdAt: earlyToday })];
+    expect(filterSalesByRange(sales, "today", NOW).map((s) => s.id)).toEqual(["early"]);
+  });
+
+  it("keeps the last minute of yesterday out of today", () => {
+    const lateYesterday = ygnDate(2026, 4, 14, 23, 59).toISOString();
+    const sales: Sale[] = [sale({ id: "late", createdAt: lateYesterday })];
+    expect(filterSalesByRange(sales, "today", NOW)).toEqual([]);
+    expect(filterSalesByRange(sales, "week", NOW).map((s) => s.id)).toEqual(["late"]);
   });
 
   it("filters sales by createdAt within the range", () => {
-    const inTodayMorning = new Date(2026, 4, 15, 9, 0, 0).toISOString();
-    const fourDaysAgo = new Date(2026, 4, 11, 12, 0, 0).toISOString();
-    const fifteenDaysAgo = new Date(2026, 4, 1, 12, 0, 0).toISOString();
-    const lastMonth = new Date(2026, 3, 20, 12, 0, 0).toISOString();
+    const inTodayMorning = ygnDate(2026, 4, 15, 9).toISOString();
+    const fourDaysAgo = ygnDate(2026, 4, 11, 12).toISOString();
+    const fifteenDaysAgo = ygnDate(2026, 4, 1, 12).toISOString();
+    const lastMonth = ygnDate(2026, 3, 20, 12).toISOString();
     const sales: Sale[] = [
       sale({ id: "today", createdAt: inTodayMorning }),
       sale({ id: "4d", createdAt: fourDaysAgo }),
@@ -715,9 +808,31 @@ describe("dateRangeStart + filterSalesByRange", () => {
   });
 
   it("excludes future-dated sales from the selected range", () => {
-    const future = new Date(2026, 4, 16, 9, 0, 0).toISOString();
+    const future = ygnDate(2026, 4, 16, 9).toISOString();
     const sales: Sale[] = [sale({ id: "future", createdAt: future })];
     expect(filterSalesByRange(sales, "month", NOW)).toEqual([]);
+  });
+
+  it("starts a new month and year at Yangon midnight on 1 January", () => {
+    // 00:30 Yangon on 2027-01-01 is still 2026-12-31 in UTC.
+    const newYear = ygnDate(2027, 0, 1, 0, 30);
+    expect(newYear.toISOString().slice(0, 10)).toBe("2026-12-31");
+    expect(dateRangeStart("month", newYear).toISOString()).toBe("2026-12-31T17:30:00.000Z");
+    expect(dateRangeStart("today", newYear).toISOString()).toBe("2026-12-31T17:30:00.000Z");
+    const sales: Sale[] = [
+      sale({ id: "last-of-year", createdAt: ygnDate(2026, 11, 31, 23, 59).toISOString() }),
+      sale({ id: "first-of-year", createdAt: ygnDate(2027, 0, 1, 0, 5).toISOString() }),
+    ];
+    expect(filterSalesByRange(sales, "month", newYear).map((s) => s.id)).toEqual(["first-of-year"]);
+    expect(filterSalesByRange(sales, "week", newYear).map((s) => s.id)).toEqual(["last-of-year", "first-of-year"]);
+  });
+
+  it("ends a 30-day month at Yangon midnight (month-end)", () => {
+    const lastMinute = ygnDate(2026, 3, 30, 23, 59); // 30 April, 23:59 Yangon
+    const sales: Sale[] = [sale({ id: "apr30", createdAt: ygnDate(2026, 3, 30, 23, 0).toISOString() })];
+    expect(filterSalesByRange(sales, "month", lastMinute).map((s) => s.id)).toEqual(["apr30"]);
+    const firstMinuteOfMay = ygnDate(2026, 4, 1, 0, 1);
+    expect(filterSalesByRange(sales, "month", firstMinuteOfMay)).toEqual([]);
   });
 });
 
@@ -879,7 +994,55 @@ describe("calculateActionNeeded", () => {
 // ============================================================
 // Cash vs Other
 // ============================================================
+describe("netRefundedLines + rankings (ORV-034)", () => {
+  const products: Product[] = [product({ id: "A", category: "beer", costMmk: 600 }), product({ id: "B", category: "soft", costMmk: 400 })];
+  const sales: Sale[] = [sale({ id: "s1", status: "REFUNDED", totalMmk: 2000 }), sale({ id: "s2", status: "REFUNDED", totalMmk: 1400 })];
+  const items: SaleItem[] = [
+    item({ saleId: "s1", productId: "A", qtyUnits: 2, lineTotalMmk: 2000 }),
+    item({ saleId: "s2", productId: "B", qtyUnits: 1, lineTotalMmk: 700 }),
+    item({ saleId: "s2", productId: "B", qtyUnits: 1, lineTotalMmk: 700 }),
+  ];
+  const refunds: RefundVoidRequest[] = [
+    refund({ id: "all-A", saleId: "s1", items: [{ productId: "A", qtyUnits: 2, amountMmk: 2000 }] }),
+    refund({ id: "one-B", saleId: "s2", items: [{ productId: "B", qtyUnits: 1, amountMmk: 700 }] }),
+    refund({ id: "pending", saleId: "s2", status: "REQUESTED", items: [{ productId: "B", qtyUnits: 1, amountMmk: 700 }] }),
+  ];
+
+  it("drops wholly returned lines and takes returned units from the product's lines in order", () => {
+    const kept = netRefundedLines(items, refunds);
+    expect(kept.map((i) => [i.saleId, i.productId, i.qtyUnits, i.lineTotalMmk])).toEqual([["s2", "B", 1, 700]]);
+    expect(netRefundedLines(items)).toBe(items);
+  });
+
+  it("reduces quantity and line total pro rata on a partly returned line", () => {
+    const kept = netRefundedLines(
+      [item({ saleId: "s9", productId: "A", qtyUnits: 3, lineTotalMmk: 2999 })],
+      [refund({ id: "x", saleId: "s9", items: [{ productId: "A", qtyUnits: 1, amountMmk: 1000 }] })],
+    );
+    expect(kept.map((i) => [i.qtyUnits, i.lineTotalMmk])).toEqual([[2, 1999]]);
+  });
+
+  it("a fully refunded sale no longer tops Top Products or the category split", () => {
+    expect(calculateTopProducts(sales, items, products, 5, refunds).map((r) => [r.product.id, r.qty, r.revenue])).toEqual([["B", 1, 700]]);
+    expect(calculateCategoryRevenue(sales, items, products, refunds)).toEqual([{ name: "soft", value: 700 }]);
+    // Without refunds the old (gross) behaviour holds.
+    expect(calculateTopProducts(sales, items, products, 5).map((r) => [r.product.id, r.qty])).toEqual([["A", 2], ["B", 2]]);
+  });
+});
+
 describe("calculateCashVsOther", () => {
+  it("nets each method's approved refunds when refunds are given (ORV-034)", () => {
+    const sales: Sale[] = [
+      sale({ id: "c1", paymentMethod: "CASH", status: "REFUNDED", totalMmk: 4000 }),
+      sale({ id: "o1", paymentMethod: "OTHER", status: "REFUNDED", totalMmk: 3000 }),
+    ];
+    const refunds: RefundVoidRequest[] = [
+      refund({ id: "rc", saleId: "c1", items: [{ productId: "p", qtyUnits: 1, amountMmk: 1500 }] }),
+      refund({ id: "ro", saleId: "o1", items: [{ productId: "p", qtyUnits: 1, amountMmk: 3000 }] }),
+    ];
+    expect(calculateCashVsOther(sales, refunds)).toEqual({ cashCount: 1, cashRevenue: 2500, otherCount: 1, otherRevenue: 0 });
+  });
+
   it("splits count + revenue by payment method", () => {
     const sales: Sale[] = [
       sale({ id: "s1", paymentMethod: "CASH", totalMmk: 10000 }),
@@ -895,6 +1058,7 @@ describe("calculateCashVsOther", () => {
   });
 
   it("returns zeros on empty data", () => {
+    expect(calculateCashVsOther([], [])).toEqual({ cashCount: 0, cashRevenue: 0, otherCount: 0, otherRevenue: 0 });
     expect(calculateCashVsOther([])).toEqual({
       cashCount: 0,
       cashRevenue: 0,

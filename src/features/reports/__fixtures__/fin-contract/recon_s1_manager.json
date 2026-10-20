@@ -1,0 +1,91 @@
+{
+    "data": {
+        "asOf": "2026-10-20T13:36:26.913783+00:00",
+        "shift": {
+            "id": "shift-4b9c76c70996415f8cadb5261757a91e",
+            "shopId": "shop-f",
+            "status": "CLOSED",
+            "endedAt": "2026-10-19T17:30:30+00:00",
+            "cashierId": "u-cash-f1",
+            "startedAt": "2026-10-19T14:30:00+00:00",
+            "closingCashMmk": 59700,
+            "openingCashMmk": 50000,
+            "varianceReason": null,
+            "closeRecordedAt": "2026-10-20T13:36:25.780635+00:00",
+            "closeTimeSource": "SERVER_LEDGER",
+            "storedVarianceMmk": 0,
+            "storedExpectedCashMmk": 59700
+        },
+        "cashSales": {
+            "count": 3,
+            "amountMmk": 9700
+        },
+        "nonCashSales": [
+            {
+                "count": 1,
+                "method": "OTHER",
+                "amountMmk": 3000
+            }
+        ],
+        "cashMovements": {
+            "reason": "NOT_RECORDED_BEFORE_CASH_MOVEMENTS",
+            "recorded": false
+        },
+        "afterClosePayouts": {
+            "count": 2,
+            "items": [
+                {
+                    "id": "refund-6b7ec2f3aa4a4ead82105b3f0e75d563",
+                    "kind": "REFUND",
+                    "saleId": "sale-777bcc4cd0154d1a9f46062c203410ba",
+                    "amountMmk": 1000,
+                    "receiptNo": "SF-20261019-0001",
+                    "approvedAt": "2026-10-20T13:36:25.790131+00:00"
+                },
+                {
+                    "id": "refund-09971aaccbb34682bcd1ed825016f539",
+                    "kind": "REFUND",
+                    "saleId": "sale-05307163fab8449d9e2bba9507bf62ba",
+                    "amountMmk": 1800,
+                    "receiptNo": "SF-20261019-0002",
+                    "approvedAt": "2026-10-20T13:36:25.79281+00:00"
+                }
+            ],
+            "amountMmk": 2800
+        },
+        "attributedPayouts": {
+            "count": 0,
+            "voidMmk": 0,
+            "amountMmk": 0,
+            "refundMmk": 0
+        },
+        "closeWindowPayouts": {
+            "count": 0,
+            "items": [
+            ],
+            "amountMmk": 0
+        },
+        "unknownTimePayouts": {
+            "count": 0,
+            "items": [
+            ],
+            "amountMmk": 0
+        },
+        "evidenceVarianceMmk": 0,
+        "storedMatchesEvidence": true,
+        "evidenceExpectedCashMmk": 59700,
+        "crossShiftPayoutsDuringShift": {
+            "count": 0,
+            "items": [
+            ],
+            "amountMmk": 0
+        },
+        "supplierCashPaymentsDuringShift": {
+            "count": 0,
+            "amountMmk": 0,
+            "dateField": "paid_at"
+        },
+        "storedMatchesEvidenceIfCloseWindowDeducted": null,
+        "storedMatchesEvidenceIfUnknownTimeDeducted": null
+    }
+}

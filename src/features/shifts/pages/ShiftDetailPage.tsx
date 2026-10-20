@@ -11,6 +11,10 @@ import { useToast } from "../../../components/ui/Toast";
 import { ShiftDetail } from "../../../components/shifts/ShiftDetail";
 import { EndShiftCard } from "../../../components/shifts/EndShiftCard";
 import { buildShiftBreakdown } from "../service";
+import { useShiftReconciliation } from "../../reports/useFinReport";
+import { ShiftReconciliationPanel } from "../components/ShiftReconciliationPanel";
+import { checkExpectedBeforeClose, extraReasonError } from "../closeExpected";
+import { closeWouldExpect } from "../../reports/finReports";
 import {
   canUserCloseShift,
   getSalesForShift,
@@ -67,6 +71,13 @@ export const ShiftDetailPage = () => {
     () => (shift ? buildShiftBreakdown(shift, shiftSales, refundVoidRequests) : null),
     [shift, shiftSales, refundVoidRequests],
   );
+  // Server reconciliation (every approved refund, whoever entered it; never
+  // the client cache). The close form uses its expected cash when it is
+  // available; otherwise the device's figure, labelled as an estimate (the
+  // server recomputes expected cash when the close is applied).
+  const recon = useShiftReconciliation(shift?.id ?? null);
+  const serverExpected = recon.state.status === "ok" ? closeWouldExpect(recon.state.data) : null;
+  const closeExpectedCash = serverExpected ?? breakdown?.expectedCash ?? 0;
 
   // Pre-compute "sales sorted newest-first + line items grouped by sale"
   // so the render path doesn't repeat the filter per row. saleItems is
@@ -84,17 +95,27 @@ export const ShiftDetailPage = () => {
     return map;
   }, [saleItems, sortedSales]);
 
-  const closeValidation = breakdown
+  const baseCloseValidation = breakdown
     ? validateCloseShift({
         closingCash,
-        expectedCash: breakdown.expectedCash,
+        expectedCash: closeExpectedCash,
         varianceReason,
       })
     : { variance: null, canClose: false, error: null };
+  const deviceReasonError = baseCloseValidation.canClose
+    ? extraReasonError({ closingCash, shownExpectedMmk: closeExpectedCash, deviceExpectedMmk: breakdown?.expectedCash, varianceReason })
+    : null;
+  const closeValidation = deviceReasonError
+    ? { ...baseCloseValidation, canClose: false, error: deviceReasonError }
+    : baseCloseValidation;
   const canClose = !!shift && canUserCloseShift(currentUser, shift);
 
   const handleEndShift = async () => {
     if (!shift || !breakdown) return;
+    if (recon.state.status === "loading") {
+      toast({ title: "Checking expected cash", description: "The server reconciliation is still loading. Try again in a moment.", variant: "error" });
+      return;
+    }
     if (!canClose) {
       toast({ title: "No permission", description: "You cannot close this shift.", variant: "error" });
       return;
@@ -108,12 +129,22 @@ export const ShiftDetailPage = () => {
       });
       return;
     }
+    const check = await checkExpectedBeforeClose(shift.id, closeExpectedCash);
+    if (!check.proceed) {
+      recon.refresh();
+      toast({
+        title: "Expected cash changed",
+        description: `The server now expects ${formatMmk(check.latestMmk)} (a refund or void was approved meanwhile). Check the count and close again.`,
+        variant: "error",
+      });
+      return;
+    }
     try {
       await endShift({
         shiftId: shift.id,
         closingCashMmk: closingCash ?? 0,
-        varianceReason:
-          (closeValidation.variance ?? 0) !== 0 ? varianceReason.trim() : undefined,
+        // a typed reason is always sent: the server's own variance may differ from the form's
+        varianceReason: varianceReason.trim() !== "" ? varianceReason.trim() : undefined,
       });
       toast({ title: "Shift closed", variant: "success" });
       navigate(SHIFTS_ROUTE);
@@ -389,18 +420,24 @@ export const ShiftDetailPage = () => {
           )}
         </div>
 
+        <div className="border-t border-slate-200 pt-4">
+          <ShiftReconciliationPanel state={recon.state} onRetry={recon.refresh} />
+        </div>
+
         {canClose && (
           <div className="border-t border-slate-200 pt-4">
             <div className="mb-3">
               <div className="text-sm font-semibold text-slate-800">Close this shift</div>
-              <div className="text-xs text-slate-500">
-                Closing uses the same expected-cash formula shown above. The backend recomputes it.
+              <div className="text-xs text-slate-500" data-close-expected-source={serverExpected !== null ? "server" : "device"}>
+                {serverExpected !== null
+                  ? "Expected cash from the server reconciliation above. The backend recomputes it on close."
+                  : "Server reconciliation unavailable: expected cash is this device's estimate from loaded sales. The backend recomputes it on close."}
               </div>
             </div>
             <EndShiftCard
               idPrefix={`detail-${shift.id}`}
               closingCash={closingCash}
-              expectedCash={breakdown.expectedCash}
+              expectedCash={closeExpectedCash}
               varianceReason={varianceReason}
               onVarianceReasonChange={setVarianceReason}
               onClosingCashChange={(next) => {

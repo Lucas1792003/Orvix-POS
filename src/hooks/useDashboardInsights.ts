@@ -3,6 +3,9 @@ import type { Product, Sale, SaleItem, Inventory } from "../types/domain";
 import {
   calculateCostOfGoods,
   calculateGrossRevenue,
+  countsAsSale,
+  netRefundedLines,
+  type RefundForMetrics,
 } from "../features/dashboard/dashboardMetrics";
 
 export interface BusinessInsight {
@@ -69,6 +72,9 @@ interface UseDashboardInsightsParams {
    * dropped because it ignored ADMIN's shop picker.
    */
   metricShopId: string | null;
+  /** Refund/void requests: units given back by approved PARTIAL refunds
+   *  are taken out of the per-product figures and velocity (ORV-034). */
+  refunds?: RefundForMetrics[];
 }
 
 interface UseDashboardInsightsReturn {
@@ -89,13 +95,20 @@ export const useDashboardInsights = ({
   products,
   inventory,
   metricShopId,
+  refunds,
 }: UseDashboardInsightsParams): UseDashboardInsightsReturn => {
+  // Per-product figures and velocity count only the units customers kept
+  // (approved PARTIAL refunds taken out). The gross totals below keep the
+  // raw lines, matching their documented basis.
+  const keptLines = useMemo(() => netRefundedLines(saleItems, refunds), [saleItems, refunds]);
   // Filter sales by scope: `metricShopId === null` ⇒ all shops, otherwise
-  // restrict to that shop. VOID/REFUNDED are excluded by the `NORMAL`
-  // status check (mirrors `scopeSales` in dashboardMetrics).
+  // restrict to that shop. Only VOID is excluded (mirrors `scopeSales` in
+  // dashboardMetrics): a partly refunded sale is REFUNDED but still sold
+  // its other units (ORV-034); its returned units are taken out via
+  // `keptLines`.
   const filteredSales = useMemo(() => {
     return sales.filter(
-      (s) => s.status === "NORMAL" && (metricShopId === null || s.shopId === metricShopId)
+      (s) => countsAsSale(s) && (metricShopId === null || s.shopId === metricShopId)
     );
   }, [sales, metricShopId]);
 
@@ -104,7 +117,7 @@ export const useDashboardInsights = ({
     const map: Record<string, ProductProfitability> = {};
 
     filteredSales.forEach((sale) => {
-      const items = saleItems.filter((i) => i.saleId === sale.id);
+      const items = keptLines.filter((i) => i.saleId === sale.id);
       items.forEach((item) => {
         const product = products.find((p) => p.id === item.productId);
         if (product) {
@@ -134,14 +147,14 @@ export const useDashboardInsights = ({
         profitMargin: p.revenue > 0 ? (p.profit / p.revenue) * 100 : 0,
       }))
       .sort((a, b) => a.profit - b.profit); // Sort by profit ascending (losses first)
-  }, [filteredSales, saleItems, products]);
+  }, [filteredSales, keptLines, products]);
 
   // Calculate category analysis
   const categoryAnalysis = useMemo(() => {
     const map: Record<string, { revenue: number; cost: number; profit: number }> = {};
 
     filteredSales.forEach((sale) => {
-      const items = saleItems.filter((i) => i.saleId === sale.id);
+      const items = keptLines.filter((i) => i.saleId === sale.id);
       items.forEach((item) => {
         const product = products.find((p) => p.id === item.productId);
         if (product) {
@@ -168,7 +181,7 @@ export const useDashboardInsights = ({
         profitPercent: totalProfit > 0 ? (data.profit / totalProfit) * 100 : 0,
       }))
       .sort((a, b) => b.revenuePercent - a.revenuePercent);
-  }, [filteredSales, saleItems, products]);
+  }, [filteredSales, keptLines, products]);
 
   // Calculate totals from the SHARED dashboard helpers so this hook
   // and the headline KPI card never disagree. Note: this is the
@@ -193,7 +206,7 @@ export const useDashboardInsights = ({
     filteredSales.forEach((sale) => {
       const saleDate = new Date(sale.createdAt);
       if (saleDate >= sevenDaysAgo) {
-        const items = saleItems.filter((i) => i.saleId === sale.id);
+        const items = keptLines.filter((i) => i.saleId === sale.id);
         items.forEach((item) => {
           salesByProduct[item.productId] = (salesByProduct[item.productId] || 0) + item.qtyUnits;
         });
@@ -204,7 +217,7 @@ export const useDashboardInsights = ({
     return Object.fromEntries(
       Object.entries(salesByProduct).map(([id, qty]) => [id, qty / 7])
     );
-  }, [filteredSales, saleItems]);
+  }, [filteredSales, keptLines]);
 
   // Calculate stock health.
   //

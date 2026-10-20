@@ -10,15 +10,25 @@ import { DateRangePicker } from "../components/forms/DateRangePicker";
 import { Button } from "../components/ui/Button";
 import { downloadCsv } from "../lib/csv";
 import { getEffectiveShopId } from "../lib/utils";
-import { useRangedSales } from "../features/reports/useRangedSales";
+import { businessToday, isWithinBusinessDays, monthStartKey } from "../lib/businessDay";
+import { MAX_ORG_RANGE_DAYS, MAX_SHOP_RANGE_DAYS, profitOf, type FinReportSummary, type FinResult } from "../features/reports/finReports";
+import { useFinReportsByShop } from "../features/reports/useFinReport";
+import { BasisBadge, FinStatusNotice, FinWarnings } from "../features/reports/FinReportStatus";
 
-// Default report window: start of the current month → today (YYYY-MM-DD).
+const rangeDays = (start: string, end: string): number =>
+  Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86_400_000) + 1;
+
+interface ServerProfitRow {
+  shopId: string;
+  shopName: string;
+  result: FinResult<FinReportSummary>;
+}
+
+// Default report window: start of the current business month → today
+// (YYYY-MM-DD business days, Asia/Yangon — ORV-069).
 const currentMonthRange = () => {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const start = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`;
-  const end = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-  return { start, end };
+  const today = businessToday();
+  return { start: monthStartKey(today), end: today };
 };
 
 export const ProfitReportsPage = () => {
@@ -42,56 +52,33 @@ export const ProfitReportsPage = () => {
   const isAdmin = currentUser?.role === "ADMIN";
   const effectiveShopId = shopFilter === "all" ? null : shopFilter;
 
-  // Profit aggregates over the FULL range from the server (not the 1000-row
-  // store cache), so long ranges aren't under-counted.
-  const { sales, saleItems, loading: salesLoading, error: salesError } =
-    useRangedSales(range.start, range.end, effectiveShopId);
-
-  // Calculate profit by shop
-  const profitByShop = useMemo(() => {
-    const result: { shopId: string; shopName: string; revenue: number; cost: number; profit: number; margin: number }[] = [];
-
-    shops.forEach((shop) => {
-      if (effectiveShopId && shop.id !== effectiveShopId) return;
-
-      const shopSales = sales.filter((s) => {
-        if (s.shopId !== shop.id) return false;
-        if (s.status === "VOID") return false;
-        const saleDate = s.createdAt.slice(0, 10);
-        if (range.start && saleDate < range.start) return false;
-        if (range.end && saleDate > range.end) return false;
-        return true;
-      });
-
-      const revenue = shopSales.reduce((sum, s) => sum + s.totalMmk, 0);
-      let cost = 0;
-
-      shopSales.forEach((sale) => {
-        const items = saleItems.filter((i) => i.saleId === sale.id);
-        items.forEach((item) => {
-          // Prefer the cost captured at sale time (migration 041); fall back to
-          // the product's current cost for sales made before the snapshot.
-          const unitCost =
-            item.unitCostMmkSnapshot ?? products.find((p) => p.id === item.productId)?.costMmk ?? 0;
-          cost += unitCost * item.qtyUnits;
-        });
-      });
-
-      const profit = revenue - cost;
-      const margin = revenue > 0 ? (profit / revenue) * 100 : 0;
-
-      result.push({
-        shopId: shop.id,
-        shopName: shop.name,
-        revenue,
-        cost,
-        profit,
-        margin,
-      });
-    });
-
-    return result;
-  }, [shops, sales, saleItems, products, range, effectiveShopId]);
+  // Profit by shop: one server report per shop (fin_report_summary, sale-date
+  // basis = sales performance). Revenue net of every approved refund, COGS from
+  // the sales' own cost snapshots; profit is null (shown as unavailable) when
+  // cost is hidden from the caller or incomplete — never estimated client-side.
+  const days = rangeDays(range.start, range.end);
+  // P-7: an all-shops view (and its organisation-wide totals) is limited to 93
+  // days even though it is assembled from per-shop reports; one shop: 367.
+  const rangeLimit = isAdmin && !effectiveShopId ? MAX_ORG_RANGE_DAYS : MAX_SHOP_RANGE_DAYS;
+  const rangeError = !range.start || !range.end || !(days >= 1) ? "Choose a start and an end day."
+    : days > rangeLimit ? `A profit report covers at most ${rangeLimit} days${rangeLimit === MAX_ORG_RANGE_DAYS ? " for all shops; choose one shop for longer ranges" : ""}.` : null;
+  const ownShopId = currentUser?.shopId ?? null;
+  const reportShopIds = useMemo(
+    () => (rangeError ? null : isAdmin
+      ? shops.filter((shop) => !effectiveShopId || shop.id === effectiveShopId).map((shop) => shop.id)
+      : ownShopId ? [ownShopId] : []),
+    [rangeError, isAdmin, shops, effectiveShopId, ownShopId],
+  );
+  const byShop = useFinReportsByShop(reportShopIds, range.start, range.end, "SALE_DATE");
+  const profitByShop: ServerProfitRow[] = useMemo(() => {
+    if (byShop.state.status !== "ok") return [];
+    const results = byShop.state.data;
+    return (reportShopIds ?? []).map((id) => ({
+      shopId: id,
+      shopName: shops.find((shop) => shop.id === id)?.name ?? id,
+      result: results[id],
+    }));
+  }, [byShop.state, reportShopIds, shops]);
 
   // Calculate stock valuation
   const stockValuation = useMemo(() => {
@@ -123,11 +110,7 @@ export const ProfitReportsPage = () => {
   const transferSummary = useMemo(() => {
     const completedTransfers = transfers.filter((t) => {
       if (t.status !== "COMPLETED") return false;
-      if (t.completedAt) {
-        const date = t.completedAt.slice(0, 10);
-        if (range.start && date < range.start) return false;
-        if (range.end && date > range.end) return false;
-      }
+      if (t.completedAt && !isWithinBusinessDays(t.completedAt, range.start, range.end)) return false;
       return true;
     });
 
@@ -166,11 +149,7 @@ export const ProfitReportsPage = () => {
     const receivedPOs = purchaseOrders.filter((po) => {
       if (po.status !== "RECEIVED") return false;
       if (effectiveShopId && po.shopId !== effectiveShopId) return false;
-      if (po.receivedAt) {
-        const date = po.receivedAt.slice(0, 10);
-        if (range.start && date < range.start) return false;
-        if (range.end && date > range.end) return false;
-      }
+      if (po.receivedAt && !isWithinBusinessDays(po.receivedAt, range.start, range.end)) return false;
       return true;
     });
 
@@ -187,28 +166,40 @@ export const ProfitReportsPage = () => {
     };
   }, [purchaseOrders, purchaseOrderItems, range, effectiveShopId]);
 
-  // Total calculations
+  // Totals over the shops whose server report answered. A total is only a number
+  // when EVERY shop answered and (for cost/profit) every shop's cost is complete.
   const totals = useMemo(() => {
-    const totalRevenue = profitByShop.reduce((sum, s) => sum + s.revenue, 0);
-    const totalCost = profitByShop.reduce((sum, s) => sum + s.cost, 0);
-    const totalProfit = profitByShop.reduce((sum, s) => sum + s.profit, 0);
-    const avgMargin = totalRevenue > 0 ? (totalProfit / totalRevenue) * 100 : 0;
+    const ok = profitByShop.flatMap((row) => (row.result?.status === "ok" ? [row.result.data] : []));
+    const allAnswered = profitByShop.length > 0 && ok.length === profitByShop.length;
+    const totalRevenue = allAnswered ? ok.reduce((sum, r) => sum + r.totals.netRevenueMmk, 0) : null;
+    const costKnown = allAnswered && ok.every((r) => r.totals.cogsMmk !== null && r.totals.cogsComplete === true);
+    const totalCost = costKnown ? ok.reduce((sum, r) => sum + (r.totals.cogsMmk ?? 0), 0) : null;
+    const totalProfit = costKnown && totalRevenue !== null && totalCost !== null ? totalRevenue - totalCost : null;
+    const avgMargin = totalProfit !== null && totalRevenue ? (totalProfit / totalRevenue) * 100 : null;
+    const unanswered = profitByShop.length - ok.length;
 
     const totalRetailValue = stockValuation.reduce((sum, s) => sum + s.retailValue, 0);
     const totalCostValue = stockValuation.reduce((sum, s) => sum + s.costValue, 0);
 
-    return { totalRevenue, totalCost, totalProfit, avgMargin, totalRetailValue, totalCostValue };
+    return { totalRevenue, totalCost, totalProfit, avgMargin, unanswered, totalRetailValue, totalCostValue };
   }, [profitByShop, stockValuation]);
 
   const exportProfitReport = () => {
-    downloadCsv("profit_report.csv", profitByShop.map((s) => ({
-      shop: s.shopName,
-      revenue: s.revenue,
-      cost: s.cost,
-      profit: s.profit,
-      margin: `${s.margin.toFixed(1)}%`,
-    })));
+    downloadCsv("profit_report.csv", profitByShop.map((s) => {
+      const r = s.result?.status === "ok" ? s.result.data : null;
+      const p = r ? profitOf(r.totals) : null;
+      return {
+        shop: s.shopName,
+        basis: "sale date (Asia/Yangon)",
+        revenue: r ? r.totals.netRevenueMmk : "unavailable",
+        cost: r && r.totals.cogsMmk !== null ? r.totals.cogsMmk : "unavailable",
+        cost_complete: r ? String(r.totals.cogsComplete) : "unavailable",
+        profit: p && p.profit !== null ? p.profit : "unavailable",
+        margin: p && p.marginPct !== null ? `${p.marginPct.toFixed(1)}%` : "unavailable",
+      };
+    }));
   };
+  const money = (v: number | null) => (v === null ? "—" : `MMK ${v.toLocaleString()}`);
 
   const exportStockValuation = () => {
     downloadCsv("stock_valuation.csv", stockValuation.map((s) => ({
@@ -254,33 +245,45 @@ export const ProfitReportsPage = () => {
       {/* Profit by Shop */}
       {activeTab === "profit" && (
         <div className="mt-5 space-y-4">
-          {salesError ? (
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{salesError}</div>
-          ) : salesLoading ? (
-            <div className="rounded-2xl border border-dashed border-slate-300/70 bg-slate-50/60 px-3 py-2 text-sm text-slate-500">Loading…</div>
-          ) : null}
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+            <BasisBadge basis="SALE_DATE" />
+            <span>Server-verified: every approved refund deducted; cost from each sale's own cost snapshot.</span>
+          </div>
+          {rangeError && <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{rangeError}</div>}
+          <FinStatusNotice state={byShop.state} onRetry={byShop.refresh} />
+          {byShop.state.status === "ok" && totals.unanswered > 0 && (
+            <div role="alert" className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              {totals.unanswered} shop report(s) could not be loaded, so totals are not shown.
+              <button type="button" onClick={byShop.refresh} className="ml-2 font-semibold underline">Try again</button>
+            </div>
+          )}
           {/* Summary Cards */}
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <div className="bg-slate-50 rounded-lg p-4">
-              <div className="text-sm text-slate-500">Total Revenue</div>
-              <div className="text-xl font-bold text-slate-900">MMK {totals.totalRevenue.toLocaleString()}</div>
+              <div className="text-sm text-slate-500">Net Revenue</div>
+              <div className="text-xl font-bold text-slate-900" data-total="revenue">{money(totals.totalRevenue)}</div>
             </div>
             <div className="bg-slate-50 rounded-lg p-4">
               <div className="text-sm text-slate-500">Total Cost</div>
-              <div className="text-xl font-bold text-slate-900">MMK {totals.totalCost.toLocaleString()}</div>
+              <div className="text-xl font-bold text-slate-900" data-total="cost">{money(totals.totalCost)}</div>
             </div>
             <div className="bg-green-50 rounded-lg p-4">
               <div className="text-sm text-green-600">Total Profit</div>
-              <div className="text-xl font-bold text-green-700">MMK {totals.totalProfit.toLocaleString()}</div>
+              <div className="text-xl font-bold text-green-700" data-total="profit">{money(totals.totalProfit)}</div>
             </div>
             <div className="bg-blue-50 rounded-lg p-4">
               <div className="text-sm text-blue-600">Avg Margin</div>
-              <div className="text-xl font-bold text-blue-700">{totals.avgMargin.toFixed(1)}%</div>
+              <div className="text-xl font-bold text-blue-700" data-total="margin">{totals.avgMargin === null ? "—" : `${totals.avgMargin.toFixed(1)}%`}</div>
             </div>
           </div>
+          {byShop.state.status === "ok" && totals.totalRevenue !== null && totals.totalCost === null && (
+            <p className="text-xs text-slate-500">
+              This view shows cost and profit only when every shop's cost is complete and your account holds report:shop_profit.
+            </p>
+          )}
 
           <div className="flex justify-end">
-            <Button variant="secondary" onClick={exportProfitReport}>Export CSV</Button>
+            <Button variant="secondary" onClick={exportProfitReport} disabled={byShop.state.status !== "ok"}>Export CSV</Button>
           </div>
 
           <div className="overflow-x-auto rounded-2xl border border-slate-200/70 bg-white">
@@ -288,24 +291,35 @@ export const ProfitReportsPage = () => {
               <thead>
                 <tr className="border-b text-left text-slate-500">
                   <th className="pb-3 font-medium">Shop</th>
-                  <th className="pb-3 font-medium text-right">Revenue</th>
+                  <th className="pb-3 font-medium text-right">Net revenue</th>
                   <th className="pb-3 font-medium text-right">Cost</th>
                   <th className="pb-3 font-medium text-right">Profit</th>
                   <th className="pb-3 font-medium text-right">Margin</th>
                 </tr>
               </thead>
               <tbody>
-                {profitByShop.map((row) => (
-                  <tr key={row.shopId} className="border-b last:border-0">
-                    <td className="py-3 font-medium">{row.shopName}</td>
-                    <td className="py-3 text-right">MMK {row.revenue.toLocaleString()}</td>
-                    <td className="py-3 text-right">MMK {row.cost.toLocaleString()}</td>
-                    <td className={`py-3 text-right font-medium ${row.profit >= 0 ? "text-green-600" : "text-red-600"}`}>
-                      MMK {row.profit.toLocaleString()}
-                    </td>
-                    <td className="py-3 text-right">{row.margin.toFixed(1)}%</td>
-                  </tr>
-                ))}
+                {profitByShop.map((row) => {
+                  const r = row.result?.status === "ok" ? row.result.data : null;
+                  const p = r ? profitOf(r.totals) : null;
+                  return (
+                    <tr key={row.shopId} className="border-b last:border-0 align-top" data-shop={row.shopId}>
+                      <td className="py-3 font-medium">
+                        {row.shopName}
+                        {!r && row.result && <div className="mt-1"><FinStatusNotice state={row.result} compact /></div>}
+                        {r && <div className="mt-1"><FinWarnings report={r} /></div>}
+                      </td>
+                      <td className="py-3 text-right">{r ? money(r.totals.netRevenueMmk) : "—"}</td>
+                      <td className="py-3 text-right">
+                        {r ? money(r.totals.cogsMmk) : "—"}
+                        {r && r.totals.cogsComplete === false && <div className="text-[11px] text-amber-700">incomplete</div>}
+                      </td>
+                      <td className={`py-3 text-right font-medium ${p?.profit !== null && p?.profit !== undefined && p.profit < 0 ? "text-red-600" : "text-green-600"}`}>
+                        {p ? money(p.profit) : "—"}
+                      </td>
+                      <td className="py-3 text-right">{p && p.marginPct !== null ? `${p.marginPct.toFixed(1)}%` : "—"}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

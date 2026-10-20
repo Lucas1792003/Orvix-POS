@@ -1,0 +1,107 @@
+{
+    "data": {
+        "basis": {
+            "to": "2026-10-20",
+            "asOf": "2026-10-20T13:36:26.07355+00:00",
+            "from": "2026-10-19",
+            "fromUtc": "2026-10-18T17:30:00+00:00",
+            "timezone": "Asia/Yangon",
+            "refundBasis": "SALE_DATE",
+            "toUtcExclusive": "2026-10-20T17:30:00+00:00",
+            "pendingRequestsBasis": "SALES_RUNG_UP_IN_RANGE",
+            "refundMethodAssumption": "ORIGINAL_SALE_METHOD"
+        },
+        "byDay": [
+            {
+                "date": "2026-10-19",
+                "cogsMmk": 1200,
+                "voidMmk": 0,
+                "refundMmk": 2800,
+                "saleCount": 2,
+                "voidCount": 0,
+                "refundCount": 2,
+                "cogsComplete": true,
+                "grossSalesMmk": 4700,
+                "netRevenueMmk": 1900,
+                "grossProfitMmk": 700
+            },
+            {
+                "date": "2026-10-20",
+                "cogsMmk": 1200,
+                "voidMmk": 0,
+                "refundMmk": 1500,
+                "saleCount": 3,
+                "voidCount": 0,
+                "refundCount": 2,
+                "cogsComplete": false,
+                "grossSalesMmk": 11000,
+                "netRevenueMmk": 9500,
+                "grossProfitMmk": null
+            }
+        ],
+        "scope": {
+            "level": "SHOP",
+            "shopIds": [
+                "shop-f"
+            ],
+            "profitVisible": true
+        },
+        "totals": {
+            "cogsMmk": 2400,
+            "voidMmk": 0,
+            "refundMmk": 4300,
+            "saleCount": 5,
+            "voidCount": 0,
+            "refundCount": 4,
+            "cogsComplete": false,
+            "grossSalesMmk": 15700,
+            "netRevenueMmk": 11400,
+            "grossProfitMmk": null,
+            "linesMissingCost": 1,
+            "adjustmentsMissingCost": 0
+        },
+        "evidence": {
+            "refundsAboveNetPaid": 0,
+            "salesRefundedAboveTotal": 0,
+            "unparseableApprovedRefunds": 0
+        },
+        "excludedVoids": {
+            "count": 1,
+            "amountMmk": 2000
+        },
+        "byPaymentMethod": [
+            {
+                "method": "CASH",
+                "netMmk": 8900,
+                "voidMmk": 0,
+                "refundMmk": 3800,
+                "grossSalesMmk": 12700
+            },
+            {
+                "method": "OTHER",
+                "netMmk": 2500,
+                "voidMmk": 0,
+                "refundMmk": 500,
+                "grossSalesMmk": 3000
+            }
+        ],
+        "pendingRequests": {
+            "count": 0,
+            "amountMmk": 0,
+            "unparseable": 0
+        },
+        "supplierPayments": {
+            "count": 0,
+            "paidMmk": 0,
+            "dateField": "paid_at",
+            "voidedMmk": 0,
+            "cashPaidMmk": 0
+        },
+        "undatedAdjustments": {
+            "count": 0,
+            "amountMmk": 0,
+            "voidCount": 0,
+            "refundCount": 0
+        }
+    }
+}

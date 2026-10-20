@@ -17,6 +17,9 @@ import { ShiftSummary } from "../../../components/shifts/ShiftSummary";
 import { StartShiftCard } from "../../../components/shifts/StartShiftCard";
 import { EndShiftCard } from "../../../components/shifts/EndShiftCard";
 import { buildShiftBreakdown } from "../service";
+import { useShiftReconciliation } from "../../reports/useFinReport";
+import { checkExpectedBeforeClose, extraReasonError } from "../closeExpected";
+import { closeWouldExpect } from "../../reports/finReports";
 import {
   buildShiftCsvRows,
   filterShiftRecords,
@@ -116,13 +119,26 @@ export const ShiftsPage = () => {
     [ownOpenShift, activeShiftSales, refundVoidRequests]
   );
 
-  const activeCloseValidation = activeBreakdown
+  // Expected cash for the close form: the server reconciliation of the open
+  // shift (every approved refund, whoever entered it) when it answers;
+  // otherwise this device's estimate from loaded sales, labelled as such.
+  const ownRecon = useShiftReconciliation(ownOpenShift?.id ?? null);
+  const ownServerExpected = ownRecon.state.status === "ok" ? closeWouldExpect(ownRecon.state.data) : null;
+  const ownCloseExpected = ownServerExpected ?? activeBreakdown?.expectedCash ?? 0;
+
+  const baseActiveValidation = activeBreakdown
     ? validateCloseShift({
         closingCash,
-        expectedCash: activeBreakdown.expectedCash,
+        expectedCash: ownCloseExpected,
         varianceReason,
       })
     : { variance: null, canClose: false, error: null };
+  const activeDeviceReasonError = baseActiveValidation.canClose
+    ? extraReasonError({ closingCash, shownExpectedMmk: ownCloseExpected, deviceExpectedMmk: activeBreakdown?.expectedCash, varianceReason })
+    : null;
+  const activeCloseValidation = activeDeviceReasonError
+    ? { ...baseActiveValidation, canClose: false, error: activeDeviceReasonError }
+    : baseActiveValidation;
 
   const handleStartShift = async () => {
     if (!currentUser) return;
@@ -169,6 +185,10 @@ export const ShiftsPage = () => {
 
   const handleEndOwnShift = async () => {
     if (!ownOpenShift || !activeBreakdown) return;
+    if (ownRecon.state.status === "loading") {
+      toast({ title: "Checking expected cash", description: "The server reconciliation is still loading. Try again in a moment.", variant: "error" });
+      return;
+    }
     setCloseAttempted(true);
     if (!activeCloseValidation.canClose) {
       toast({
@@ -179,11 +199,22 @@ export const ShiftsPage = () => {
       return;
     }
 
+    const check = await checkExpectedBeforeClose(ownOpenShift.id, ownCloseExpected);
+    if (!check.proceed) {
+      ownRecon.refresh();
+      toast({
+        title: "Expected cash changed",
+        description: `The server now expects ${formatMmk(check.latestMmk)} (a refund or void was approved meanwhile). Check the count and close again.`,
+        variant: "error",
+      });
+      return;
+    }
     try {
       await endShift({
         shiftId: ownOpenShift.id,
         closingCashMmk: closingCash ?? 0,
-        varianceReason: (activeCloseValidation.variance ?? 0) !== 0 ? varianceReason.trim() : undefined,
+        // a typed reason is always sent: the server's own variance may differ from the form's
+        varianceReason: varianceReason.trim() !== "" ? varianceReason.trim() : undefined,
       });
       toast({ title: "Shift closed", variant: "success" });
       setClosingCash(undefined);
@@ -393,10 +424,17 @@ export const ShiftsPage = () => {
 
             <ShiftSummary shift={ownOpenShift} breakdown={activeBreakdown} />
 
+            <div className="text-xs text-slate-500" data-close-expected-source={ownServerExpected !== null ? "server" : "device"}>
+              {ownServerExpected !== null
+                ? "Expected cash from the server reconciliation (every approved refund). The backend recomputes it on close."
+                : ownRecon.state.status === "loading"
+                  ? "Loading the server reconciliation…"
+                  : "Server reconciliation unavailable: expected cash is this device's estimate from loaded sales. The backend recomputes it on close."}
+            </div>
             <EndShiftCard
               idPrefix="own-shift"
               closingCash={closingCash}
-              expectedCash={activeBreakdown.expectedCash}
+              expectedCash={ownCloseExpected}
               varianceReason={varianceReason}
               onVarianceReasonChange={setVarianceReason}
               onClosingCashChange={(next) => {
@@ -701,7 +739,9 @@ export const ShiftsPage = () => {
                         </TD>
                         <TD className="tabular-nums">{formatDuration(getShiftDurationMs(shift, now))}</TD>
                         <TD className="text-right tabular-nums">{breakdown.salesCount}</TD>
-                        <TD className="text-right tabular-nums">{formatMmk(breakdown.expectedCash)}</TD>
+                        <TD className="text-right tabular-nums" title={isClosed ? "Stored at close" : "Device estimate from loaded sales; open the shift for the server reconciliation"}>
+                          {isClosed ? formatMmk(shift.expectedCashMmk ?? breakdown.expectedCash) : `≈ ${formatMmk(breakdown.expectedCash)}`}
+                        </TD>
                         <TD className="text-right tabular-nums">
                           {isClosed ? formatMmk(shift.closingCashMmk ?? 0) : "Active"}
                         </TD>

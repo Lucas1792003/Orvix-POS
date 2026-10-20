@@ -51,7 +51,7 @@ export const ShiftSummary = ({ shift, breakdown }: ShiftSummaryProps) => {
         <div className="mt-2 grid grid-cols-[1fr_max-content] gap-x-6 gap-y-1 text-sm">
           <div>Opening cash</div>
           <div className="text-right tabular-nums">{formatMmk(shift.openingCashMmk)}</div>
-          <div>{isOpen ? "Expected cash (live)" : "Expected cash"}</div>
+          <div>{isOpen ? "Expected cash (device estimate)" : "Expected cash"}</div>
           <div className="text-right tabular-nums">{formatMmk(expectedCash)}</div>
           <div>Closing cash</div>
           <div className="text-right tabular-nums">

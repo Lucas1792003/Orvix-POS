@@ -16,6 +16,8 @@ import { useToast } from "../components/ui/Toast";
 import { downloadCsv } from "../lib/csv";
 import { hasPermission } from "../lib/permissions";
 import { reportError } from "../lib/errors";
+import { outcomeToast } from "../lib/outcomeToast";
+import { classifySubmitFailure } from "../lib/submitOutcome";
 import { CategoryFilter } from "../features/categories/CategoryFilter";
 import { formatDateTime, getEffectiveShopId } from "../lib/utils";
 import { useTranslation } from "../hooks/useTranslation";
@@ -223,25 +225,42 @@ export const InventoryPage = () => {
         product={adjustProductId ? products.find((p) => p.id === adjustProductId) ?? null : null}
         productUnits={productUnits}
         onSave={async ({ type, qtyChange, reason, productUnitId, unitQty }) => {
-          if (!adjustProductId || !currentUserId) return;
+          if (!adjustProductId || !currentUserId) return false;
           try {
             await adjustStock({
               shopId,
               productId: adjustProductId,
               type,
               qtyChange,
-              reason: reason || "Manual adjustment",
+              // Required and already trimmed by the modal; no silent
+              // default that would satisfy the server's check (ORV-058).
+              reason,
               actorId: currentUserId,
               productUnitId,
               unitQty,
             });
             setAdjustProductId(null);
+            return true;
           } catch (error) {
-            toast({
-              variant: "error",
-              title: t("inventory", "adjustFailed"),
-              description: reportError("InventoryPage.adjustStock", error, t("inventory", "adjustFailed")),
-            });
+            const failTitle = t("inventory", "adjustFailed");
+            const item = outcomeToast(error, t, failTitle, failTitle);
+            switch (classifySubmitFailure(error)) {
+              case "pending":
+                // Outcome unknown: kept with its key and confirmed by the
+                // till. Close and clear the form — entering it again would
+                // be a second adjustment (lib/submitOutcome.ts).
+                toast(item);
+                setAdjustProductId(null);
+                return true;
+              case "not-sent":
+                // An earlier attempt is unresolved; nothing was sent. Keep the form.
+                toast(item);
+                return false;
+              default:
+                // Confirmed failure (incl. 087 recovery refusal: nothing recorded).
+                toast({ ...item, description: reportError("InventoryPage.adjustStock", error, failTitle) });
+                return false;
+            }
           }
         }}
       />

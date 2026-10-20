@@ -132,6 +132,20 @@ const en = {
   noShopAssigned: "No shop assigned",
   noShopAssignedMessage:
     "Your account is not assigned to a shop, so there is no dashboard data to show. Contact your administrator.",
+  serverLoading: "Loading…",
+  serverUnavailable: "Server figures unavailable",
+  serverVerified: "Server-verified, net of refunds",
+  costIncomplete: "Cost incomplete — profit not shown",
+  profitNotAvailable: "Profit not available",
+  fromLoadedSales: "From recently loaded sales (not a full total)",
+  tryAgain: "Try again",
+  unassignedPayouts: "Unassigned refunds — reconcile",
+  serverExpectedCash: "Server expected cash",
+  ownSalesNetToday: "Own sales today (net)",
+  shopSalesNetToday: "Shop sales today (net)",
+  ownSalesScope: "own sales only",
+  notPermitted: "Not permitted",
+  bySaleDate: "by sale date",
 } as const;
 
 const my: Record<keyof typeof en, string> = {
@@ -264,6 +278,20 @@ const my: Record<keyof typeof en, string> = {
   noShopAssigned: "ဆိုင်တာဝန်ပေးထားခြင်း မရှိပါ",
   noShopAssignedMessage:
     "သင့်အကောင့်ကို ဆိုင်တစ်ဆိုင်နှင့် မချိတ်ထားသောကြောင့် ဒက်ရှ်ဘုတ်ဒေတာ မပြနိုင်ပါ။ စီမံခန့်ခွဲသူကို ဆက်သွယ်ပါ။",
+  serverLoading: "ဖွင့်နေသည်…",
+  serverUnavailable: "ဆာဗာ ကိန်းဂဏန်းများ မရရှိနိုင်ပါ",
+  serverVerified: "ဆာဗာမှ အတည်ပြုထားသည် (ပြန်အမ်းငွေ နုတ်ပြီး)",
+  costIncomplete: "ကုန်ကျစရိတ် မပြည့်စုံ — အမြတ် မပြပါ",
+  profitNotAvailable: "အမြတ် မရရှိနိုင်ပါ",
+  fromLoadedSales: "မကြာသေးမီ ဖွင့်ထားသော အရောင်းများမှ (စုစုပေါင်း အပြည့်အစုံ မဟုတ်ပါ)",
+  tryAgain: "ထပ်ကြိုးစားပါ",
+  unassignedPayouts: "ဆိုင်းငံ့ ပြန်အမ်းငွေ — စာရင်းညှိရန်",
+  serverExpectedCash: "ဆာဗာ မျှော်မှန်း ငွေသား",
+  ownSalesNetToday: "ယနေ့ ကိုယ်ပိုင်အရောင်း (အသားတင်)",
+  shopSalesNetToday: "ယနေ့ ဆိုင်အရောင်း (အသားတင်)",
+  ownSalesScope: "ကိုယ်ပိုင်အရောင်းများသာ",
+  notPermitted: "ခွင့်မပြုပါ",
+  bySaleDate: "ရောင်းသည့်နေ့အလိုက်",
 };
 
 export type DashboardCopyKey = keyof typeof en;

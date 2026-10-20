@@ -1,0 +1,6 @@
+{
+    "error": {
+        "code": "P0001",
+        "message": "An all-shops report covers at most 93 days; report per shop for longer ranges"
+    }
+}

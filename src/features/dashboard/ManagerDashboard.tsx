@@ -13,13 +13,8 @@ import { useDataStore } from "../../stores/dataStore";
 import type { Shop, User } from "../../types";
 import {
   calculateActionNeeded,
-  calculateAvgOrderValue,
-  calculateCashVsOther,
-  calculateExpectedCashForActiveShifts,
   calculateLowStock,
-  calculateNetRevenue,
   calculateSalesByCategoryPercent,
-  calculateSalesCount,
   calculateSupplierDebt,
   calculateTopProducts,
   decorateLowStockWithShopName,
@@ -39,6 +34,9 @@ import {
   MiniMoney,
   SectionCard,
 } from "./DashboardCommon";
+import { canRetry, pendingText, useDashboardFinancials } from "./useServerDashboard";
+import { useShiftReconciliations } from "../reports/useFinReport";
+import { closeWouldExpect } from "../reports/finReports";
 import { rangeLabel, useDashboardCopy } from "./dashboardCopy";
 import { LowStockCard } from "./LowStockCard";
 import { TransfersStatusCard } from "./TransfersStatusCard";
@@ -81,14 +79,26 @@ export const ManagerDashboard = ({ currentUser, shopId, shops }: ManagerDashboar
     [scopedSales, range]
   );
 
-  const revenue = useMemo(() => calculateNetRevenue(rangedSales, refunds), [rangedSales, refunds]);
-  const orders = calculateSalesCount(rangedSales);
-  const avgOrder = calculateAvgOrderValue(revenue, orders);
+  // Money headline from the server report; no cached fallback.
+  const fin = useDashboardFinancials(shopId, range);
+  const kpis = fin.kpis;
+  const finPending = pendingText(fin.state, { loading: copy("serverLoading"), unavailable: copy("serverUnavailable"), forbidden: copy("notPermitted") });
+  // what the server actually reported: the shop, or (report:own_shift only) the caller's own sales
+  const scopeText = fin.report?.scope.level === "OWN" ? copy("ownSalesScope") : shopName;
   const activeShifts = useMemo(() => filterActiveShifts(shifts, shopId), [shifts, shopId]);
-  const expectedCash = useMemo(
-    () => calculateExpectedCashForActiveShifts(shifts, sales, refunds, shopId),
-    [shifts, sales, refunds, shopId]
+  // Expected cash of the open shifts: the server reconciliation of each one
+  // (every approved refund of their cash sales, whoever entered it).
+  const activeShiftIds = useMemo(
+    () => (canViewShiftCash ? activeShifts.map((shift) => shift.id) : null),
+    [canViewShiftCash, activeShifts]
   );
+  const recon = useShiftReconciliations(activeShiftIds);
+  const expectedCash = useMemo(() => {
+    if (recon.state.status !== "ok") return null;
+    const results = Object.values(recon.state.data);
+    if (results.some((r) => r.status !== "ok")) return null;
+    return results.reduce((sum, r) => sum + (r.status === "ok" ? closeWouldExpect(r.data) ?? r.data.evidenceExpectedCashMmk : 0), 0);
+  }, [recon.state]);
   const actionNeeded = useMemo(
     () => calculateActionNeeded(shopId, inventory, products, refunds, purchaseOrders, stockTransfers, shops),
     [shopId, inventory, products, refunds, purchaseOrders, stockTransfers, shops]
@@ -109,8 +119,8 @@ export const ManagerDashboard = ({ currentUser, shopId, shops }: ManagerDashboar
   );
 
   const topProducts = useMemo(
-    () => calculateTopProducts(rangedSales, saleItems, products, 5),
-    [rangedSales, saleItems, products]
+    () => calculateTopProducts(rangedSales, saleItems, products, 5, refunds),
+    [rangedSales, saleItems, products, refunds]
   );
 
   // Full low-stock list for this shop, sorted most-urgent-first. The card
@@ -138,10 +148,16 @@ export const ManagerDashboard = ({ currentUser, shopId, shops }: ManagerDashboar
     [purchaseOrders, shopId]
   );
   const categoryData = useMemo(
-    () => calculateSalesByCategoryPercent(sales, saleItems, products, shopId, range),
-    [sales, saleItems, products, shopId, range]
+    () => calculateSalesByCategoryPercent(sales, saleItems, products, shopId, range, undefined, refunds),
+    [sales, saleItems, products, shopId, range, refunds]
   );
-  const paymentSplit = useMemo(() => calculateCashVsOther(rangedSales), [rangedSales]);
+  // Net of every approved refund, from the server report (by payment method).
+  const paymentSplit = useMemo(() => {
+    const methods = fin.report?.byPaymentMethod ?? [];
+    const cashRevenue = methods.filter((m) => m.method === "CASH").reduce((sum, m) => sum + m.netMmk, 0);
+    const otherRevenue = methods.filter((m) => m.method !== "CASH").reduce((sum, m) => sum + m.netMmk, 0);
+    return { cashRevenue, otherRevenue };
+  }, [fin.report]);
   const paymentTotal = paymentSplit.cashRevenue + paymentSplit.otherRevenue;
   const selectedRangeLabel = rangeLabel(copy, range);
 
@@ -167,21 +183,23 @@ export const ManagerDashboard = ({ currentUser, shopId, shops }: ManagerDashboar
       <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         <KpiCard
           label={`${selectedRangeLabel} ${copy("revenue")}`}
-          value={formatMmk(revenue)}
-          detail={shopName}
+          value={kpis ? formatMmk(kpis.revenue) : finPending}
+          detail={kpis ? `${scopeText} · ${copy("serverVerified")} · ${copy("bySaleDate")}` : canRetry(fin.state) ? (
+            <button type="button" className="underline" onClick={fin.refresh}>{copy("tryAgain")}</button>
+          ) : null}
           icon="payments"
           tone="emerald"
         />
         <KpiCard
           label={`${selectedRangeLabel} ${copy("orders")}`}
-          value={orders}
+          value={kpis ? kpis.orders : finPending}
           detail={copy("validSales")}
           icon="receipt_long"
           tone="blue"
         />
         <KpiCard
           label={copy("aov")}
-          value={formatMmk(avgOrder)}
+          value={kpis ? formatMmk(kpis.aov) : finPending}
           detail={`${selectedRangeLabel} ${copy("average")}`}
           icon="analytics"
           tone="slate"
@@ -189,7 +207,10 @@ export const ManagerDashboard = ({ currentUser, shopId, shops }: ManagerDashboar
         <KpiCard
           label={copy("activeShiftCash")}
           value={canViewShiftCash ? activeShifts.length : copy("locked")}
-          detail={canViewShiftCash ? `${copy("expected")} ${formatMmk(expectedCash)}` : copy("shiftPermissionRequired")}
+          detail={!canViewShiftCash ? copy("shiftPermissionRequired")
+            : activeShifts.length === 0 ? `${copy("expected")} ${formatMmk(0)}`
+            : expectedCash !== null ? `${copy("serverExpectedCash")} ${formatMmk(expectedCash)}`
+            : pendingText(recon.state, { loading: copy("serverLoading"), unavailable: copy("serverUnavailable") }) ?? copy("serverUnavailable")}
           icon="point_of_sale"
           tone="amber"
         />
@@ -231,7 +252,7 @@ export const ManagerDashboard = ({ currentUser, shopId, shops }: ManagerDashboar
         </SectionCard>
 
         <div className="space-y-4">
-          <SectionCard title={copy("topSellingProducts")} icon="leaderboard">
+          <SectionCard title={copy("topSellingProducts")} action={<span className="text-[11px] text-slate-400" data-cached-note>{copy("fromLoadedSales")}</span>} icon="leaderboard">
             {topProducts.length > 0 ? (
               <div className="space-y-3">
                 {topProducts.map((row, index) => (
@@ -336,7 +357,7 @@ export const ManagerDashboard = ({ currentUser, shopId, shops }: ManagerDashboar
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <SectionCard title={copy("salesByCategory")} icon="donut_small">
+        <SectionCard title={copy("salesByCategory")} action={<span className="text-[11px] text-slate-400" data-cached-note>{copy("fromLoadedSales")}</span>} icon="donut_small">
           <div className="h-56">
             {categoryData.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
@@ -371,13 +392,13 @@ export const ManagerDashboard = ({ currentUser, shopId, shops }: ManagerDashboar
           </div>
         </SectionCard>
 
-        <SectionCard title={copy("cashVsOtherSales")} icon="payments">
+        <SectionCard title={copy("cashVsOtherSales")} action={<span className="text-[11px] text-slate-400">{copy("bySaleDate")}</span>} icon="payments">
           <div className="space-y-4">
             <div>
               <div className="mb-1 flex items-center justify-between text-sm">
                 <span className="font-medium text-slate-700">{copy("cash")}</span>
                 <span className="text-slate-600">
-                  {formatMmk(paymentSplit.cashRevenue)} ({paymentSplit.cashCount})
+                  {kpis ? formatMmk(paymentSplit.cashRevenue) : finPending}
                 </span>
               </div>
               <div className="h-3 overflow-hidden rounded-full bg-slate-100">
@@ -391,7 +412,7 @@ export const ManagerDashboard = ({ currentUser, shopId, shops }: ManagerDashboar
               <div className="mb-1 flex items-center justify-between text-sm">
                 <span className="font-medium text-slate-700">{copy("other")}</span>
                 <span className="text-slate-600">
-                  {formatMmk(paymentSplit.otherRevenue)} ({paymentSplit.otherCount})
+                  {kpis ? formatMmk(paymentSplit.otherRevenue) : finPending}
                 </span>
               </div>
               <div className="h-3 overflow-hidden rounded-full bg-slate-100">

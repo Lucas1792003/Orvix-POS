@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Modal } from "../ui/Modal";
 import { Select } from "../ui/Select";
 import { Input } from "../ui/Input";
 import { Button } from "../ui/Button";
+import { REASON_MAX_LENGTH, normalizeReason } from "../ui/reasonInput";
 import { toNumber } from "../../lib/utils";
 import type { Product, ProductUnit, StockMovementType } from "../../types";
 import { getActiveProductUnits, getDefaultProductUnit } from "../../features/catalog/productUnits";
@@ -19,6 +20,11 @@ interface AdjustStockModalProps {
    * compute the base delta. `qtyChange` is the **direction-only** sign
    * (±1) in that case — the legacy base-units path still sends a real
    * signed magnitude.
+   *
+   * `reason` is always a trimmed, non-empty string and the quantity a
+   * whole number > 0 (ORV-058). Resolve `true` once saved: only then is the
+   * form cleared. Resolve `false` (or throw) on failure — the form keeps
+   * what was typed so the user can retry.
    */
   onSave: (payload: {
     type: StockMovementType;
@@ -26,7 +32,7 @@ interface AdjustStockModalProps {
     reason: string;
     productUnitId?: string;
     unitQty?: number;
-  }) => void;
+  }) => Promise<boolean> | boolean;
   /** Optional — when provided, the modal renders a Unit picker per migration 028. */
   product?: Product | null;
   productUnits?: ProductUnit[];
@@ -44,6 +50,11 @@ export const AdjustStockModal = ({
   const [qty, setQty] = useState(0);
   const [unitId, setUnitId] = useState("");
   const [reason, setReason] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // Synchronous guard against a double click in one frame (state lags a render).
+  const inFlight = useRef(false);
+  const fieldId = useId();
 
   const activeUnits = useMemo(() => {
     if (!product) return [];
@@ -68,7 +79,34 @@ export const AdjustStockModal = ({
     ? convertToBaseQuantity(qty, selectedUnit)
     : qty;
 
-  const handleSave = () => {
+  // ORV-058: no silent default reason (the page used to send "Manual
+  // adjustment", which defeated the server's required-reason check), no
+  // zero/fractional quantity, and the form is cleared only after a save
+  // succeeded — not before it resolved.
+  const trimmedReason = normalizeReason(reason);
+  const qtyValid = Number.isInteger(qty) && qty > 0;
+  const reasonError = submitted && !trimmedReason;
+  const qtyError = submitted && !qtyValid;
+
+  const resetForm = () => {
+    setType("ADJUSTMENT");
+    setDirection("add");
+    setQty(0);
+    setReason("");
+    setSubmitted(false);
+  };
+
+  const handleClose = () => {
+    if (inFlight.current) return;
+    // A cancelled form must not carry into the next product's adjustment.
+    resetForm();
+    onClose();
+  };
+
+  const handleSave = async () => {
+    if (inFlight.current) return;
+    setSubmitted(true);
+    if (!qtyValid || !trimmedReason) return;
     // Direction → sign. For DAMAGE always negative; for stock-in always
     // positive; for ADJUSTMENT use the picker.
     let sign = 1;
@@ -83,38 +121,47 @@ export const AdjustStockModal = ({
     const legacy = !selectedUnit || selectedUnit.baseQuantity === 1;
     const qtyChange = legacy ? sign * qty : sign * 1;
 
-    onSave({
-      type,
-      qtyChange,
-      reason,
-      productUnitId: legacy ? undefined : selectedUnit.id,
-      unitQty: legacy ? undefined : qty,
-    });
-    setType("ADJUSTMENT");
-    setDirection("add");
-    setQty(0);
-    setReason("");
+    inFlight.current = true;
+    setSaving(true);
+    let saved = false;
+    try {
+      saved = await onSave({
+        type,
+        qtyChange,
+        reason: trimmedReason,
+        productUnitId: legacy ? undefined : selectedUnit.id,
+        unitQty: legacy ? undefined : qty,
+      });
+    } catch {
+      saved = false;
+    } finally {
+      inFlight.current = false;
+      setSaving(false);
+    }
+    if (saved) resetForm();
   };
 
   return (
     <Modal
       open={open}
-      onClose={onClose}
+      onClose={handleClose}
       title="Adjust Stock"
       description="Record an inventory movement."
       footer={
         <>
-          <Button variant="secondary" onClick={onClose}>
+          <Button variant="secondary" onClick={handleClose} disabled={saving}>
             Cancel
           </Button>
-          <Button onClick={handleSave}>Save adjustment</Button>
+          <Button onClick={() => void handleSave()} disabled={saving}>
+            {saving ? "Saving…" : "Save adjustment"}
+          </Button>
         </>
       }
     >
       <div className="space-y-3">
         <div>
           <label className="block text-sm font-medium text-slate-700 mb-1">Movement Type</label>
-          <Select value={type} onChange={(event) => setType(event.target.value as AdjustmentType)}>
+          <Select value={type} disabled={saving} onChange={(event) => setType(event.target.value as AdjustmentType)}>
             <option value="ADJUSTMENT">Manual Adjustment</option>
             <option value="DAMAGE">Damage / Expired Write-off</option>
             <option value="PURCHASE_IN">Stock In (Purchase)</option>
@@ -125,7 +172,7 @@ export const AdjustStockModal = ({
         {type === "ADJUSTMENT" && (
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">Direction</label>
-            <Select value={direction} onChange={(event) => setDirection(event.target.value as "add" | "remove")}>
+            <Select value={direction} disabled={saving} onChange={(event) => setDirection(event.target.value as "add" | "remove")}>
               <option value="add">Add to Stock</option>
               <option value="remove">Remove from Stock</option>
             </Select>
@@ -137,6 +184,7 @@ export const AdjustStockModal = ({
             <label className="block text-sm font-medium text-slate-700 mb-1">Unit</label>
             <Select
               value={unitId}
+              disabled={saving}
               onChange={(event) => setUnitId(event.target.value)}
             >
               {activeUnits.map((unit) => (
@@ -149,15 +197,24 @@ export const AdjustStockModal = ({
         )}
 
         <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1">Quantity</label>
+          <label htmlFor={`${fieldId}-qty`} className="block text-sm font-medium text-slate-700 mb-1">Quantity</label>
           <Input
+            id={`${fieldId}-qty`}
             type="text"
             inputMode="numeric"
             pattern="[0-9]*"
             placeholder="0"
             value={qty || ""}
             onChange={(event) => setQty(toNumber(event.target.value))}
+            disabled={saving}
+            aria-invalid={qtyError || undefined}
+            aria-describedby={qtyError ? `${fieldId}-qty-error` : undefined}
           />
+          {qtyError && (
+            <p id={`${fieldId}-qty-error`} role="alert" className="mt-1 text-sm font-medium text-rose-700">
+              Enter a whole quantity greater than 0.
+            </p>
+          )}
           {selectedUnit && selectedUnit.baseQuantity > 1 && qty > 0 && (
             <p className="mt-1 text-xs text-slate-500">
               {/* Pre-flight conversion preview — final base delta is computed
@@ -168,8 +225,26 @@ export const AdjustStockModal = ({
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1">Reason</label>
-          <Input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Enter reason for adjustment" />
+          <label htmlFor={`${fieldId}-reason`} className="block text-sm font-medium text-slate-700 mb-1">
+            Reason <span className="text-rose-600" aria-hidden="true">*</span>
+          </label>
+          <Input
+            id={`${fieldId}-reason`}
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="Enter reason for adjustment"
+            maxLength={REASON_MAX_LENGTH}
+            required
+            aria-required="true"
+            disabled={saving}
+            aria-invalid={reasonError || undefined}
+            aria-describedby={reasonError ? `${fieldId}-reason-error` : undefined}
+          />
+          {reasonError && (
+            <p id={`${fieldId}-reason-error`} role="alert" className="mt-1 text-sm font-medium text-rose-700">
+              A reason is required.
+            </p>
+          )}
         </div>
       </div>
     </Modal>

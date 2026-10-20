@@ -7,6 +7,9 @@ import { useDataStore } from "../../stores/dataStore";
 import type { Shop, User } from "../../types";
 import { EmptyState, KpiCard, MiniMoney, SectionCard } from "./DashboardCommon";
 import { useDashboardCopy } from "./dashboardCopy";
+import { canRetry, pendingText, useDashboardFinancials } from "./useServerDashboard";
+import { useShiftReconciliation } from "../reports/useFinReport";
+import { closeWouldExpect } from "../reports/finReports";
 
 interface CashierDashboardProps {
   currentUser: User;
@@ -44,7 +47,16 @@ export const CashierDashboard = ({ currentUser, shopId, shops }: CashierDashboar
   );
   const shiftBreakdown = openShift ? buildShiftBreakdown(openShift, ownSales, refunds) : null;
   const activeSales = ownSales.filter((sale) => sale.status !== "VOID");
-  const ownRevenue = activeSales.reduce((sum, sale) => sum + sale.totalMmk, 0);
+  // Money from the server: today's own sales net of EVERY approved refund on
+  // them (including refunds a manager entered, which this cashier's RLS
+  // cannot read), and the open shift's server reconciliation.
+  const fin = useDashboardFinancials(null, "today");
+  const recon = useShiftReconciliation(openShift?.id ?? null);
+  const finPending = pendingText(fin.state, { loading: copy("serverLoading"), unavailable: copy("serverUnavailable"), forbidden: copy("notPermitted") });
+  // a cashier granted report:shop_sales gets SHOP-level figures from the server: say so
+  const salesTileLabel = fin.report && fin.report.scope.level !== "OWN" ? copy("shopSalesNetToday") : copy("ownSalesNetToday");
+  const reconPending = pendingText(recon.state, { loading: copy("serverLoading"), unavailable: copy("serverUnavailable") });
+  const reconData = recon.state.status === "ok" ? recon.state.data : null;
   const pendingRequests = refunds.filter(
     (request) => request.createdBy === currentUser.id && request.status === "REQUESTED"
   );
@@ -83,9 +95,11 @@ export const CashierDashboard = ({ currentUser, shopId, shops }: CashierDashboar
           tone={openShift ? "emerald" : "amber"}
         />
         <KpiCard
-          label={copy("ownShiftSales")}
-          value={formatMmk(ownRevenue)}
-          detail={copy("voidSalesExcluded")}
+          label={salesTileLabel}
+          value={fin.kpis ? formatMmk(fin.kpis.revenue) : finPending}
+          detail={fin.kpis ? `${copy("serverVerified")} · ${copy("bySaleDate")}` : canRetry(fin.state) ? (
+            <button type="button" className="underline" onClick={fin.refresh}>{copy("tryAgain")}</button>
+          ) : null}
           icon="payments"
           tone="blue"
         />
@@ -98,8 +112,10 @@ export const CashierDashboard = ({ currentUser, shopId, shops }: CashierDashboar
         />
         <KpiCard
           label={copy("expectedCash")}
-          value={formatMmk(shiftBreakdown?.expectedCash ?? 0)}
-          detail={`${formatMmk(shiftBreakdown?.cashTotal ?? 0)} ${copy("cashSales")}`}
+          value={!openShift ? formatMmk(0) : reconData ? formatMmk(closeWouldExpect(reconData) ?? reconData.evidenceExpectedCashMmk) : reconPending}
+          detail={!openShift ? copy("noOpenShift") : reconData
+            ? `${formatMmk(reconData.cashSales.amountMmk)} ${copy("cashSales")} · ${copy("serverVerified")}`
+            : <button type="button" className="underline" onClick={recon.refresh}>{copy("tryAgain")}</button>}
           icon="account_balance_wallet"
           tone="amber"
         />

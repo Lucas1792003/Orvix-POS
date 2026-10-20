@@ -1,0 +1,88 @@
+{
+    "data": {
+        "asOf": "2026-10-20T13:36:27.110944+00:00",
+        "shift": {
+            "id": "shift-34f6215c6a9f4f88a8bc415b4a3da7ea",
+            "shopId": "shop-f",
+            "status": "OPEN",
+            "endedAt": null,
+            "cashierId": "u-cash-f1",
+            "startedAt": "2026-10-20T13:36:26.68925+00:00",
+            "closingCashMmk": null,
+            "openingCashMmk": 10000,
+            "varianceReason": null,
+            "closeRecordedAt": null,
+            "closeTimeSource": null,
+            "storedVarianceMmk": null,
+            "storedExpectedCashMmk": null
+        },
+        "cashSales": {
+            "count": 1,
+            "amountMmk": 1000
+        },
+        "nonCashSales": [
+        ],
+        "cashMovements": {
+            "reason": "NOT_RECORDED_BEFORE_CASH_MOVEMENTS",
+            "recorded": false
+        },
+        "afterClosePayouts": {
+            "count": 0,
+            "items": [
+            ],
+            "amountMmk": 0
+        },
+        "attributedPayouts": {
+            "count": 0,
+            "voidMmk": 0,
+            "amountMmk": 0,
+            "refundMmk": 0
+        },
+        "closeWindowPayouts": {
+            "count": 0,
+            "items": [
+            ],
+            "amountMmk": 0
+        },
+        "unknownTimePayouts": {
+            "count": 0,
+            "items": [
+            ],
+            "amountMmk": 0
+        },
+        "evidenceVarianceMmk": null,
+        "storedMatchesEvidence": null,
+        "evidenceExpectedCashMmk": 11000,
+        "crossShiftPayoutsDuringShift": {
+            "count": 2,
+            "items": [
+                {
+                    "id": "refund-d9c96693cf214a69b60e2de3a91bb96d",
+                    "kind": "REFUND",
+                    "saleId": "sale-485c4c4916524aca9ab39814a9043d20",
+                    "amountMmk": 1000,
+                    "receiptNo": "SF-20261020-0004",
+                    "approvedAt": "2026-10-20T13:36:26.700214+00:00",
+                    "saleShiftId": "shift-93e676247fe54f859fc81ea368336b5a"
+                },
+                {
+                    "id": "refund-944632b1259c4372af97950b59070006",
+                    "kind": "REFUND",
+                    "saleId": "sale-964510d57a7d4cd89a94b466b359db32",
+                    "amountMmk": 1000,
+                    "receiptNo": "SF-20261020-0005",
+                    "approvedAt": "2026-10-20T13:36:26.768549+00:00",
+                    "saleShiftId": "shift-dc364ec0cc0a4d488aefe9e2894e280a"
+                }
+            ],
+            "amountMmk": 2000
+        },
+        "supplierCashPaymentsDuringShift": {
+            "count": 0,
+            "amountMmk": 0,
+            "dateField": "paid_at"
+        },
+        "storedMatchesEvidenceIfCloseWindowDeducted": null,
+        "storedMatchesEvidenceIfUnknownTimeDeducted": null
+    }
+}

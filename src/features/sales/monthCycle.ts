@@ -1,18 +1,27 @@
 /**
- * Monthly cycle helpers (calendar month, local time).
+ * Monthly cycle helpers (calendar month in the business time zone).
  *
  * The Sales page shows only the current month's sales and the monthly
  * auto-email/archive fires at the start of each month, so the countdown and
- * the page's month filter both derive from these.
+ * the page's month filter both derive from these. Months begin at business
+ * midnight on the 1st (Asia/Yangon, lib/businessDay.ts — ORV-069), not at
+ * device-local midnight.
  */
+import {
+  BUSINESS_TIME_ZONE,
+  businessDayStart,
+  businessToday,
+  monthStartKey,
+  nextMonthStartKey,
+} from "../../lib/businessDay";
 
-/** Midnight on the 1st of the month containing `d`. */
+/** Business midnight on the 1st of the month containing `d`. */
 export const startOfMonth = (d: Date = new Date()): Date =>
-  new Date(d.getFullYear(), d.getMonth(), 1, 0, 0, 0, 0);
+  businessDayStart(monthStartKey(businessToday(d)));
 
-/** Midnight on the 1st of NEXT month (when the monthly report fires). */
+/** Business midnight on the 1st of NEXT month (when the monthly report fires). */
 export const nextMonthStart = (d: Date = new Date()): Date =>
-  new Date(d.getFullYear(), d.getMonth() + 1, 1, 0, 0, 0, 0);
+  businessDayStart(nextMonthStartKey(businessToday(d)));
 
 export interface MonthBounds {
   /** Start of the current month (ms). */
@@ -32,6 +41,10 @@ export const inCurrentMonth = (createdAt: string, bounds: MonthBounds): boolean 
   return Number.isFinite(t) && t >= bounds.thisStart && t < bounds.nextStart;
 };
 
-/** e.g. "June 2026" for the current month. */
+/** e.g. "June 2026" for the current month (named in the business zone). */
 export const formatMonthLabel = (bounds: MonthBounds): string =>
-  new Date(bounds.thisStart).toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+  new Date(bounds.thisStart).toLocaleDateString("en-GB", {
+    month: "long",
+    year: "numeric",
+    timeZone: BUSINESS_TIME_ZONE,
+  });

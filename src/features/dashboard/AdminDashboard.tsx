@@ -19,20 +19,13 @@ import { useDataStore } from "../../stores/dataStore";
 import type { Shop, User } from "../../types";
 import {
   calculateActionNeeded,
-  calculateAvgOrderValue,
-  calculateCostOfGoods,
-  calculateDailyRevenueCostProfitTrend,
   calculateLowStock,
-  calculateNetRevenue,
-  calculatePerShopMetrics,
-  calculateProfit,
-  calculateProfitMargin,
   calculateSalesByCategoryPercent,
-  calculateSalesCount,
   calculateSupplierDebt,
   calculateTopProducts,
   dateRangeStart,
   decorateLowStockWithShopName,
+  filterActiveShifts,
   filterPendingApprovals,
   filterPendingReceipts,
   filterSalesByRange,
@@ -59,6 +52,7 @@ import { LowStockCard } from "./LowStockCard";
 import { TransfersStatusFeed } from "./TransfersStatusCard";
 import { useDashboardInsights } from "../../hooks/useDashboardInsights";
 import { InventoryIntelligence } from "../../components/dashboard/InventoryIntelligence";
+import { canRetry, kpisOf, pendingText, useDashboardFinancials, useDashboardShopFinancials } from "./useServerDashboard";
 
 interface AdminDashboardProps {
   currentUser: User;
@@ -107,71 +101,60 @@ export const AdminDashboard = ({ currentUser, shops }: AdminDashboardProps) => {
     [scopedSales, range]
   );
 
-  const revenue = useMemo(() => calculateNetRevenue(rangedSales, refunds), [rangedSales, refunds]);
-  const orders = calculateSalesCount(rangedSales);
-  const avgOrder = calculateAvgOrderValue(revenue, orders);
-  const cost = useMemo(
-    () => calculateCostOfGoods(rangedSales, saleItems, products),
-    [rangedSales, saleItems, products]
-  );
-  const profit = calculateProfit(revenue, cost);
-  const margin = calculateProfitMargin(revenue, profit);
+  // Money headline: the server report (full history, every approved refund,
+  // cost snapshots only). No client fallback: while it is not available the
+  // tiles say so instead of showing cached totals.
+  const fin = useDashboardFinancials(metricShopId, range);
+  const kpis = fin.kpis;
+  const finPending = pendingText(fin.state, { loading: copy("serverLoading"), unavailable: copy("serverUnavailable"), forbidden: copy("notPermitted") });
   const supplierDebt = useMemo(
     () => calculateSupplierDebt(purchaseOrders, metricShopId),
     [purchaseOrders, metricShopId]
   );
 
+  // Per-shop money from one server report per visible shop; open shifts
+  // (operational, not money) still from the store.
+  const visibleShopIds = useMemo(() => visibleShops.map((shop) => shop.id), [visibleShops]);
+  const shopFin = useDashboardShopFinancials(visibleShopIds, range);
   const perShopRows = useMemo(
     () =>
-      calculatePerShopMetrics(
-        rangedSales,
-        saleItems,
-        products,
-        visibleShops,
-        refunds,
-        shifts,
-        purchaseOrders
-      ).sort((a, b) => b.revenue - a.revenue),
-    [rangedSales, saleItems, products, visibleShops, refunds, shifts, purchaseOrders]
+      visibleShops
+        .map((shop) => {
+          const result = shopFin.byShop[shop.id];
+          const k = result?.status === "ok" ? kpisOf(result.data) : null;
+          return { shop, kpis: k, activeShifts: filterActiveShifts(shifts, shop.id).length };
+        })
+        .sort((a, b) => (b.kpis?.revenue ?? -Infinity) - (a.kpis?.revenue ?? -Infinity)),
+    [visibleShops, shopFin.byShop, shifts]
   );
 
   const revenueByShopData = useMemo(
     () =>
-      perShopRows.map((row) => ({
-        shop: row.shop.code || row.shop.name,
-        revenue: row.revenue,
-        orders: row.orders,
-      })),
+      perShopRows
+        .filter((row) => row.kpis)
+        .map((row) => ({
+          shop: row.shop.code || row.shop.name,
+          revenue: row.kpis?.revenue ?? 0,
+          orders: row.kpis?.orders ?? 0,
+        })),
     [perShopRows]
   );
 
-  const trendData = useMemo(
-    () =>
-      visibility.canViewProfit
-        ? calculateDailyRevenueCostProfitTrend(
-            sales,
-            saleItems,
-            products,
-            refunds,
-            metricShopId,
-            range
-          )
-        : [],
-    [visibility.canViewProfit, sales, saleItems, products, refunds, metricShopId, range]
-  );
+  const trendData = visibility.canViewProfit ? fin.trend : [];
 
   const categoryData = useMemo(
-    () => calculateSalesByCategoryPercent(sales, saleItems, products, metricShopId, range),
-    [sales, saleItems, products, metricShopId, range]
+    () => calculateSalesByCategoryPercent(sales, saleItems, products, metricShopId, range, undefined, refunds),
+    [sales, saleItems, products, metricShopId, range, refunds]
   );
 
   // Top selling products in the current shop+range scope. Ranked by line
-  // revenue; VOID/REFUNDED are excluded upstream by `scopeSales` (so
-  // they never enter `rangedSales`). Cost/profit columns are only
+  // revenue; VOID sales are excluded upstream by `scopeSales` (so they
+  // never enter `rangedSales`). Lines of partly refunded sales still rank
+  // net of units given back by approved refunds (ORV-034). Cost/profit columns are only
   // rendered when the user holds `report:shop_profit`.
   const topProducts = useMemo(
-    () => calculateTopProducts(rangedSales, saleItems, products, 5),
-    [rangedSales, saleItems, products]
+    () => calculateTopProducts(rangedSales, saleItems, products, 5, refunds),
+    [rangedSales, saleItems, products, refunds]
   );
   const topProductsRevenueTotal = useMemo(
     () => topProducts.reduce((sum, row) => sum + row.revenue, 0),
@@ -189,6 +172,7 @@ export const AdminDashboard = ({ currentUser, shops }: AdminDashboardProps) => {
     products,
     inventory,
     metricShopId,
+    refunds,
   });
 
   // Full low-stock list (active shops only), sorted most-urgent-first. The
@@ -281,21 +265,23 @@ export const AdminDashboard = ({ currentUser, shops }: AdminDashboardProps) => {
       <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         <KpiCard
           label={`${selectedRangeLabel} ${copy("revenue")}`}
-          value={formatMmk(revenue)}
-          detail={scopeLabel}
+          value={kpis ? formatMmk(kpis.revenue) : finPending}
+          detail={kpis ? `${scopeLabel} · ${copy("serverVerified")} · ${copy("bySaleDate")}` : canRetry(fin.state) ? (
+            <button type="button" className="underline" onClick={fin.refresh}>{copy("tryAgain")}</button>
+          ) : null}
           icon="payments"
           tone="emerald"
         />
         <KpiCard
           label={`${selectedRangeLabel} ${copy("orders")}`}
-          value={orders}
+          value={kpis ? kpis.orders : finPending}
           detail={copy("validSales")}
           icon="receipt_long"
           tone="blue"
         />
         <KpiCard
           label={copy("aov")}
-          value={formatMmk(avgOrder)}
+          value={kpis ? formatMmk(kpis.aov) : finPending}
           detail={`${selectedRangeLabel} ${copy("average")}`}
           icon="analytics"
           tone="slate"
@@ -303,10 +289,13 @@ export const AdminDashboard = ({ currentUser, shops }: AdminDashboardProps) => {
         {visibility.canViewProfit && (
           <KpiCard
             label={copy("profitMargin")}
-            value={formatMmk(profit)}
-            detail={`${margin.toFixed(1)}% ${copy("margin")}`}
-            icon={profit >= 0 ? "trending_up" : "trending_down"}
-            tone={profit >= 0 ? "violet" : "rose"}
+            value={kpis ? (kpis.profit !== null ? formatMmk(kpis.profit) : copy("profitNotAvailable")) : finPending}
+            detail={kpis
+              ? kpis.costIncomplete ? copy("costIncomplete")
+                : kpis.marginPct !== null ? `${kpis.marginPct.toFixed(1)}% ${copy("margin")}` : copy("profitNotAvailable")
+              : null}
+            icon={(kpis?.profit ?? 0) >= 0 ? "trending_up" : "trending_down"}
+            tone={(kpis?.profit ?? 0) >= 0 ? "violet" : "rose"}
           />
         )}
         {visibility.canViewSupplierDebt && (
@@ -365,7 +354,7 @@ export const AdminDashboard = ({ currentUser, shops }: AdminDashboardProps) => {
                       <span className={`text-xs font-medium ${tile.text}`}>{tile.label}</span>
                     </div>
                     <div className={`mt-2 text-xl font-bold tabular-nums ${tile.text}`}>
-                      {formatMmk(tile.value)}
+                      {tile.value === null ? "—" : formatMmk(tile.value)}
                     </div>
                     <div className="mt-1 text-[11px] text-slate-500">{trendData[0].label}</div>
                   </div>
@@ -481,20 +470,21 @@ export const AdminDashboard = ({ currentUser, shops }: AdminDashboardProps) => {
                         <div className="text-xs text-slate-500">{row.shop.code}</div>
                       </td>
                       <td className="py-2.5 pr-3 text-right text-sm font-semibold text-emerald-700">
-                        {formatMmk(row.revenue)}
+                        {row.kpis ? formatMmk(row.kpis.revenue) : copy("serverUnavailable")}
                       </td>
-                      <td className="py-2.5 pr-3 text-right text-sm text-slate-600">{row.orders}</td>
+                      <td className="py-2.5 pr-3 text-right text-sm text-slate-600">{row.kpis ? row.kpis.orders : "—"}</td>
                       <td className="py-2.5 pr-3 text-right text-sm text-slate-600">
-                        {formatMmk(calculateAvgOrderValue(row.revenue, row.orders))}
+                        {row.kpis ? formatMmk(row.kpis.aov) : "—"}
                       </td>
                       {visibility.canViewProfit && (
                         <td className="py-2.5 pr-3 text-right text-sm font-semibold text-slate-800">
-                          {formatMmk(row.profit)}
+                          {row.kpis && row.kpis.profit !== null ? formatMmk(row.kpis.profit) : "—"}
+                          {row.kpis?.costIncomplete && <div className="text-[11px] font-normal text-amber-700">{copy("costIncomplete")}</div>}
                         </td>
                       )}
                       {visibility.canViewProfit && (
                         <td className="py-2.5 pr-3 text-right text-sm text-slate-600">
-                          {row.margin.toFixed(1)}%
+                          {row.kpis && row.kpis.marginPct !== null ? `${row.kpis.marginPct.toFixed(1)}%` : "—"}
                         </td>
                       )}
                       <td className="py-2.5 text-right text-sm text-slate-600">{row.activeShifts}</td>
@@ -509,7 +499,7 @@ export const AdminDashboard = ({ currentUser, shops }: AdminDashboardProps) => {
         </SectionCard>
 
         <div className="space-y-4 xl:h-full">
-          <SectionCard title={copy("salesByCategory")} icon="donut_small" className="xl:h-full">
+          <SectionCard title={copy("salesByCategory")} action={<span className="text-[11px] text-slate-400" data-cached-note>{copy("fromLoadedSales")}</span>} icon="donut_small" className="xl:h-full">
             <div className="h-56">
               {categoryData.length > 0 ? (
                 <ResponsiveContainer width="100%" height="100%">
@@ -552,7 +542,7 @@ export const AdminDashboard = ({ currentUser, shops }: AdminDashboardProps) => {
 
       <div className="grid gap-4 xl:grid-cols-3 xl:items-start xl:gap-6">
         <div className={visibility.canViewInventory ? "space-y-4 xl:col-span-1" : "space-y-4 xl:col-span-3"}>
-          <SectionCard title={copy("topSellingProducts")} icon="leaderboard">
+          <SectionCard title={copy("topSellingProducts")} action={<span className="text-[11px] text-slate-400" data-cached-note>{copy("fromLoadedSales")}</span>} icon="leaderboard">
             {topProducts.length > 0 ? (
               <div className="space-y-2.5">
                 {topProducts.map((row, index) => {
