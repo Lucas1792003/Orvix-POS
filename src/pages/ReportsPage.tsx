@@ -5,6 +5,7 @@ import { useDataStore } from "../stores/dataStore";
 import { Card } from "../components/ui/Card";
 import { PageHeader } from "../components/layout/PageHeader";
 import { formatMmk, getEffectiveShopId } from "../lib/utils";
+import { calculateShopReportSummary } from "../features/reports/shopReportSummary";
 
 export const ReportsPage = () => {
   const currentUserId = useAuthStore((state) => state.currentUserId);
@@ -12,23 +13,16 @@ export const ReportsPage = () => {
   const { currentShopId } = useAppStore();
   const shops = useDataStore((state) => state.shops);
   const sales = useDataStore((state) => state.sales);
+  const refunds = useDataStore((state) => state.refundVoidRequests);
 
   const shopId = getEffectiveShopId(currentUser, currentShopId, shops);
-  const shopSales = sales.filter((sale) => sale.shopId === shopId && sale.status !== "VOID");
-  const totalSales = shopSales.reduce((sum, sale) => sum + sale.totalMmk, 0);
-  const cashSales = shopSales.filter((sale) => sale.paymentMethod === "CASH").reduce((sum, sale) => sum + sale.totalMmk, 0);
-  const otherSales = totalSales - cashSales;
 
-  const dailyTotals = useMemo(() => {
-    const totals: Record<string, number> = {};
-    shopSales.forEach((sale) => {
-      const day = sale.createdAt.slice(0, 10);
-      totals[day] = (totals[day] || 0) + sale.totalMmk;
-    });
-    return Object.entries(totals)
-      .sort((a, b) => (a[0] > b[0] ? 1 : -1))
-      .slice(-7);
-  }, [shopSales]);
+  // Net of refunds, business days (ORV-034/069); still the all-time,
+  // store-cached placeholder (ORV-035) — see features/reports/shopReportSummary.ts.
+  const { totalSales, cashSales, otherSales, dailyTotals } = useMemo(
+    () => calculateShopReportSummary(sales, refunds, shopId),
+    [sales, refunds, shopId],
+  );
 
   return (
     <div className="space-y-6">

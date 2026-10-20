@@ -14,6 +14,7 @@ import type {
   User,
 } from "../../types";
 import { hasPermission } from "../../lib/permissions";
+import { addDays, businessDayKey, businessDayStart, businessToday, monthStartKey } from "../../lib/businessDay";
 import { getPurchaseOrderBalanceMmk, getPurchaseOrderPaidMmk } from "../suppliers/debt";
 
 // ============================================================
@@ -37,18 +38,26 @@ import { getPurchaseOrderBalanceMmk, getPurchaseOrderPaidMmk } from "../supplier
 //                             for headline totals (when cart discount > 0
 //                             the lineTotal sum is > sale.totalMmk).
 //
-// Revenue
+// Revenue (ORV-034)
 // -------
 // Net revenue = sum(sale.totalMmk) - sum(approved PARTIAL refund amounts).
-// VOID and REFUNDED sales are excluded by `scopeSales` upstream (see
-// `complete_sale` / `approve_void_request` for the status transitions).
+// Only VOID sales are excluded by `scopeSales`. Approving ANY partial
+// refund flips the whole sale to REFUNDED (approve_refund_request, 070), so
+// a REFUNDED sale is "sold, then partly or wholly given back": it stays in
+// scope and its approved refund amounts are deducted, capped per sale at the
+// sale total so a refund can never remove more than that sale earned.
 //
 // Cost of goods
 // -------------
-// `sale_items` does NOT capture cost at sale time, so we approximate
-// with the current `products.costMmk`. This drifts when costs change.
-// Documented in `docs/04-features-workflows.md`. Migrating to a
-// captured-cost column on `sale_items` is on the roadmap.
+// Per-line cost captured at sale time (migration 041) when present, else the
+// current `products.costMmk` (legacy rows; drifts when costs change). Units
+// given back by an approved PARTIAL refund return to stock (RETURN_IN), so
+// their cost is reversed too when the refunds are passed in.
+//
+// Days
+// ----
+// "Today", "week", "month" and the daily trend use business days
+// (Asia/Yangon, lib/businessDay.ts), not the device clock or UTC (ORV-069).
 //
 // Shop scope
 // ----------
@@ -61,41 +70,88 @@ import { getPurchaseOrderBalanceMmk, getPurchaseOrderPaidMmk } from "../supplier
 // Sale-level helpers
 // ------------------------------------------------------------
 
+// Minimal shapes so the same money rules serve the store-backed dashboard
+// and the server-ranged profit report (features/reports/useRangedSales).
+type RevenueSale = Pick<Sale, "id" | "totalMmk">;
+type ScopedSale = Pick<Sale, "status" | "shopId">;
+type CostLine = Pick<SaleItem, "saleId" | "productId" | "qtyUnits" | "unitCostMmkSnapshot">;
+type CostProduct = Pick<Product, "id" | "costMmk">;
+export type RefundForMetrics = Pick<RefundVoidRequest, "saleId" | "type" | "status" | "items">;
+
+/** True for a sale that still counts as trade: anything but VOID. */
+export const countsAsSale = (sale: Pick<Sale, "status">): boolean => sale.status !== "VOID";
+
 /**
  * Return only the sales that belong on a dashboard:
- *   * status = NORMAL  (drop VOID and REFUNDED outright)
+ *   * status ≠ VOID — NORMAL and REFUNDED (partly/wholly refunded) stay;
+ *     their approved refund amounts are deducted by `calculateNetRevenue`
  *   * if `shopId` is a string, restrict to that shop
  *   * if `shopId` is null, no shop restriction (admin all-shops mode)
  */
-export const scopeSales = (sales: Sale[], shopId: string | null): Sale[] =>
-  sales.filter((s) => s.status === "NORMAL" && (shopId === null || s.shopId === shopId));
+export const scopeSales = <T extends ScopedSale>(sales: T[], shopId: string | null): T[] =>
+  sales.filter((s) => countsAsSale(s) && (shopId === null || s.shopId === shopId));
+
+const finiteMmk = (value: number | undefined): number => (Number.isFinite(value) ? (value as number) : 0);
 
 /** Sum of `sale.totalMmk` — the cash basis revenue, pre-refund adjustments. */
-export const calculateGrossRevenue = (sales: Sale[]): number =>
-  sales.reduce((sum, s) => sum + (Number.isFinite(s.totalMmk) ? s.totalMmk : 0), 0);
+export const calculateGrossRevenue = (sales: RevenueSale[]): number =>
+  sales.reduce((sum, s) => sum + finiteMmk(s.totalMmk), 0);
+
+const isApprovedPartial = (r: RefundForMetrics): boolean => r.status === "APPROVED" && r.type === "PARTIAL";
 
 /**
- * Sum of approved PARTIAL refund amounts against the given sales.
+ * One refund item read the way approve_refund_request (070) reads it:
+ * `items` is stored as sent, and the server accepts camelCase or snake_case
+ * keys and numeric strings. This app always sends camelCase numbers, but a
+ * row written by another client must not silently deduct nothing.
+ */
+/** The refund's items, or none if the stored value is not an array. */
+const refundItemsOf = (r: RefundForMetrics): unknown[] => (Array.isArray(r.items) ? r.items : []);
+
+const refundItemValues = (item: unknown): { productId: string; qtyUnits: number; amountMmk: number } => {
+  const raw = (item ?? {}) as Record<string, unknown>;
+  const num = (value: unknown): number => {
+    const n = typeof value === "string" ? Number(value) : (value as number);
+    return Number.isFinite(n) ? n : 0;
+  };
+  return {
+    productId: String(raw.productId ?? raw.product_id ?? ""),
+    qtyUnits: Math.max(num(raw.qtyUnits ?? raw.qty_units), 0),
+    amountMmk: Math.max(num(raw.amountMmk ?? raw.amount_mmk), 0),
+  };
+};
+
+/**
+ * Sum of approved PARTIAL refund amounts against the given sales, each
+ * sale's deduction capped at that sale's total.
  *
- * Only PARTIAL refunds matter for revenue here:
- *   * VOID -> the underlying sale status becomes VOID and is dropped
- *     by `scopeSales`, so we already excluded its revenue.
- *   * Full REFUND -> status becomes REFUNDED, same treatment.
- *   * PARTIAL APPROVED -> the sale stays NORMAL but a fraction of the
- *     revenue went back to the customer; subtract it here.
+ *   * VOID -> the sale becomes VOID and `scopeSales` drops it (and its
+ *     revenue) entirely; a VOID request is never a deduction.
+ *   * PARTIAL APPROVED -> the sale becomes REFUNDED but stays in scope;
+ *     the amount handed back is subtracted here. A refund of every line is
+ *     just a PARTIAL refund of everything: the sale nets to 0.
+ *   * REQUESTED / REJECTED -> nothing was paid out yet; no deduction.
+ *
+ * The cap matters while the server still accepts refunds priced from
+ * pre-cart-discount line totals (ORV-002, until migration 090): the excess
+ * must not eat into other sales' revenue.
  */
 export const calculateRefundDeductions = (
-  sales: Sale[],
-  refunds: RefundVoidRequest[]
+  sales: RevenueSale[],
+  refunds: RefundForMetrics[]
 ): number => {
-  const saleIds = new Set(sales.map((s) => s.id));
-  return refunds
-    .filter((r) => r.status === "APPROVED" && r.type === "PARTIAL" && saleIds.has(r.saleId))
-    .reduce(
-      (sum, r) =>
-        sum + (r.items ?? []).reduce((line, item) => line + (item.amountMmk || 0), 0),
-      0
-    );
+  const totalBySale = new Map(sales.map((s) => [s.id, finiteMmk(s.totalMmk)]));
+  const refundedBySale = new Map<string, number>();
+  for (const r of refunds) {
+    if (!isApprovedPartial(r) || !totalBySale.has(r.saleId)) continue;
+    const amount = refundItemsOf(r).reduce<number>((line, item) => line + refundItemValues(item).amountMmk, 0);
+    refundedBySale.set(r.saleId, (refundedBySale.get(r.saleId) ?? 0) + amount);
+  }
+  let total = 0;
+  for (const [saleId, refunded] of refundedBySale) {
+    total += Math.min(refunded, Math.max(totalBySale.get(saleId) ?? 0, 0));
+  }
+  return total;
 };
 
 /**
@@ -104,30 +160,62 @@ export const calculateRefundDeductions = (
  * never produces a negative dashboard number.
  */
 export const calculateNetRevenue = (
-  sales: Sale[],
-  refunds: RefundVoidRequest[]
+  sales: RevenueSale[],
+  refunds: RefundForMetrics[]
 ): number => Math.max(calculateGrossRevenue(sales) - calculateRefundDeductions(sales, refunds), 0);
 
-/** Number of valid orders. */
-export const calculateSalesCount = (sales: Sale[]): number => sales.length;
+/** Number of valid orders (a refunded sale is still an order). */
+export const calculateSalesCount = (sales: unknown[]): number => sales.length;
 
-/** Cost of goods sold — uses the per-line cost captured at sale time when
- *  present (migration 041), else the current product cost (legacy rows). */
+/**
+ * Cost of goods sold — uses the per-line cost captured at sale time when
+ * present (migration 041), else the current product cost (legacy rows).
+ *
+ * With `refunds`, the cost of units returned by approved PARTIAL refunds is
+ * reversed (they went back to stock). A refund item is matched to the sale
+ * line by product, as the server does (070), and its quantity is capped at
+ * what that sale sold of the product.
+ */
 export const calculateCostOfGoods = (
-  sales: Sale[],
-  saleItems: SaleItem[],
-  products: Product[]
+  sales: Pick<Sale, "id">[],
+  saleItems: CostLine[],
+  products: CostProduct[],
+  refunds: RefundForMetrics[] = []
 ): number => {
   const saleIds = new Set(sales.map((s) => s.id));
   const productById = new Map(products.map((p) => [p.id, p]));
-  return saleItems
-    .filter((i) => saleIds.has(i.saleId))
-    .reduce((sum, item) => {
-      // Prefer the cost captured at sale time (migration 041); fall back to the
-      // product's current cost for sales made before the snapshot shipped.
-      const cost = item.unitCostMmkSnapshot ?? productById.get(item.productId)?.costMmk ?? 0;
-      return sum + cost * item.qtyUnits;
-    }, 0);
+  // Prefer the cost captured at sale time (migration 041); fall back to the
+  // product's current cost for sales made before the snapshot shipped.
+  const unitCost = (item: CostLine): number =>
+    item.unitCostMmkSnapshot ?? productById.get(item.productId)?.costMmk ?? 0;
+
+  let cost = 0;
+  // Per sale+product: base units sold and their cost, for refund reversal.
+  const sold = new Map<string, { qty: number; cost: number }>();
+  for (const item of saleItems) {
+    if (!saleIds.has(item.saleId)) continue;
+    const lineCost = unitCost(item) * item.qtyUnits;
+    cost += lineCost;
+    const key = `${item.saleId}\u0000${item.productId}`;
+    const prev = sold.get(key) ?? { qty: 0, cost: 0 };
+    sold.set(key, { qty: prev.qty + item.qtyUnits, cost: prev.cost + lineCost });
+  }
+
+  const returned = new Map<string, number>();
+  for (const r of refunds) {
+    if (!isApprovedPartial(r) || !saleIds.has(r.saleId)) continue;
+    for (const raw of refundItemsOf(r)) {
+      const item = refundItemValues(raw);
+      const key = `${r.saleId}\u0000${item.productId}`;
+      returned.set(key, (returned.get(key) ?? 0) + item.qtyUnits);
+    }
+  }
+  for (const [key, qty] of returned) {
+    const line = sold.get(key);
+    if (!line || line.qty <= 0) continue;
+    cost -= (line.cost / line.qty) * Math.min(qty, line.qty);
+  }
+  return Math.max(Math.round(cost), 0);
 };
 
 export const calculateProfit = (revenue: number, cost: number): number => revenue - cost;
@@ -255,6 +343,46 @@ export const calculateLowStock = (
 // Ranking helpers
 // ------------------------------------------------------------
 
+/**
+ * Sale lines with the units given back by approved PARTIAL refunds taken
+ * out (ORV-034), for the per-product / per-category figures that rank by
+ * line: quantity drops by the returned base units and the line total pro
+ * rata. Returned units of a product are taken from that sale's lines of
+ * the product in the order given; a wholly returned line is dropped. With
+ * no refunds the lines are returned as they are.
+ */
+export const netRefundedLines = <T extends Pick<SaleItem, "saleId" | "productId" | "qtyUnits" | "lineTotalMmk">>(
+  items: T[],
+  refunds: RefundForMetrics[] = []
+): T[] => {
+  const returned = new Map<string, number>();
+  for (const r of refunds) {
+    if (!isApprovedPartial(r)) continue;
+    for (const raw of refundItemsOf(r)) {
+      const item = refundItemValues(raw);
+      if (item.qtyUnits <= 0) continue;
+      const key = `${r.saleId}\u0000${item.productId}`;
+      returned.set(key, (returned.get(key) ?? 0) + item.qtyUnits);
+    }
+  }
+  if (returned.size === 0) return items;
+  const out: T[] = [];
+  for (const item of items) {
+    const key = `${item.saleId}\u0000${item.productId}`;
+    const left = returned.get(key) ?? 0;
+    if (left <= 0 || item.qtyUnits <= 0) {
+      out.push(item);
+      continue;
+    }
+    const take = Math.min(left, item.qtyUnits);
+    returned.set(key, left - take);
+    const qty = item.qtyUnits - take;
+    if (qty <= 0) continue;
+    out.push({ ...item, qtyUnits: qty, lineTotalMmk: Math.round((item.lineTotalMmk * qty) / item.qtyUnits) });
+  }
+  return out;
+};
+
 export interface TopProductRow {
   product: Product;
   qty: number;
@@ -268,18 +396,20 @@ export interface TopProductRow {
  * Top products by line-total revenue (descending). Ranking basis is
  * `lineTotalMmk` because that's the per-product number; cart discounts
  * are applied at the sale level, not the item level. The headline
- * revenue KPI uses `sale.totalMmk` — see header.
+ * revenue KPI uses `sale.totalMmk` — see header. With `refunds`, units
+ * given back by approved PARTIAL refunds are taken out (netRefundedLines).
  */
 export const calculateTopProducts = (
   sales: Sale[],
   saleItems: SaleItem[],
   products: Product[],
-  limit = 5
+  limit = 5,
+  refunds?: RefundForMetrics[]
 ): TopProductRow[] => {
   const saleIds = new Set(sales.map((s) => s.id));
   const productById = new Map(products.map((p) => [p.id, p]));
   const map = new Map<string, TopProductRow>();
-  for (const item of saleItems) {
+  for (const item of netRefundedLines(saleItems, refunds)) {
     if (!saleIds.has(item.saleId)) continue;
     const product = productById.get(item.productId);
     if (!product) continue;
@@ -303,17 +433,18 @@ export const calculateTopProducts = (
 /**
  * Category revenue split — uses `lineTotalMmk` (line basis). Suitable
  * for proportional pie chart; the sum will be ≥ headline net revenue
- * when cart discounts apply.
+ * when cart discounts apply. With `refunds`, returned units are taken out.
  */
 export const calculateCategoryRevenue = (
   sales: Sale[],
   saleItems: SaleItem[],
-  products: Product[]
+  products: Product[],
+  refunds?: RefundForMetrics[]
 ): Array<{ name: string; value: number }> => {
   const saleIds = new Set(sales.map((s) => s.id));
   const productById = new Map(products.map((p) => [p.id, p]));
   const map = new Map<string, number>();
-  for (const item of saleItems) {
+  for (const item of netRefundedLines(saleItems, refunds)) {
     if (!saleIds.has(item.saleId)) continue;
     const product = productById.get(item.productId);
     if (!product) continue;
@@ -342,10 +473,11 @@ export const calculateSalesByCategoryPercent = (
   products: Product[],
   shopId: string | null,
   range: DateRange,
-  now: Date = new Date()
+  now: Date = new Date(),
+  refunds?: RefundForMetrics[]
 ): SalesByCategoryPercentRow[] => {
   const rangedSales = filterSalesByRange(scopeSales(sales, shopId), range, now);
-  const rows = calculateCategoryRevenue(rangedSales, saleItems, products).sort(
+  const rows = calculateCategoryRevenue(rangedSales, saleItems, products, refunds).sort(
     (a, b) => b.value - a.value
   );
   const total = rows.reduce((sum, row) => sum + row.value, 0);
@@ -364,20 +496,13 @@ export interface DailyRevenueCostProfitPoint {
   profit: number;
 }
 
-const pad2 = (value: number): string => value.toString().padStart(2, "0");
-
-const localDateKey = (createdAt: string): string | null => {
-  const date = new Date(createdAt);
-  if (!Number.isFinite(date.getTime())) return null;
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
-};
-
 /**
- * Admin profit trend chart data, grouped by local day.
+ * Admin profit trend chart data, grouped by business day (ORV-069).
  *
  * Revenue uses `calculateNetRevenue`, so approved PARTIAL refunds are
- * deducted when present. Cost uses the current product-cost approximation
- * because sale_items does not store historical unit cost yet.
+ * deducted when present; cost reverses the refunded units' cost. A refund is
+ * booked against the day of its sale (sales carry the date; refund approval
+ * time is not part of this model).
  */
 export const calculateDailyRevenueCostProfitTrend = (
   sales: Sale[],
@@ -393,7 +518,7 @@ export const calculateDailyRevenueCostProfitTrend = (
 
   const salesByDay = new Map<string, Sale[]>();
   for (const sale of rangedSales) {
-    const key = localDateKey(sale.createdAt);
+    const key = businessDayKey(sale.createdAt);
     if (!key) continue;
     const daySales = salesByDay.get(key) ?? [];
     daySales.push(sale);
@@ -404,7 +529,7 @@ export const calculateDailyRevenueCostProfitTrend = (
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, daySales]) => {
       const revenue = calculateNetRevenue(daySales, refunds);
-      const cost = calculateCostOfGoods(daySales, saleItems, products);
+      const cost = calculateCostOfGoods(daySales, saleItems, products, refunds);
       return {
         date,
         label: date,
@@ -468,29 +593,24 @@ export const calculateSupplierDebt = (
 // ============================================================
 // Date-range helpers — used by the Today / Week / Month KPI strip.
 //
-// `today`   = local midnight today → now
-// `week`    = rolling 7 days       → now - 7d → now
-// `month`   = start of local month → now
+// Business days (Asia/Yangon, ORV-069), not the device clock:
+// `today`   = business midnight today          → now
+// `week`    = business midnight 7 days ago     → now (rolling)
+// `month`   = business midnight on the 1st     → now
 // ============================================================
 
 export type DateRange = "today" | "week" | "month";
 
 export const dateRangeStart = (range: DateRange, now: Date = new Date()): Date => {
+  const today = businessToday(now);
   switch (range) {
-    case "today": {
-      const d = new Date(now);
-      d.setHours(0, 0, 0, 0);
-      return d;
-    }
-    case "week": {
-      const d = new Date(now);
-      d.setDate(d.getDate() - 7);
-      d.setHours(0, 0, 0, 0);
-      return d;
-    }
+    case "today":
+      return businessDayStart(today);
+    case "week":
+      return businessDayStart(addDays(today, -7));
     case "month":
     default:
-      return new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+      return businessDayStart(monthStartKey(today));
   }
 };
 
@@ -671,21 +791,26 @@ export interface PaymentSplit {
   otherRevenue: number;
 }
 
-export const calculateCashVsOther = (sales: Sale[]): PaymentSplit => {
-  let cashCount = 0;
-  let cashRevenue = 0;
-  let otherCount = 0;
-  let otherRevenue = 0;
-  for (const s of sales) {
-    if (s.paymentMethod === "CASH") {
-      cashCount += 1;
-      cashRevenue += s.totalMmk;
-    } else {
-      otherCount += 1;
-      otherRevenue += s.totalMmk;
-    }
-  }
-  return { cashCount, cashRevenue, otherCount, otherRevenue };
+/**
+ * Orders and revenue per payment method. With `refunds`, each method's
+ * revenue is net of the approved refunds on its sales (ORV-034) — a refund
+ * is taken to be paid back the way the sale was paid (until migration 090
+ * records refund payouts with their own method). Without, gross totals.
+ */
+export const calculateCashVsOther = (
+  sales: Pick<Sale, "id" | "paymentMethod" | "totalMmk">[],
+  refunds?: RefundForMetrics[]
+): PaymentSplit => {
+  const cash = sales.filter((s) => s.paymentMethod === "CASH");
+  const other = sales.filter((s) => s.paymentMethod !== "CASH");
+  const revenue = (group: typeof sales) =>
+    refunds ? calculateNetRevenue(group, refunds) : calculateGrossRevenue(group);
+  return {
+    cashCount: cash.length,
+    cashRevenue: revenue(cash),
+    otherCount: other.length,
+    otherRevenue: revenue(other),
+  };
 };
 
 // ============================================================
@@ -771,7 +896,7 @@ export const calculatePerShopMetrics = (
   return shops.map((shop) => {
     const scoped = scopeSales(sales, shop.id);
     const revenue = calculateNetRevenue(scoped, refunds);
-    const cost = calculateCostOfGoods(scoped, saleItems, products);
+    const cost = calculateCostOfGoods(scoped, saleItems, products, refunds);
     const profit = calculateProfit(revenue, cost);
     return {
       shop,

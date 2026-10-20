@@ -1,5 +1,6 @@
 import { toCsv, type CsvCell } from "../../lib/csv";
 import { formatDate, formatDateTime } from "../../lib/utils";
+import { businessDayKey } from "../../lib/businessDay";
 import type { Product, Sale, SaleItem, Shift, Shop, User } from "../../types";
 
 export const dailySalesReportHeaders = [
@@ -49,13 +50,14 @@ export interface DailySalesReport {
   saleCount: number;
 }
 
-export const getLocalDateValue = (value: string | number | Date = new Date()) => {
-  const date = new Date(value);
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-};
+/**
+ * The business day (`YYYY-MM-DD`, Asia/Yangon) of an instant — the day a
+ * sale belongs to in the daily report (ORV-069). Kept under its old name
+ * for callers; it no longer follows the device clock. Unparseable input
+ * yields "" (matches no report day).
+ */
+export const getLocalDateValue = (value: string | number | Date = new Date()) =>
+  businessDayKey(value) ?? "";
 
 const getDateFromLocalValue = (dateValue: string) => {
   const [year, month, day] = dateValue.split("-").map(Number);

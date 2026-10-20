@@ -28,6 +28,9 @@ interface NavItem {
   /** Optional role gate layered on top of the permission. The route guard
    * checks this too — see AppRouter. */
   allowedRoles?: Role[];
+  /** Match the path exactly, so `/app/reports` is not also highlighted on
+   *  `/app/reports/profit`. */
+  end?: boolean;
 }
 
 interface NavSection {
@@ -50,6 +53,13 @@ const navSections: NavSection[] = [
       { to: "/app/shifts", labelKey: "shifts", permission: ROUTE_PERMISSIONS.shifts, icon: "schedule" },
       { to: "/app/approvals", labelKey: "approvals", permission: ROUTE_PERMISSIONS.approvals, icon: "fact_check" },
       { to: "/app/barcode-labels", labelKey: "barcodeLabels", permission: ROUTE_PERMISSIONS.barcodeLabels, icon: "qr_code_2", allowedRoles: ["ADMIN", "MANAGER"] },
+      // Reports (ORV-012): routed but had no menu entry, so unreachable on
+      // the desktop app (no address bar). Gated exactly like their routes.
+      // `/app/admin/reports` (Global Reports) is not listed: it renders the
+      // same shop-scoped ReportsPage as `/app/reports` until ORV-035 gives
+      // it a real all-shops view.
+      { to: "/app/reports", labelKey: "reports", permission: ROUTE_PERMISSIONS.reports, icon: "bar_chart", end: true },
+      { to: "/app/reports/profit", labelKey: "profitReports", permission: ROUTE_PERMISSIONS.reportsProfit, icon: "trending_up" },
     ],
   },
   {
@@ -59,6 +69,12 @@ const navSections: NavSection[] = [
     items: [
       { to: "/app/inventory", labelKey: "inventory", permission: ROUTE_PERMISSIONS.inventory, icon: "inventory_2" },
       { to: "/app/admin/products", labelKey: "products", permission: ROUTE_PERMISSIONS.adminProducts, icon: "inventory", allowedRoles: ["ADMIN", "MANAGER"] },
+      // Read-only catalogue for roles without the Products page (BUYER is
+      // redirected here on sign-in but could not navigate back) — ORV-012.
+      { to: "/app/catalog", labelKey: "catalog", permission: ROUTE_PERMISSIONS.catalog, icon: "menu_book", allowedRoles: ["CASHIER", "BUYER"] },
+      { to: "/app/admin/unit-types", labelKey: "unitTypes", permission: ROUTE_PERMISSIONS.adminUnitTypes, icon: "straighten" },
+      { to: "/app/admin/pricing", labelKey: "pricing", permission: ROUTE_PERMISSIONS.adminPricing, icon: "sell" },
+      { to: "/app/admin/barcodes", labelKey: "barcodes", permission: ROUTE_PERMISSIONS.adminBarcodes, icon: "barcode" },
       { to: "/app/transfers", labelKey: "transfers", permission: ROUTE_PERMISSIONS.transfers, icon: "swap_horiz" },
       { to: "/app/purchases", labelKey: "purchases", permission: ROUTE_PERMISSIONS.purchases, icon: "local_shipping" },
       { to: "/app/suppliers", labelKey: "suppliers", permission: ROUTE_PERMISSIONS.suppliers, icon: "handshake" },
@@ -202,6 +218,7 @@ export const Sidebar = () => {
                       <li key={item.to} className="menu-item">
                         <NavLink
                           to={item.to}
+                          end={item.end}
                           className={({ isActive }) => cn("menu-link", isActive && "active")}
                           title={effectiveCollapsed ? t("sidebar", item.labelKey) : undefined}
                         >

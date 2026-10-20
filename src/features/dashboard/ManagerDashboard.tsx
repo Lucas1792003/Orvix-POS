@@ -109,8 +109,8 @@ export const ManagerDashboard = ({ currentUser, shopId, shops }: ManagerDashboar
   );
 
   const topProducts = useMemo(
-    () => calculateTopProducts(rangedSales, saleItems, products, 5),
-    [rangedSales, saleItems, products]
+    () => calculateTopProducts(rangedSales, saleItems, products, 5, refunds),
+    [rangedSales, saleItems, products, refunds]
   );
 
   // Full low-stock list for this shop, sorted most-urgent-first. The card
@@ -138,10 +138,11 @@ export const ManagerDashboard = ({ currentUser, shopId, shops }: ManagerDashboar
     [purchaseOrders, shopId]
   );
   const categoryData = useMemo(
-    () => calculateSalesByCategoryPercent(sales, saleItems, products, shopId, range),
-    [sales, saleItems, products, shopId, range]
+    () => calculateSalesByCategoryPercent(sales, saleItems, products, shopId, range, undefined, refunds),
+    [sales, saleItems, products, shopId, range, refunds]
   );
-  const paymentSplit = useMemo(() => calculateCashVsOther(rangedSales), [rangedSales]);
+  // Net of approved refunds, like the revenue headline (ORV-034).
+  const paymentSplit = useMemo(() => calculateCashVsOther(rangedSales, refunds), [rangedSales, refunds]);
   const paymentTotal = paymentSplit.cashRevenue + paymentSplit.otherRevenue;
   const selectedRangeLabel = rangeLabel(copy, range);
 

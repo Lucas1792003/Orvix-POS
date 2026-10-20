@@ -11,14 +11,14 @@ import { Button } from "../components/ui/Button";
 import { downloadCsv } from "../lib/csv";
 import { getEffectiveShopId } from "../lib/utils";
 import { useRangedSales } from "../features/reports/useRangedSales";
+import { calculateProfitByShop } from "../features/reports/profitByShop";
+import { businessToday, isWithinBusinessDays, monthStartKey } from "../lib/businessDay";
 
-// Default report window: start of the current month → today (YYYY-MM-DD).
+// Default report window: start of the current business month → today
+// (YYYY-MM-DD business days, Asia/Yangon — ORV-069).
 const currentMonthRange = () => {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const start = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`;
-  const end = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-  return { start, end };
+  const today = businessToday();
+  return { start: monthStartKey(today), end: today };
 };
 
 export const ProfitReportsPage = () => {
@@ -44,54 +44,15 @@ export const ProfitReportsPage = () => {
 
   // Profit aggregates over the FULL range from the server (not the 1000-row
   // store cache), so long ranges aren't under-counted.
-  const { sales, saleItems, loading: salesLoading, error: salesError } =
+  const { sales, saleItems, refunds, loading: salesLoading, error: salesError } =
     useRangedSales(range.start, range.end, effectiveShopId);
 
-  // Calculate profit by shop
-  const profitByShop = useMemo(() => {
-    const result: { shopId: string; shopName: string; revenue: number; cost: number; profit: number; margin: number }[] = [];
-
-    shops.forEach((shop) => {
-      if (effectiveShopId && shop.id !== effectiveShopId) return;
-
-      const shopSales = sales.filter((s) => {
-        if (s.shopId !== shop.id) return false;
-        if (s.status === "VOID") return false;
-        const saleDate = s.createdAt.slice(0, 10);
-        if (range.start && saleDate < range.start) return false;
-        if (range.end && saleDate > range.end) return false;
-        return true;
-      });
-
-      const revenue = shopSales.reduce((sum, s) => sum + s.totalMmk, 0);
-      let cost = 0;
-
-      shopSales.forEach((sale) => {
-        const items = saleItems.filter((i) => i.saleId === sale.id);
-        items.forEach((item) => {
-          // Prefer the cost captured at sale time (migration 041); fall back to
-          // the product's current cost for sales made before the snapshot.
-          const unitCost =
-            item.unitCostMmkSnapshot ?? products.find((p) => p.id === item.productId)?.costMmk ?? 0;
-          cost += unitCost * item.qtyUnits;
-        });
-      });
-
-      const profit = revenue - cost;
-      const margin = revenue > 0 ? (profit / revenue) * 100 : 0;
-
-      result.push({
-        shopId: shop.id,
-        shopName: shop.name,
-        revenue,
-        cost,
-        profit,
-        margin,
-      });
-    });
-
-    return result;
-  }, [shops, sales, saleItems, products, range, effectiveShopId]);
+  // Profit by shop — the dashboard's money rules (ORV-034) over business
+  // days (ORV-069); see features/reports/profitByShop.ts.
+  const profitByShop = useMemo(
+    () => calculateProfitByShop({ shops, sales, saleItems, refunds, products, range, shopId: effectiveShopId }),
+    [shops, sales, saleItems, refunds, products, range, effectiveShopId],
+  );
 
   // Calculate stock valuation
   const stockValuation = useMemo(() => {
@@ -123,11 +84,7 @@ export const ProfitReportsPage = () => {
   const transferSummary = useMemo(() => {
     const completedTransfers = transfers.filter((t) => {
       if (t.status !== "COMPLETED") return false;
-      if (t.completedAt) {
-        const date = t.completedAt.slice(0, 10);
-        if (range.start && date < range.start) return false;
-        if (range.end && date > range.end) return false;
-      }
+      if (t.completedAt && !isWithinBusinessDays(t.completedAt, range.start, range.end)) return false;
       return true;
     });
 
@@ -166,11 +123,7 @@ export const ProfitReportsPage = () => {
     const receivedPOs = purchaseOrders.filter((po) => {
       if (po.status !== "RECEIVED") return false;
       if (effectiveShopId && po.shopId !== effectiveShopId) return false;
-      if (po.receivedAt) {
-        const date = po.receivedAt.slice(0, 10);
-        if (range.start && date < range.start) return false;
-        if (range.end && date > range.end) return false;
-      }
+      if (po.receivedAt && !isWithinBusinessDays(po.receivedAt, range.start, range.end)) return false;
       return true;
     });
 

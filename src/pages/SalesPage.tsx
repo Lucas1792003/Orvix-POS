@@ -23,17 +23,22 @@ import {
 } from "../features/sales/dailySalesReport";
 import { formatMonthLabel, getMonthBounds, inCurrentMonth } from "../features/sales/monthCycle";
 import { WeeklyReportCountdown } from "../features/sales/WeeklyReportCountdown";
+import { businessDayKey, businessToday, dayKeyToDisplayDate, isDayKey } from "../lib/businessDay";
+import { filterSalesByBusinessDay, groupSalesByBusinessDay } from "../features/sales/salesDayGroups";
+
+// A business-day key shown as that calendar date on any device
+// (`formatDate("YYYY-MM-DD")` parses it as UTC midnight: the day before
+// west of UTC).
+const formatDayKey = (key: string) => (isDayKey(key) ? formatDate(dayKeyToDisplayDate(key)) : key);
 
 export const SalesPage = () => {
   const navigate = useNavigate();
   const [status, setStatus] = useState("all");
   const [cashier, setCashier] = useState("all");
   const [search, setSearch] = useState("");
-  // Default to today's sales; the calendar filter / "show all days" can widen it.
-  const [dayFilter, setDayFilter] = useState(() => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  });
+  // Default to today's sales (business day, Asia/Yangon — ORV-069); the
+  // calendar filter / "show all days" can widen it.
+  const [dayFilter, setDayFilter] = useState(() => businessToday());
   const [dateFilterOpen, setDateFilterOpen] = useState(false);
   const [sendingDailyReport, setSendingDailyReport] = useState(false);
   const toast = useToast();
@@ -45,6 +50,7 @@ export const SalesPage = () => {
   const users = useDataStore((state) => state.users);
   const sales = useDataStore((state) => state.sales);
   const saleItems = useDataStore((state) => state.saleItems);
+  const refunds = useDataStore((state) => state.refundVoidRequests);
   const products = useDataStore((state) => state.products);
   const shifts = useDataStore((state) => state.shifts);
 
@@ -72,14 +78,10 @@ export const SalesPage = () => {
 
   // Recomputed each render (cheap) so the month boundaries stay current.
   const monthBounds = getMonthBounds();
-  // Local YYYY-MM-DD for the date input + its min/max (the calendar is
-  // limited to the current month, which is all this page shows).
-  const toDateInput = (ms: number) => {
-    const d = new Date(ms);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  };
-  const monthMin = toDateInput(monthBounds.thisStart);
-  const monthMax = toDateInput(monthBounds.nextStart - 86_400_000);
+  // Business-day YYYY-MM-DD for the date input + its min/max (the calendar
+  // is limited to the current month, which is all this page shows).
+  const monthMin = businessDayKey(monthBounds.thisStart) ?? "";
+  const monthMax = businessDayKey(monthBounds.nextStart - 1) ?? "";
 
   // The "Email …'s CSV" button targets the day the admin is viewing: today
   // by default, or the day picked in the calendar filter.
@@ -144,26 +146,18 @@ export const SalesPage = () => {
     productsById,
   ]);
 
+  // Business days, not the UTC date (ORV-069); day totals net of refunds
+  // (ORV-034) — see features/sales/salesDayGroups.ts.
   const displayedSales = useMemo(
-    () => (dayFilter === "all" ? filteredSales : filteredSales.filter((s) => s.createdAt.slice(0, 10) === dayFilter)),
+    () => filterSalesByBusinessDay(filteredSales, dayFilter),
     [filteredSales, dayFilter]
   );
 
-  // Group the displayed sales by day so each day is a clearly-headed section.
-  const groupedByDay = useMemo(() => {
-    const groups = new Map<string, typeof displayedSales>();
-    for (const sale of displayedSales) {
-      const day = sale.createdAt.slice(0, 10);
-      const bucket = groups.get(day);
-      if (bucket) bucket.push(sale);
-      else groups.set(day, [sale]);
-    }
-    return [...groups.entries()].map(([day, daySales]) => ({
-      day,
-      sales: daySales,
-      normalTotal: daySales.reduce((sum, s) => sum + (s.status === "NORMAL" ? s.totalMmk : 0), 0),
-    }));
-  }, [displayedSales]);
+  // Group the displayed sales by business day so each day is a clearly-headed section.
+  const groupedByDay = useMemo(
+    () => groupSalesByBusinessDay(displayedSales, refunds),
+    [displayedSales, refunds]
+  );
 
   const exportSales = () => {
     const rows = filteredSales.map((sale) => ({
@@ -283,7 +277,7 @@ export const SalesPage = () => {
                   ? "Sending..."
                   : emailIsToday
                     ? "Email today's CSV"
-                    : `Email ${formatDate(emailTargetDate)} CSV`}
+                    : `Email ${formatDayKey(emailTargetDate)} CSV`}
               </Button>
             )}
           </>
@@ -322,7 +316,7 @@ export const SalesPage = () => {
               onClick={() => setDateFilterOpen((open) => !open)}
             >
               <span className="material-symbols-rounded mr-1 text-base">calendar_month</span>
-              {dayFilter === "all" ? "Filter by date" : formatDate(dayFilter)}
+              {dayFilter === "all" ? "Filter by date" : formatDayKey(dayFilter)}
             </Button>
             {dateFilterOpen && (
               <>
@@ -367,9 +361,9 @@ export const SalesPage = () => {
             groupedByDay.map((group) => (
               <div key={group.day} className="space-y-2">
                 <div className="flex items-center justify-between px-1">
-                  <div className="text-sm font-semibold text-slate-700">{formatDate(group.day)}</div>
+                  <div className="text-sm font-semibold text-slate-700">{formatDayKey(group.day)}</div>
                   <div className="text-xs text-slate-500">
-                    {group.sales.length} sale{group.sales.length === 1 ? "" : "s"} · {formatMmk(group.normalTotal)}
+                    {group.sales.length} sale{group.sales.length === 1 ? "" : "s"} · {formatMmk(group.netTotal)}
                   </div>
                 </div>
                 <SalesTable

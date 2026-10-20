@@ -111,8 +111,8 @@ export const AdminDashboard = ({ currentUser, shops }: AdminDashboardProps) => {
   const orders = calculateSalesCount(rangedSales);
   const avgOrder = calculateAvgOrderValue(revenue, orders);
   const cost = useMemo(
-    () => calculateCostOfGoods(rangedSales, saleItems, products),
-    [rangedSales, saleItems, products]
+    () => calculateCostOfGoods(rangedSales, saleItems, products, refunds),
+    [rangedSales, saleItems, products, refunds]
   );
   const profit = calculateProfit(revenue, cost);
   const margin = calculateProfitMargin(revenue, profit);
@@ -161,17 +161,18 @@ export const AdminDashboard = ({ currentUser, shops }: AdminDashboardProps) => {
   );
 
   const categoryData = useMemo(
-    () => calculateSalesByCategoryPercent(sales, saleItems, products, metricShopId, range),
-    [sales, saleItems, products, metricShopId, range]
+    () => calculateSalesByCategoryPercent(sales, saleItems, products, metricShopId, range, undefined, refunds),
+    [sales, saleItems, products, metricShopId, range, refunds]
   );
 
   // Top selling products in the current shop+range scope. Ranked by line
-  // revenue; VOID/REFUNDED are excluded upstream by `scopeSales` (so
-  // they never enter `rangedSales`). Cost/profit columns are only
+  // revenue; VOID sales are excluded upstream by `scopeSales` (so they
+  // never enter `rangedSales`). Lines of partly refunded sales still rank
+  // net of units given back by approved refunds (ORV-034). Cost/profit columns are only
   // rendered when the user holds `report:shop_profit`.
   const topProducts = useMemo(
-    () => calculateTopProducts(rangedSales, saleItems, products, 5),
-    [rangedSales, saleItems, products]
+    () => calculateTopProducts(rangedSales, saleItems, products, 5, refunds),
+    [rangedSales, saleItems, products, refunds]
   );
   const topProductsRevenueTotal = useMemo(
     () => topProducts.reduce((sum, row) => sum + row.revenue, 0),
@@ -189,6 +190,7 @@ export const AdminDashboard = ({ currentUser, shops }: AdminDashboardProps) => {
     products,
     inventory,
     metricShopId,
+    refunds,
   });
 
   // Full low-stock list (active shops only), sorted most-urgent-first. The
