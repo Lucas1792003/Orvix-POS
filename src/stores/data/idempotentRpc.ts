@@ -6,6 +6,8 @@ import { retryAfterRemainingMs } from "../../lib/retryAfter";
 import { touchAuthCache } from "../authCache";
 import { localDb, SYNC_STATE_KEYS } from "../../lib/localDb";
 import { currentBackendOrigin } from "../../lib/backendOrigin";
+import { RecoveryV1Blocked, requireRecoveryV1Write } from "../../recovery/client";
+import { captureTransmission, EvidenceIntegrityError } from "../../recovery/journalCapture";
 import {
   currentOpEpoch, noteEpochStale, noteRecoveryRefusal, noteWitness, recoveryBlocksSending, recoveryCapability, recoveryMessage,
   recoveryView, storedEpoch, v87Context,
@@ -580,6 +582,31 @@ interface CallOptions {
 /** One attempt: through the executor when the server has it, else direct.
  *  Each supabase-js builder is created and awaited exactly once. */
 async function attempt(name: string, args: Record<string, unknown>, timeoutMs: number, actorId: string | null, opEpoch?: string | null): Promise<RpcOutcome> {
+  // Final common financial boundary, including automatic retries. No signed
+  // identity is regenerated and no old operation is given a replacement key.
+  try {
+    const { useAuthStore } = await import("../authStore");
+    const { useAppStore } = await import("../appStore");
+    const { getJournalRecord } = await import("./opJournal");
+    const key = String(args[IDEMPOTENCY_KEY_ARG]);
+    const original = await getJournalRecord(key);
+    const orgId = original?.orgId ?? useAuthStore.getState().currentOrgId ?? null;
+    const shopId = original?.shopId ?? (typeof args.p_shop_id === "string" ? args.p_shop_id : useAppStore.getState().currentShopId ?? null);
+    if (await requireRecoveryV1Write(orgId, shopId)) {
+      await captureTransmission({ orgId, shopId, backendOrigin: original?.backendOrigin ?? currentBackendOrigin(), actorId,
+        key, rpc: name, args, opEpoch: opEpoch ?? null, createdAt: original?.createdAt ?? new Date().toISOString() });
+    }
+  } catch (error) {
+    // Nothing was sent in any of these cases. A communication failure with a
+    // recovery-aware server, a verified restriction or an unavailable device
+    // authorization is a HOLD: the operation stays pending with its original key
+    // and is retried later under the existing idempotency rules (never re-keyed).
+    // Only contradictory local evidence stops it for a person (conflict).
+    const message = error instanceof Error ? error.message : "Recovery evidence unavailable";
+    const integrity = error instanceof EvidenceIntegrityError || (error instanceof RecoveryV1Blocked && error.reason === "integrity");
+    return { data: null, error: new RpcError(message, { code: "PT503", status: 503,
+      failure: integrity ? { ...failureInfo("RECOVERY"), mayHaveCommitted: false, retryable: false } : { ...failureInfo("RECOVERY"), mayHaveCommitted: false } }) };
+  }
   // 087 backend: executor RPCs only through op_execute_v87 (legacy paths are closed there)
   // (an operation that carries an epoch was created against an 087 server: always the v87 path)
   if (EXECUTOR_RPCS.has(name) && (v87Routing() || opEpoch)) return viaExecutor87(name, args, timeoutMs, actorId, opEpoch);

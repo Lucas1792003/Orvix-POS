@@ -1,4 +1,5 @@
 import { supabase } from "../../lib/supabase";
+import { requireRecoveryV1Write } from "../../recovery/client";
 import { uuidV7TimeMs } from "../../lib/executorRpcs";
 import { mayDepend, type DependencyContext, type DependencySubject } from "./dependencies";
 import { belongsToBackend, currentBackendOrigin, quarantineForeignOutboxEntries } from "../../lib/backendOrigin";
@@ -938,6 +939,12 @@ async function runDrainPass(): Promise<DrainResult> {
     notifyQueueChanged();
   }
   if ((await pendingInQueueOrder()).length === 0) return "drained";
+  try {
+    await requireRecoveryV1Write(useAuthStore.getState().currentOrgId ?? null, null, { requireDevice: false });
+  } catch (error) {
+    useSyncStore.getState().setStatus({ lastTransientError: error instanceof Error ? error.message : "Recovery evidence unavailable; queue preserved." });
+    return "backoff";
+  }
   // W8 Phase 0: the server no longer has records this till had loaded from it
   // (possibly restored from an older backup): nothing is sent or looked up
   // automatically until an owner acknowledges it (Sync page).
@@ -1650,6 +1657,7 @@ export async function retryOutboxEntry(localId: string): Promise<void> {
   // send it to the wrong server. It can only be exported and reconciled.
   const entry = await localDb.syncOutbox.get(localId);
   if (!entry) return;
+  await requireRecoveryV1Write(entry.orgId ?? useAuthStore.getState().currentOrgId ?? null, entry.shopId);
   if (entry.status === "archived") {
     throw new Error("This entry is set aside. An owner restores it first (Set aside list), then it syncs again.");
   }
@@ -1762,6 +1770,7 @@ export async function stopOnServer(localId: string, statement: string): Promise<
   if (text.length < STOP_STATEMENT_MIN) throw new Error(`Write down what you established and why it may be stopped (at least ${STOP_STATEMENT_MIN} characters). Nothing was changed.`);
   const entry = await localDb.syncOutbox.get(localId);
   if (!entry) throw new OutboxActionError("not-found", "This entry is no longer on this till.");
+  await requireRecoveryV1Write(entry.orgId ?? useAuthStore.getState().currentOrgId ?? null, entry.shopId, { requireDevice: false });
   const myOrg = useAuthStore.getState().currentOrgId ?? null;
   if (entry.orgId && entry.orgId !== myOrg) throw new Error("This entry belongs to another organisation; only its own owner can decide it. Nothing was changed.");
   if (entry.status === "quarantined" || !belongsToBackend(entry, currentBackendOrigin())) {
@@ -1918,6 +1927,8 @@ export async function setAsideOutboxEntry(
     throw new OutboxActionError("export-first", "Export pending transactions first (in this session), keep the file, then set the entry aside.");
   }
   const actor = useAuthStore.getState().currentUserId ?? undefined;
+  const before = await localDb.syncOutbox.get(localId);
+  if (before) await requireRecoveryV1Write(before.orgId ?? useAuthStore.getState().currentOrgId ?? null, before.shopId, { requireDevice: false });
   const updated = await localDb.transaction("rw", localDb.syncOutbox, localDb.syncState, async () => {
     const entry = await localDb.syncOutbox.get(localId);
     if (!entry) throw new OutboxActionError("not-found", "This entry is no longer in the queue (it may have synced).");
@@ -1953,6 +1964,8 @@ export async function restoreSetAsideEntry(localId: string): Promise<SyncOutboxE
   if (!isOwnerSession()) {
     throw new OutboxActionError("not-owner", "Only the owner (administrator) can restore a set-aside entry.");
   }
+  const beforeRestore = await localDb.syncOutbox.get(localId);
+  if (beforeRestore) await requireRecoveryV1Write(beforeRestore.orgId ?? useAuthStore.getState().currentOrgId ?? null, beforeRestore.shopId, { requireDevice: false });
   const restored = await localDb.transaction("rw", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, localDb.syncState, async () => {
     const entry = await localDb.syncOutbox.get(localId);
     if (!entry) throw new OutboxActionError("not-found", "This entry is no longer on this till.");

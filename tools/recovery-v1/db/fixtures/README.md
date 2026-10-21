@@ -1,0 +1,3 @@
+`schema-061.scrubbed.sql` is a byte-identical schema-only historical fixture from the existing scrubbed pre-go-live migration workspace, not business data and not a recovery backup. SHA-256: `ed1fadc304ecc51b2ef3024423cb3388eba0c58f7d286f50c41077baa7975270` (263,547 bytes).
+
+Source: `/Users/waiyan/shwephala-migration/20261011T2347Z/schema.scrubbed.sql`. Copied on 2026-10-21 after screening for data sections, COPY-from-stdin, private-key material, quoted JWTs and live API-key literals. The test harness temporarily adapts only platform extensions and a PostgreSQL-17-only grant when restoring to private plain PostgreSQL 16. Actual numbered 062..085/086 source files are then loaded unchanged.

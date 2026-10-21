@@ -1,6 +1,9 @@
 import { localDb, type SyncOutboxEntry, type SyncStateEntry } from "../../lib/localDb";
+import Dexie from "dexie";
 import { getTillId } from "../../lib/tillId";
 import { useAuthStore } from "../authStore";
+import { captureJournal } from "../../recovery/journalCapture";
+import { independentTrustSource } from "../../recovery/trust";
 
 // ----------------------------------------------------------------------
 // Till operation journal (W8/W10 Phase 0, disaster-recovery.md W8).
@@ -134,6 +137,13 @@ export interface JournalRecord {
   /** How many times the server acknowledged the decision (duplicates never
    *  overwrite the first evidence). */
   acks?: number;
+  /** Pointer to a separate immutable signed snapshot. Older/unenrolled
+   * records stay unsigned; the mutable journal never replaces that snapshot. */
+  deviceEvidenceHash?: string;
+  /** Recovery V1: this observation SHOULD have been signed (an independent trust source is
+   *  configured) but no signed evidence could be produced (reason). Makes the gap visible
+   *  instead of leaving an unsigned observation indistinguishable from a legacy one. */
+  deviceEvidenceGap?: string;
   events: JournalEvent[];
 }
 
@@ -221,16 +231,23 @@ function transitionTo(rec: JournalRecord, next: JournalState, evidence: JournalE
 /** Read-modify-write one record INSIDE the caller's transaction (syncState
  *  must be in its scope). `make` builds the record when none exists. */
 async function upsert(key: string, make: () => JournalRecord | null, change: (rec: JournalRecord) => void): Promise<void> {
-  const row = await localDb.syncState.get(keyOf(key));
+  const transaction = Dexie.currentTransaction;
+  if (!transaction) {
+    await localDb.transaction("rw", localDb.syncState, () => upsert(key, make, change));
+    return;
+  }
+  const table = transaction.table<SyncStateEntry, string>("syncState");
+  const row = await table.get(keyOf(key));
   let rec = parseJournal(row);
   if (row && !rec) {
     // An unreadable record is never overwritten: kept beside the new one.
-    await localDb.syncState.put({ key: `${JOURNAL_PREFIX}damaged:${key}:${Date.now()}`, value: row.value, updatedAt: now() });
+    await table.put({ key: `${JOURNAL_PREFIX}damaged:${key}:${Date.now()}`, value: row.value, updatedAt: now() });
   }
   if (!rec) rec = make();
   if (!rec) return;
   change(rec);
-  await localDb.syncState.put({ key: keyOf(key), value: JSON.stringify(rec), updatedAt: rec.updatedAt });
+  if (independentTrustSource()) await captureJournal(rec);
+  await table.put({ key: keyOf(key), value: JSON.stringify(rec), updatedAt: rec.updatedAt });
 }
 
 /** Is this outbox row a financially significant operation the journal covers? */
@@ -536,7 +553,7 @@ export async function backfillJournal(onlineRows: () => Promise<OnlineOpLike[]>)
       const rec = parseJournal(await localDb.syncState.get(keyOf(key)));
       if (rec) {
         rec.backfilled = true;
-        await localDb.syncState.put({ key: keyOf(key), value: JSON.stringify(rec), updatedAt: rec.updatedAt });
+  await localDb.syncState.put({ key: keyOf(key), value: JSON.stringify(rec), updatedAt: rec.updatedAt });
       }
       n += 1;
     });

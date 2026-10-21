@@ -1,6 +1,8 @@
 import { recoveryCodeOf } from "../../lib/failureClass";
 import { refreshRecoveryEpoch } from "./recovery87";
 import { useAuthStore } from "../authStore";
+import { useAppStore } from "../appStore";
+import { requireRecoveryV1Write } from "../../recovery/client";
 import {
   assertNewOperationAllowed, loadedRecoveryOrg, loadRecoveryState, verifiedSinceStart, capabilityCheckedAt, currentOpEpoch, modeForCode, recoveryCapability, recoveryMessage, recoveryView,
   RecoveryBlockedError, offlineFinancialBlockedError, offlineFinancialOpsBlocked, verifiedWithin,
@@ -34,6 +36,7 @@ export function resetRecoveryGateForTests(): void { lastAskAt = 0; }
 export async function gateNewOperation(op: { opEpoch: string | null }): Promise<void> {
   // the durable state as it is NOW (another window may have entered a hold; another organisation may be signed in)
   const org = useAuthStore.getState().currentOrgId ?? null;
+  await requireRecoveryV1Write(org, useAppStore.getState().currentShopId ?? null);
   await loadRecoveryState(org);
   void loadedRecoveryOrg;
   const cap = recoveryCapability();

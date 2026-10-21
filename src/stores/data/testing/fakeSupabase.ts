@@ -591,6 +591,14 @@ function createFakeSupabase() {
   };
 
   const rpc = (name: string, args: Record<string, unknown> = {}) => {
+    // This fixture models an 085/086/087 backend, which predates Safe
+    // Recovery V1. Capability discovery is read-only and must not consume
+    // a financial failure injected by a test for the next actual attempt.
+    if (name === "recovery_v1_status") {
+      const promise = Promise.resolve(MISSING_FUNCTION(name));
+      const builder = { abortSignal: () => builder, then: promise.then.bind(promise) };
+      return builder;
+    }
     if (READ_ONLY_RPCS.has(name)) {
       const mode: RpcMode = queuedModes.shift() ?? defaultMode;
       calls.push({ name, args, mode, replayed: false });

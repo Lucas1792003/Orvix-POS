@@ -37,6 +37,7 @@ import type { ElectronReconcileAttestRequest, ElectronReconcileAttestResult, Ele
 import { isUndecided, refreshSyncStatus } from "./outbox";
 import { executorCapability } from "./idempotentRpc";
 import { belongsToBackend, currentBackendOrigin } from "../../lib/backendOrigin";
+import { requireRecoveryV1Write } from "../../recovery/client";
 
 export type ReconcileErrorCode =
   | "not-found" | "already-reconciled" | "not-reconcilable" | "export-first" | "export-stale" | "invalid"
@@ -98,6 +99,7 @@ export async function reconcileOutboxEntry(localId: string, input: ReconcileInpu
   const now = deps.now ?? (() => new Date());
   const row = await localDb.syncOutbox.get(localId);
   if (!row) throw new ReconcileError("not-found", "This entry is no longer on this till.");
+  await requireRecoveryV1Write(row.orgId ?? null, row.shopId, { requireDevice: false });
   if (row.status === "reconciled") throw new ReconcileError("already-reconciled", "This entry is already reconciled.");
   if (!isReconcilableStatus(row.status)) {
     throw new ReconcileError("not-reconcilable", "This entry is still in the sync queue. Set it aside first, then reconcile it.");

@@ -1,0 +1,14 @@
+{
+  "protocol": "orvix-synthetic-encrypted-dump-smoke-v1",
+  "encryptedRoundTrip": true,
+  "pgRestoreReadAll": true,
+  "byteEquality": true,
+  "inputBytes": 1763,
+  "inputSha256": "3ffa9ad518b01f7c2c36a02fc6d7b6430122647cd515b4f267d0beb54bf2e88e",
+  "outputSha256": "3ffa9ad518b01f7c2c36a02fc6d7b6430122647cd515b4f267d0beb54bf2e88e",
+  "simulatedRecipient": true,
+  "databaseRestoreExecutedByThisTool": false,
+  "fullSupabaseRestoreVerified": false,
+  "independentAvailabilityEstablished": false,
+  "productionKeysCreated": false
+}

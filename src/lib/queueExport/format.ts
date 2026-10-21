@@ -27,8 +27,13 @@ export const QUEUE_EXPORT_FORMAT_VERSION = 2;
  *  (deployment-blocker pass): their raw contents are in the file, and a reader
  *  that does not know them (format ≤ 2) must refuse the file, not drop them. */
 export const QUEUE_EXPORT_FORMAT_VERSION_UNREADABLE = 3;
-export const MAX_FORMAT_VERSION = 3;
-export const SUPPORTED_FORMAT_VERSIONS: readonly number[] = [1, 2, 3];
+/** Recovery V1: the file carries signed device evidence and/or witness receipts
+ *  (owner exports only). A reader that does not know them (format <= 3) must
+ *  refuse the file rather than silently drop the signed history; a format-4 file
+ *  must carry both arrays explicitly (never inferred from their absence). */
+export const QUEUE_EXPORT_FORMAT_VERSION_EVIDENCE = 4;
+export const MAX_FORMAT_VERSION = 4;
+export const SUPPORTED_FORMAT_VERSIONS: readonly number[] = [1, 2, 3, 4];
 export const QUEUE_EXPORT_FILE_EXTENSION = "spqx";
 /** OWASP 2023 guidance for PBKDF2-HMAC-SHA-256. */
 export const KDF_ITERATIONS = 600_000;
@@ -228,7 +233,7 @@ export type QueueExportEntry = z.infer<typeof entrySchema>;
 
 const payloadSchema = z.object({
   format: z.literal(QUEUE_EXPORT_FORMAT),
-  formatVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+  formatVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
   appVersion: z.string(),
   exportedAt: z.string(),
   tillId: z.string(),
@@ -251,9 +256,30 @@ const payloadSchema = z.object({
   /** Format 3: online-operation records the till could not read (raw). */
   unreadableOnlineRecords: z.array(unreadableOnlineRecordSchema).default([]),
   journal: z.array(journalRecordSchema).default([]),
+  /** Format 4 (Recovery V1): signed immutable device evidence, owner-only,
+   * never replay input. Any export redaction is explicit and invalidates
+   * payload/snapshot verification. Absent in files of format <= 3. */
+  deviceEvidence: z.array(z.unknown()).optional(),
+  /** Format 4: witness receipts as stored on the till (never re-signed). */
+  witnessReceipts: z.array(z.unknown()).optional(),
   /** Rows the server no longer had at a later full load (continuity evidence). */
   vanished: z.array(z.object({ key: z.string(), table: z.string(), detectedAt: z.string() }).passthrough()).default([]),
+}).superRefine((p, ctx) => {
+  const need = requiredFormatVersion(p);
+  if (p.formatVersion < need) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["formatVersion"], message: `contents require format ${need}, the file says ${p.formatVersion}` });
+  }
+  if (p.formatVersion === QUEUE_EXPORT_FORMAT_VERSION_EVIDENCE && (!Array.isArray(p.deviceEvidence) || !Array.isArray(p.witnessReceipts))) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["deviceEvidence"], message: "a format-4 file must carry deviceEvidence and witnessReceipts explicitly" });
+  }
 });
+
+/** The lowest format that can carry these contents without a reader dropping them. */
+export function requiredFormatVersion(p: { unreadableOnlineRecords?: readonly unknown[]; deviceEvidence?: readonly unknown[]; witnessReceipts?: readonly unknown[] }): number {
+  if ((p.deviceEvidence?.length ?? 0) > 0 || (p.witnessReceipts?.length ?? 0) > 0) return QUEUE_EXPORT_FORMAT_VERSION_EVIDENCE;
+  if ((p.unreadableOnlineRecords?.length ?? 0) > 0) return QUEUE_EXPORT_FORMAT_VERSION_UNREADABLE;
+  return 1;
+}
 
 export type QueueExportPayload = z.infer<typeof payloadSchema>;
 export type UnreadableOnlineRecordExport = z.infer<typeof unreadableOnlineRecordSchema>;
@@ -448,7 +474,8 @@ export async function encryptQueueExport(
   const iv = options.iv ?? globalThis.crypto.getRandomValues(new Uint8Array(12));
   const head: Omit<QueueExportEnvelope, "ciphertext"> = {
     format: QUEUE_EXPORT_FORMAT,
-    formatVersion: valid.unreadableOnlineRecords.length ? QUEUE_EXPORT_FORMAT_VERSION_UNREADABLE : QUEUE_EXPORT_FORMAT_VERSION,
+    formatVersion: Math.max(requiredFormatVersion(valid), valid.unreadableOnlineRecords.length ? QUEUE_EXPORT_FORMAT_VERSION_UNREADABLE : QUEUE_EXPORT_FORMAT_VERSION,
+      valid.formatVersion === QUEUE_EXPORT_FORMAT_VERSION_EVIDENCE ? QUEUE_EXPORT_FORMAT_VERSION_EVIDENCE : 0),
     encrypted: true,
     header: {
       appVersion: valid.appVersion,
@@ -517,6 +544,11 @@ export async function decryptQueueExport(input: string | unknown, passphrase: st
     throw new QueueExportError("bad-format", "Decrypted contents are not JSON.");
   }
   const payload = validatePayload(value);
+  // The authenticated envelope version must cover what the payload carries (an
+  // older reader decides on the envelope version alone).
+  if (env.formatVersion < requiredFormatVersion(payload)) {
+    throw new QueueExportError("bad-format", `The file's contents need format ${requiredFormatVersion(payload)}, but it is labelled ${env.formatVersion}.`);
+  }
   // The clear summary is authenticated, but check it describes this payload.
   if (canonicalJson(summarizePayload(payload)) !== canonicalJson(env.header.summary)) {
     throw new QueueExportError("bad-format", "The file's summary does not match its contents.");

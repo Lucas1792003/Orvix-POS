@@ -1,0 +1,34 @@
+{
+  "phase_d_regression": "guarded",
+  "stage": 86,
+  "financial_provisionals": true,
+  "counts": {
+    "passed": 428,
+    "failed": 18
+  },
+  "aborted_suites": {
+    "t13_new_org_price_levels": "\tIs the server running locally and accepting connections on that socket?",
+    "t16_completion_url": "PL/pgSQL function recovery_v1.guard_write() line 5 at PERFORM"
+  },
+  "failed_checks": [
+    "7 sales, 8 sale_items, 8 SALE_OUT movements in shop A",
+    "ADMIN A: INSERT products with org_id = org B is rejected",
+    "inventory arithmetic exact: prod-1 = 107-3-4-1 = 99",
+    "precondition: prod-1 = 107, prod-2 = 50",
+    "receipt numbers unique and contiguous 0001..0007 for shop A today",
+    "review: INSERT products with explicit foreign org_id rejected",
+    "review: UPDATE products SET org_id = foreign org rejected",
+    "review: UPDATE shops SET org_id = foreign org rejected",
+    "review: UPDATE suppliers SET org_id = foreign org rejected",
+    "review: UPDATE users SET org_id = foreign org rejected",
+    "sales attributed to the right cashier/shift",
+    "t16/080: base with a path is refused",
+    "t16/080: base with a query is refused",
+    "t16/080: base with a trailing slash is refused by the CHECK",
+    "t16/080: base with upper-case host is refused",
+    "t16/080: base with userinfo is refused",
+    "t16/080: plain http to a non-local host is refused",
+    "t16/080: unknown configuration keys are refused"
+  ],
+  "run_directory": "/private/tmp/orvix-recovery-v1-db-ty3ydw44"
+}

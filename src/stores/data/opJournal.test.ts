@@ -289,27 +289,45 @@ describe("storage failures and damaged records never let a financial operation c
   const quota = () => Object.assign(new Error("QuotaExceededError: the quota has been exceeded"), { name: "QuotaExceededError" });
 
   it("IndexedDB QUOTA when the journal record is written: nothing is saved and NOTHING is sent", async () => {
-    const put = localDb.syncState.put.bind(localDb.syncState);
-    vi.spyOn(localDb.syncState, "put").mockImplementation(((v: { key: string }) => (v.key.startsWith(JOURNAL_PREFIX) ? Promise.reject(quota()) : put(v as never))) as never);
+    const put = IDBObjectStore.prototype.put;
+    let failures = 0;
+    // Fault the actual storage boundary, including transaction-bound Dexie tables.
+    vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+      if (this.name === "syncState" && (value as { key?: string }).key?.startsWith(JOURNAL_PREFIX)) {
+        failures += 1;
+        throw quota();
+      }
+      return put.call(this, value, key);
+    });
     const { get } = makeSaleStore();
     await expect(get().createSale(saleInput())).rejects.toThrow(/Not saved and nothing was sent|quota/i);
     expect(fake.calls.filter((c) => c.name === "op_execute" || c.name === "complete_sale")).toHaveLength(0);
     expect(await rows()).toHaveLength(0);
+    expect(failures).toBe(1);
     // offline: the staging fails as a whole (nothing queued)
     vi.stubGlobal("navigator", { onLine: false });
     await expect(get().createSale(saleInput())).rejects.toThrow();
     expect(await rows()).toHaveLength(0);
+    expect(failures).toBe(2);
   });
 
   it("QUOTA when a COMMITTED sale is acknowledged: the queue row is kept (not deleted), the sale is not reported failed, and it is confirmed later with its key — once", async () => {
     const { get } = makeSaleStore();
-    const put = localDb.syncState.put.bind(localDb.syncState);
+    const put = IDBObjectStore.prototype.put;
     let fail = false;
-    vi.spyOn(localDb.syncState, "put").mockImplementation(((v: { key: string; value?: string }) =>
-      fail && v.key.startsWith(JOURNAL_PREFIX) && (v.value ?? "").includes('"committed"') ? Promise.reject(quota()) : put(v as never)) as never);
+    let failures = 0;
+    vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+      const row = value as { key?: string; value?: string };
+      if (fail && this.name === "syncState" && row.key?.startsWith(JOURNAL_PREFIX) && (row.value ?? "").includes('"committed"')) {
+        failures += 1;
+        throw quota();
+      }
+      return put.call(this, value, key);
+    });
     fail = true;
     await get().createSale(saleInput());                               // resolves: the server committed it
     expect(await rows()).toHaveLength(1);                              // kept for confirmation
+    expect(failures).toBeGreaterThan(0);
     fail = false;
     restart();
     makeSaleStore();
