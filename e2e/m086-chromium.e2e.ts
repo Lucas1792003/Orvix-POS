@@ -178,12 +178,13 @@ test("M4 H1: committed, reply lost, crash; after restart the server cannot be as
     const held = (await idbSnapshot(R)).outbox.find((r: any) => r.idempotencyKey === key);
     expect(held.status).toBe("conflict");
     const execBefore = R.rpcBodies.filter((b) => b.name === "op_execute").length;
-    // the cashier rings the same sale again and says it is a separate, new one
+    // the cashier rings the same sale again and chooses to replace the earlier attempt (the decide("new")
+    // choice; labelled "This is a separate, new one" before 4971b55, "Same one entered again — replace …" since)
     await R.posAddByCard(P1);
     await confirmPayment(R);
     // the duplicate-sale prompt lists the HELD earlier attempt
     await expect(R.page.getByRole("heading", { name: "Awaiting confirmation" })).toBeVisible({ timeout: 20_000 });
-    await R.page.getByRole("button", { name: "This is a separate, new one" }).click();
+    await R.page.getByRole("button", { name: /^Same one entered again — replace the earlier attempt/ }).click();
     await R.page.waitForTimeout(3000);
     expect(R.rpcBodies.filter((b) => b.name === "op_execute").length).toBe(execBefore);   // nothing new sent
     expect(await serverSales()).toBe(salesBefore + 1);                                    // no second sale
@@ -243,7 +244,7 @@ test("M5 A (two windows, real IndexedDB + Web Locks): the earlier sale commits a
       return (await idbSnapshot(T)).outbox.some((r: any) => r.localId === row.localId);
     }, { timeout: 180_000, intervals: [2000] }).toBe(false);
     const newKeysBefore = T.rpcBodies.filter((b) => b.name === "op_execute" && (b.body as any)?.p_key !== row.idempotencyKey).length;
-    await T.page.getByRole("button", { name: "This is a separate, new one" }).click();
+    await T.page.getByRole("button", { name: /^Same one entered again — replace the earlier attempt/ }).click();
     const texts: string[] = [];
     for (let i = 0; i < 20; i++) {
       texts.push(...(await T.page.locator('[role="status"], [role="alert"], [data-sonner-toast], li[role="status"]').allInnerTexts().catch(() => [])));
