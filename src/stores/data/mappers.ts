@@ -96,11 +96,7 @@ export const mapProductUnit = (r: any): ProductUnit => ({
   productId: r.product_id,
   name: r.name,
   baseQuantity: r.base_quantity,
-  // `price_mmk` is the legacy column read once after migration 027 ships
-  // (kept here only to survive a partial deploy where the column briefly
-  // overlaps both names). After the migration runs everywhere, the
-  // `price_mmk` branch never matches.
-  salePriceMmk: r.sale_price_mmk ?? r.price_mmk,
+  salePriceMmk: r.sale_price_mmk,
   purchasePriceMmk: r.purchase_price_mmk ?? undefined,
   isDefault: r.is_default,
   isActive: r.is_active,

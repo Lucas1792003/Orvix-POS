@@ -23,7 +23,7 @@
 //
 // Needs E2E_QA_TOTP_SECRET like spec A/C/D/G/H. Main's owner check reads
 // E2E_SUPABASE_URL / E2E_ANON_KEY from the harness env (unpackaged app with
-// SHWE_POS_E2E=1 only; electron/main.cjs).
+// ORVIX_POS_E2E=1 only; electron/main.cjs).
 import { test, expect } from "@playwright/test";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";

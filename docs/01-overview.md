@@ -1,6 +1,6 @@
 # 01 · Overview
 
-Shwe Phala POS is a multi-shop point-of-sale and inventory system. It is a
+Orvix POS is a multi-shop point-of-sale and inventory system. It is a
 React 19 + TypeScript + Vite frontend on top of **Supabase Auth + PostgreSQL**.
 Business data lives in Supabase; localStorage holds only UI preferences and
 the Supabase Auth session.
@@ -81,7 +81,7 @@ priorities:
 
 - Run the live Supabase RLS / RPC verification against the target project.
 - Apply migrations through `047`; deploy `admin-2fa`; enable TOTP MFA.
-- Move `src/data/seedSupabase.ts` out of browser source.
+- Seeding is done with `npm run seed:service-role` (`scripts/seed/seedServiceRole.ts`); no browser seed exists.
 - Add browser-level Playwright smoke tests (store + mocked-Supabase flow
   tests already cover checkout / receive / transfer / refund logic).
 - Add Vite manualChunks / dynamic import for the main bundle (~1.5 MB).

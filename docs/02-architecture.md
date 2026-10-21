@@ -53,7 +53,7 @@ src/
     print.ts           Receipt printing — Electron silent print, else window.print()
     utils.ts           Formatting, getEffectiveShopId, normalizeAmountInput, …
   types/domain.ts    TypeScript domain model (User, Sale, Inventory, …)
-  data/seedSupabase.ts  Dev-only seed; refuses to run in browser by default
+scripts/seed/        Seeding: `npm run seed:service-role` (seedServiceRole.ts); nothing seeds from the browser
 supabase/
   schema.sql         Base schema
   migrations/        Ordered SQL migrations (apply in numeric order)

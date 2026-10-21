@@ -71,7 +71,7 @@ function requestUrl(input: unknown): string {
  * an uninstall function. Installing twice is a no-op.
  */
 export function installHostedBackendGuard(target: typeof globalThis = globalThis): () => void {
-  const marker = "__shweHostedBackendGuard";
+  const marker = "__orvixHostedBackendGuard";
   const holder = target as typeof globalThis & { [marker]?: () => void };
   if (holder[marker]) return holder[marker];
 

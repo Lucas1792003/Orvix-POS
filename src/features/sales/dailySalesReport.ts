@@ -40,16 +40,6 @@ interface DailySalesReportInput {
   shops: Shop[];
 }
 
-export interface DailySalesReport {
-  reportDate: string;
-  reportDateLabel: string;
-  filename: string;
-  subject: string;
-  csv: string;
-  rowCount: number;
-  saleCount: number;
-}
-
 /**
  * The business day (`YYYY-MM-DD`, Asia/Yangon) of an instant — the day a
  * sale belongs to in the daily report (ORV-069). Kept under its old name
@@ -210,31 +200,6 @@ const indexInputs = (input: DailySalesReportInput) => {
     else saleItemsBySaleId.set(item.saleId, [item]);
   });
   return { shopsById, usersById, productsById, saleItemsBySaleId };
-};
-
-/**
- * Single-CSV variant (every shop in one file). Kept for callers that
- * still want a combined export — the per-shop email path uses
- * `buildDailySalesReportsByShop` below.
- */
-export const buildDailySalesReport = (input: DailySalesReportInput): DailySalesReport => {
-  const context = indexInputs(input);
-  const reportDateLabel = formatDate(getDateFromLocalValue(input.reportDate));
-  const dailySales = input.sales
-    .filter((sale) => getLocalDateValue(sale.createdAt) === input.reportDate)
-    .sort(sortSalesNewestFirst);
-
-  const { rows, saleCount } = buildCsvRowsForSales(dailySales, reportDateLabel, context);
-
-  return {
-    reportDate: input.reportDate,
-    reportDateLabel,
-    filename: `daily-sales-${input.reportDate}.csv`,
-    subject: `Shwe PhaLar daily sales report - ${reportDateLabel}`,
-    csv: toCsv(rows, dailySalesReportHeaders),
-    rowCount: rows.length,
-    saleCount,
-  };
 };
 
 // ============================================================

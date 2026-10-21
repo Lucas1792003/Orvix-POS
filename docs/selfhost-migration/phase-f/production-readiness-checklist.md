@@ -1,4 +1,4 @@
-# Production-readiness checklist — Shwe Pha Lar POS on the self-hosted backend
+# Production-readiness checklist — Orvix POS on the self-hosted backend
 
 Private. Created 2026-10-15, updated 2026-10-16 and 2026-10-19 (A10, A11, E7). One list; every item has an owner, a state and the evidence that closes it. **Nothing on this list is executed by the engineer without the owner's explicit approval for that item.** Supersedes the ordering in [`../next-phase/release-checklist.md`](../next-phase/release-checklist.md) where they differ; that file keeps the detailed release mechanics (version, rollback build, pre-release, promotion).
 

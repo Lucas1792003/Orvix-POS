@@ -255,12 +255,6 @@ function buildPayload(
   };
 }
 
-/** Counts only (for the dialog, before anything is decrypted or written). */
-/** Unresolved online-only money operations (of `orgId`, or the whole till). */
-export async function countUnresolvedOnlineOperations(db: LocalDb, orgId: string | null = null): Promise<number> {
-  return (await countOnlineRecords(db, orgId)).total;
-}
-
 /** The syncState keys of every unresolved online operation and unreadable
  *  record on the till (any organisation) — the updater guard counts them as
  *  unsynced work. Throws when the store cannot be read (the guard then

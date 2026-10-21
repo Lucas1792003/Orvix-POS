@@ -60,15 +60,6 @@ const CHECKS: Record<string, Check> = {
   approve_refund_request: (d) => require(d, { request: "id-object", sale: "id-object", movements: "array", inventory: "array", auditLogs: "array" }),
 };
 
-/** Offline-capable RPCs (the outbox may queue them). */
-const OFFLINE_CAPABLE = new Set([
-  "complete_sale", "adjust_stock", "open_shift", "close_shift", "create_refund_void_request", "receive_purchase_order",
-  "record_supplier_payment", "dispatch_stock_transfer", "receive_stock_transfer",
-]);
-
-/** RPCs whose replies are validated (every offline-capable one). */
-export const VALIDATED_RPCS = new Set([...Object.keys(CHECKS)].filter((name) => OFFLINE_CAPABLE.has(name)));
-
 /**
  * Why `data` is not an acceptable reply for `rpc`, or null when it is.
  * RPCs without a registered shape only need a non-null reply.

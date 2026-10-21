@@ -1,7 +1,7 @@
 # Organization-isolation security audit
 
 A repeatable, automated audit that proves one organization (and its shops) in
-the Shwe Pha Lar POS cannot read, write, or act on another organization's data
+the Orvix POS cannot read, write, or act on another organization's data
 through any API surface — PostgREST tables/views, RPCs, storage, the phone
 upload flow, and the Edge Functions. It runs against a **disposable, isolated
 stack on 127.0.0.1 only** (synthetic data), at migration **081** (= production)

@@ -1,60 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { Inventory } from "../../types";
-import { getInventoryRecord } from "./selectors";
 
 // Inventory is per-shop: products are a shared catalog, but a stock row is
-// keyed by (shopId, productId). These tests pin that model so a regression
-// that treats stock as one global quantity is caught.
-
-// The same product (prod-1) exists in two shops with DIFFERENT stock.
-const inventory: Inventory[] = [
-  { shopId: "shop-a", productId: "prod-1", qtyBaseUnits: 30 },
-  { shopId: "shop-b", productId: "prod-1", qtyBaseUnits: 5 },
-  { shopId: "shop-a", productId: "prod-2", qtyBaseUnits: 12 },
-];
-
-describe("inventory is scoped per shop", () => {
-  it("the same product has independent stock in each shop", () => {
-    expect(getInventoryRecord(inventory, "shop-a", "prod-1")?.qtyBaseUnits).toBe(30);
-    expect(getInventoryRecord(inventory, "shop-b", "prod-1")?.qtyBaseUnits).toBe(5);
-  });
-
-  it("a stock lookup needs a shopId — productId alone is ambiguous", () => {
-    const productIdOnly = inventory.filter((i) => i.productId === "prod-1");
-    expect(productIdOnly).toHaveLength(2); // productId is NOT a unique key
-    expect(getInventoryRecord(inventory, "shop-a", "prod-1")).not.toBe(
-      getInventoryRecord(inventory, "shop-b", "prod-1"),
-    );
-  });
-
-  it("returns undefined for a shop that has no row for the product", () => {
-    expect(getInventoryRecord(inventory, "shop-b", "prod-2")).toBeUndefined();
-  });
-
-  it("never collapses both shops into one global quantity", () => {
-    const a = getInventoryRecord(inventory, "shop-a", "prod-1")?.qtyBaseUnits ?? 0;
-    const b = getInventoryRecord(inventory, "shop-b", "prod-1")?.qtyBaseUnits ?? 0;
-    // A global sum would (wrongly) report 35 — the bug fixed in ProductsManagePage.
-    const fakeGlobal = inventory
-      .filter((i) => i.productId === "prod-1")
-      .reduce((sum, i) => sum + i.qtyBaseUnits, 0);
-    expect(fakeGlobal).toBe(35);
-    expect(a).not.toBe(fakeGlobal);
-    expect(b).not.toBe(fakeGlobal);
-  });
-
-  it("a shop-scoped user only ever sees their own shop's rows", () => {
-    // RLS (migration 015) enforces this server-side; the client view model
-    // must match — a manager of shop-a filters inventory to shop-a.
-    const managerShopA = inventory.filter((i) => i.shopId === "shop-a");
-    expect(managerShopA.every((i) => i.shopId === "shop-a")).toBe(true);
-    expect(managerShopA.some((i) => i.shopId === "shop-b")).toBe(false);
-    // Admin views each shop separately by selecting it.
-    expect(inventory.filter((i) => i.shopId === "shop-b")).toHaveLength(1);
-  });
-});
+// keyed by (shopId, productId). These characterization tests pin that model
+// in the server-side RPC SQL so a regression that treats stock as one global
+// quantity is caught. (Moved verbatim from the former selectors.test.ts when
+// the unused client selector was removed.)
 
 // ---- RPC SQL: every inventory write is keyed by (shop_id, product_id) -----
 

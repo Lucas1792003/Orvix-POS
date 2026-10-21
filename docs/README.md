@@ -1,6 +1,6 @@
-# Shwe Phala POS Documentation
+# Orvix POS Documentation
 
-Shwe Phala POS is a multi-shop POS + inventory system. React 19 +
+Orvix POS is a multi-shop POS + inventory system. React 19 +
 TypeScript + Vite on top of **Supabase Auth + PostgreSQL**. RLS is on;
 critical operational writes go through `SECURITY DEFINER` RPCs;
 business data lives in Supabase, not localStorage. Admin sign-in adds a

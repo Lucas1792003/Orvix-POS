@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# functions-router.sh — keep the ShwePhaLa allow-list in the self-hosted
+# functions-router.sh — keep the Orvix POS allow-list in the self-hosted
 # edge-functions router (volumes/functions/main/index.ts) reproducible and
 # upgrade-safe.
 #

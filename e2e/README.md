@@ -46,7 +46,7 @@ on purpose: both would write the anon key / QA bearer tokens to disk
 | Path | Role |
 |---|---|
 | `playwright.config.ts` | serial, one worker, dev server + global setup/teardown |
-| `helpers/terminal.ts` | the terminal abstraction: launch Electron (`SHWE_POS_E2E=1`, isolated `userData`) or Chromium; login / TOTP / shift / POS / toast helpers; failure injection (origin cut, 503 routes, commit-then-abort, Realtime proxy); IndexedDB/localStorage access |
+| `helpers/terminal.ts` | the terminal abstraction: launch Electron (`ORVIX_POS_E2E=1`, isolated `userData`) or Chromium; login / TOTP / shift / POS / toast helpers; failure injection (origin cut, 503 routes, commit-then-abort, Realtime proxy); IndexedDB/localStorage access |
 | `helpers/consistency.ts` | `assertConsistency()` — the data-consistency gate run after every spec (duplicate sales via `helpers/saleLedger.ts`) |
 | `helpers/db.ts` | service-role reads and `psql` over ssh (re-uses `src/live/liveHelpers.ts`) |
 | `helpers/totp.ts`, `helpers/evidence.ts`, `helpers/env.ts` | TOTP generator, evidence ledger, environment |

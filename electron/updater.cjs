@@ -134,7 +134,7 @@ function setupUpdater(deps) {
       defaultId: 0,
       cancelId: 0,
       title: "Update waiting",
-      message: `Shwe Pha La POS ${downloadedVersion} is ready, but it will not install yet.`,
+      message: `Orvix POS ${downloadedVersion} is ready, but it will not install yet.`,
       detail: `${decision.message}\n\nNothing is lost by waiting. The app keeps working on this version.`,
     });
     if (result.response === 1) send("updates:request", { action: "open-export" });
@@ -255,7 +255,7 @@ function setupUpdater(deps) {
       defaultId: 0,
       cancelId: 1,
       title: "Update ready",
-      message: `Shwe Pha La POS ${info.version} has been downloaded.`,
+      message: `Orvix POS ${info.version} has been downloaded.`,
       detail: "Restart now to install it, or it will install the next time you quit the app (only once every sale has synced).",
     })).then((result) => {
       if (result.response === 0) requestInstall("dialog");

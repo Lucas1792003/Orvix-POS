@@ -3,7 +3,7 @@ import type { Sale, Shop, User } from "../../types";
 import { Badge } from "../ui/Badge";
 import { Card } from "../ui/Card";
 import { Table, TableContainer, TBody, TD, TH, THead, TR } from "../ui/Table";
-import { formatDateTime } from "../../lib/utils";
+import { formatAmount, formatDateTime } from "../../lib/utils";
 
 /** One priced line on the voucher grid. `code` is the product SKU / alias
  *  shown in the Code column; everything else mirrors the receipt line. */
@@ -29,10 +29,10 @@ interface SaleVoucherProps {
 const statusTone = (status: Sale["status"]) =>
   status === "NORMAL" ? "green" : status === "VOID" ? "red" : "amber";
 
-// Plain grouped integer for the grid cells — the currency is shown once in
-// the receipt preview, so per-row "MMK" labels would just add noise the way
-// they do on the thermal receipt.
-const fmtAmount = (value: number) => value.toLocaleString("en-US");
+// Grid cells show plain grouped integers (`formatAmount`) — the currency is
+// shown once in the receipt preview, so per-row "MMK" labels would just add
+// noise the way they do on the thermal receipt.
+const fmtAmount = formatAmount;
 
 export const SaleVoucher = ({ sale, lines, shop, cashier, aside }: SaleVoucherProps) => {
   const meta = [

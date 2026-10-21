@@ -56,8 +56,11 @@ export function classifyStatusPollError(error: unknown): StatusPollFailure {
     : { kind: "transient" };
 }
 
-/** Parse a Retry-After header (delta-seconds or HTTP date) into seconds. */
-export function parseRetryAfter(value: string | null | undefined, now = Date.now()): number | undefined {
+/** Parse a Retry-After header (delta-seconds or HTTP date) into SECONDS,
+ *  uncapped (the poller's own schedule). Not to be confused with
+ *  `lib/retryAfter.parseRetryAfter`, which returns capped milliseconds for
+ *  the RPC failure classifier. */
+export function parseRetryAfterSeconds(value: string | null | undefined, now = Date.now()): number | undefined {
   if (value == null) return undefined;
   const v = value.trim();
   if (/^\d+$/.test(v)) return Number(v);

@@ -164,9 +164,6 @@ interface RawResponse {
   status?: number;
 }
 
-const IDEMPOTENCY_MISMATCH = "IDEMPOTENCY_MISMATCH";
-const IDEMPOTENCY_KEY_REQUIRED = "IDEMPOTENCY_KEY_REQUIRED";
-
 /** Classify a raw error (resolved or thrown) into an RpcError. The class
  *  (lib/failureClass.ts) decides everything; IDEMPOTENCY_MISMATCH /
  *  IDEMPOTENCY_KEY_REQUIRED are contract violations, never retried. */
@@ -186,9 +183,6 @@ export function toRpcError(raw: unknown, status?: number): RpcError {
   const failure = classifyFailure({ ...signalOf(raw, effectiveStatus), message: bodyMessage, retryAfterMs: retryAfterRemainingMs() });
   return new RpcError(message, { status: effectiveStatus, code, details, hint, failure });
 }
-
-/** Contract markers (kept exported for diagnostics/tests). */
-export const IDEMPOTENCY_CONTRACT_MARKERS = [IDEMPOTENCY_MISMATCH, IDEMPOTENCY_KEY_REQUIRED] as const;
 
 function normalise(res: RawResponse | null | undefined): RpcOutcome {
   if (!res) return { data: null, error: null };

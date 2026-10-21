@@ -16,15 +16,15 @@ const isDev = !app.isPackaged;
 const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || "http://localhost:5173";
 
 // End-to-end automation hook (Playwright drives the real app — see
-// playwright.config.ts and e2e/). SHWE_POS_E2E=1 only (a) skips the
+// playwright.config.ts and e2e/). ORVIX_POS_E2E=1 only (a) skips the
 // detached DevTools window in dev, which would otherwise race the app
 // window for Playwright's firstWindow(), and (b) when
-// SHWE_POS_E2E_USER_DATA is also set, redirects userData there so an
+// ORVIX_POS_E2E_USER_DATA is also set, redirects userData there so an
 // automated run never touches a real install's local database or session.
 // Both are no-ops for real users (neither variable is ever set by the app).
-const isE2E = process.env.SHWE_POS_E2E === "1";
-if (isE2E && process.env.SHWE_POS_E2E_USER_DATA) {
-  app.setPath("userData", process.env.SHWE_POS_E2E_USER_DATA);
+const isE2E = process.env.ORVIX_POS_E2E === "1";
+if (isE2E && process.env.ORVIX_POS_E2E_USER_DATA) {
+  app.setPath("userData", process.env.ORVIX_POS_E2E_USER_DATA);
 }
 
 let mainWindow = null;
@@ -181,7 +181,7 @@ app.on("will-quit", () => {
 // server, older build) = recovery refused.
 // RC3: the same config also backs the owner check of a reconciliation
 // (reconcileAuthority.cjs). An unpackaged app under the e2e harness
-// (SHWE_POS_E2E=1, dev server, no dist/) reads the stack URL + public anon
+// (ORVIX_POS_E2E=1, dev server, no dist/) reads the stack URL + public anon
 // key from the harness environment instead; a packaged build never does.
 function e2eBackendConfig() {
   if (!isDev || !isE2E) return null;
@@ -283,7 +283,7 @@ ipcMain.handle("queue-export:save", async (event, request) => {
   const result = await dialog.showSaveDialog(mainWindow, {
     title: "Save pending transactions export",
     defaultPath: path.join(app.getPath("documents"), safeExportFileName(request.defaultFileName)),
-    filters: [{ name: "Shwe Pha La queue export", extensions: ["spqx"] }],
+    filters: [{ name: "Orvix POS queue export", extensions: ["spqx"] }],
     properties: ["createDirectory", "showOverwriteConfirmation"],
   });
   if (result.canceled || !result.filePath) return { ok: false, canceled: true };

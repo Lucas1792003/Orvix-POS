@@ -6,7 +6,7 @@ import {
   resolvePhoneUploadPage,
   type PhoneUploadPage,
 } from "./phoneUploadOrigin";
-import { parseRetryAfter, UploadStatusRequestError } from "./uploadStatusPoller";
+import { parseRetryAfterSeconds, UploadStatusRequestError } from "./uploadStatusPoller";
 
 export { PRODUCT_IMAGE_PHONE_UPLOAD_ROUTE };
 
@@ -496,7 +496,7 @@ export async function getProductImageUploadSessionStatus(
     const message = typeof body?.message === "string" && body.message ? body.message : `Upload status check failed (HTTP ${res.status}).`;
     throw new UploadStatusRequestError(message, res.status, {
       code: typeof body?.code === "string" ? body.code : undefined,
-      retryAfterSeconds: parseRetryAfter(res.headers.get("Retry-After")),
+      retryAfterSeconds: parseRetryAfterSeconds(res.headers.get("Retry-After")),
     });
   }
   if (!body) throw new UploadStatusRequestError("Upload session was not found.", 404);

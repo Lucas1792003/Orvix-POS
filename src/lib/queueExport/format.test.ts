@@ -116,7 +116,7 @@ describe("queue export encryption", () => {
   it("refuses weak passphrases, non-exports and newer format versions", async () => {
     await expect(encryptQueueExport(payload(), "short")).rejects.toMatchObject({ code: "weak-passphrase" });
     expect(() => parseEnvelope("not json")).toThrow(QueueExportError);
-    expect(() => parseEnvelope({ format: "something-else" })).toThrow(/Not a Shwe Pha La queue export/);
+    expect(() => parseEnvelope({ format: "something-else" })).toThrow(/Not an Orvix POS queue export/);
     const env = await encryptQueueExport(payload(), PASS, FAST);
     expect(() => parseEnvelope({ ...env, formatVersion: 99 })).toThrow(expect.objectContaining({ code: "unsupported-version" }));
   });

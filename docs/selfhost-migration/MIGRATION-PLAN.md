@@ -1,4 +1,4 @@
-# Shwe Pha Lar POS — Hosted Supabase → Self-hosted on `lucashome`
+# Orvix POS — Hosted Supabase → Self-hosted on `lucashome`
 
 **Master plan and audit summary.** Prepared 2026-10-11 from read-only
 inspection only. **Nothing has been migrated, exported, started, or changed.**

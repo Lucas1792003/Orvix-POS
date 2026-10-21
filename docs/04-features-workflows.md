@@ -996,8 +996,7 @@ details in
 - `src/features/sales/dailySalesReport.ts`:
   - `buildDailySalesReportsByShop(input)` → returns
     `{ reportDate, reportDateLabel, subject, shopReports, totalSaleCount, totalRowCount }`
-  - `buildDailySalesReport(input)` — legacy single-CSV builder kept for
-    other callers
+    (the former single-CSV `buildDailySalesReport` was removed; it had no callers)
   - `getOpenShiftReportNotice(shifts, users, shops)` — returns
     `{ openShiftCount, entries, summary }` or `null`. Pure informational;
     the edge function renders it as a banner

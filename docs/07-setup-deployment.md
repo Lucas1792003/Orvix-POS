@@ -46,19 +46,19 @@ and the sidebar footer (`backend: <host>`). See
 > boundary on the client. Service-role keys belong only in private
 > server-side tooling.
 
-Optional development-only flags:
-
-- `VITE_ALLOW_BROWSER_SUPABASE_SEED=true` — explicitly unlocks
-  `src/data/seedSupabase.ts` for local development against a non-production
-  database. Off by default; production builds must not set it.
+Seeding is done with `npm run seed:service-role`
+(`scripts/seed/seedServiceRole.ts`); there is no browser seed.
 
 ## Supabase Setup
 
 For a fresh Supabase project:
 
-1. Apply `supabase/schema.sql` in the SQL Editor.
-2. Apply every file in `supabase/migrations/` **in numeric order**
-   (`001` → `043`). See
+1. Reproduce the schema from `supabase/baseline/` + `supabase/migrations/`
+   (see [`supabase/baseline/README.md`](../supabase/baseline/README.md)).
+   `supabase/schema.sql` is a historical pre-`050` snapshot and cannot
+   rebuild the current schema.
+2. Apply every file in `supabase/migrations/` numbered **above** the
+   baseline's `baseline-migration-level`, **in numeric order**. See
    [03-database-security.md](./03-database-security.md) for the full
    migration list.
 3. Verify the `auth` and `public` schemas have the expected tables, RPCs,
@@ -387,10 +387,8 @@ authenticated Supabase client. Use one of:
 - `supabase db reset` with SQL seed files, or
 - a private server-side service-role script.
 
-`src/data/seedSupabase.ts` is retained as a guarded development reference
-and refuses to run unless `VITE_ALLOW_BROWSER_SUPABASE_SEED=true`. The
-file should eventually move out of the browser source tree entirely
-(see [09-roadmap-todo.md](./09-roadmap-todo.md)).
+Seeding is done with `npm run seed:service-role`
+(`scripts/seed/seedServiceRole.ts`); there is no browser seed.
 
 ## Verification
 

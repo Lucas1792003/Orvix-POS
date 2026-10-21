@@ -171,16 +171,10 @@ Open work, grouped by area.
       `UsersPage.tsx` gained a "Replace manager" button, shown when
       editing an existing user into MANAGER for a shop that already has a
       different active manager.
-- [x] **Seed tooling cleanup.** `src/data/seed.ts`/`seedSupabase.ts` (both
-      previously unreferenced anywhere in the app) moved to `scripts/seed/`
-      — outside `tsconfig.app.json`'s `src` include, so they can never be
-      pulled into the browser bundle even by an accidental future import.
-      Split into `seedData.ts` (data), `seedRun.ts` (shared insert
-      sequence, parameterized on the Supabase client), `seedBrowser.ts`
-      (the original guarded anon-key variant), and a new
-      `seedServiceRole.ts` (`npm run seed:service-role`) that seeds via a
-      service-role key from the environment — no dev server or browser
-      opt-in flag needed. Added `tsx` as a devDependency to run it.
+- [x] **Seed tooling cleanup.** Seeding is done with
+      `npm run seed:service-role` (`scripts/seed/seedServiceRole.ts`),
+      outside `tsconfig.app.json`'s `src` include; the browser seed no
+      longer exists.
 - [x] **Code splitting.** `src/app/routes/AppRouter.tsx`'s admin pages
       (Shops, Users, Products, UnitTypes, Barcodes, Suppliers, Pricing,
       AuditLog, SyncConflicts), reports (Shop/Global/Profit), and the

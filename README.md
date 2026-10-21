@@ -1,4 +1,4 @@
-# Shwe PhaLar — Retail POS & Inventory System
+# Orvix POS — Retail POS & Inventory System
 
 A multi-shop Point of Sale and inventory management system for small retail
 businesses (alcohol, drinks, FMCG). Built on **Supabase** (Auth + PostgreSQL)
@@ -41,9 +41,10 @@ VITE_SUPABASE_ANON_KEY=<your-anon-key>
 ### 3. Set up the database
 Apply the SQL in [`supabase/`](supabase/) to your project (Supabase Dashboard
 → SQL Editor, or the Supabase CLI):
-- `supabase/schema.sql` — base tables + RLS scaffold
-- `supabase/migrations/*.sql` — RBAC, RPCs, units, pricing, and later fixes (run in order)
+- `supabase/baseline/` + `supabase/migrations/*.sql` — the schema is reproduced from the baseline followed by the later migrations in order (see [supabase/baseline/README.md](supabase/baseline/README.md)). `supabase/schema.sql` is a historical pre-`050` snapshot and cannot rebuild the current schema.
 - `supabase/functions/email-sales-report` — optional Edge Function for the admin "Email today's CSV" feature (see [docs/07-setup-deployment.md](docs/07-setup-deployment.md))
+
+Seeding is done with `npm run seed:service-role` (`scripts/seed/seedServiceRole.ts`).
 
 ### 4. Run
 ```bash
@@ -142,8 +143,9 @@ src/
 │                          # purchase, pricing, audit
 ├── hooks/  i18n/  lib/  print/  types/
 supabase/
-├── schema.sql             # base tables + RLS scaffold
+├── baseline/              # schema baseline (see baseline/README.md)
 ├── migrations/            # RBAC, RPCs, units, pricing, fixes (ordered)
+├── schema.sql             # historical pre-050 snapshot (not for rebuilds)
 └── functions/             # Edge Functions (email-sales-report)
 docs/                      # architecture, security, workflows, setup, QA…
 ```

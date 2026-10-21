@@ -123,7 +123,7 @@ export interface Shop {
 
 // Business-wide brand (singleton). Edited on the Profile page; shown in the
 // sidebar header and on receipts. All fields optional — fall back to the
-// built-in "Shwe PhaLar" / static logo defaults when unset.
+// built-in default business name / static logo defaults when unset.
 export interface BusinessProfile {
   businessName?: string;
   logoUrl?: string;
@@ -248,29 +248,6 @@ export interface ProductUnit {
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
-}
-
-/**
- * Shape accepted by Product Unit form rows before they are saved. Permits
- * the optional `purchasePriceMmk` and the in-form `id` placeholder (an
- * `ulid`-style string the slice resolves on upsert).
- */
-export type ProductUnitInput = Omit<ProductUnit, "createdAt" | "updatedAt"> & {
-  createdAt?: string;
-  updatedAt?: string;
-};
-
-/**
- * Snapshot persisted on `sale_items` so historical receipts and refunds
- * keep using the prices and base-quantity that were in force at sale
- * time, even if the registry row is edited later.
- */
-export interface ProductUnitSnapshot {
-  productUnitId?: string;
-  unitNameSnapshot: string;
-  unitBaseQuantitySnapshot: number;
-  unitPriceMmkSnapshot: number;
-  baseQuantitySold: number;
 }
 
 /**
@@ -517,9 +494,6 @@ export interface InventoryMovement {
    *  Lets a provisional record be matched to its outbox entry. */
   idempotencyKey?: string;
 }
-
-// Legacy movement type alias for backward compatibility
-export type LegacyMovementType = "ADD" | "REMOVE" | "SET";
 
 export interface Shift {
   id: string;

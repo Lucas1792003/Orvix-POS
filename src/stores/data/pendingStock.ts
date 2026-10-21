@@ -1,16 +1,7 @@
 import { localDb, type SyncOutboxEntry } from "../../lib/localDb";
-import type { Inventory, InventoryMovement } from "../../types";
+import type { InventoryMovement } from "../../types";
 
 export const inventoryKey = (shopId: string, productId: string): string => `${shopId}|${productId}`;
-
-/** Server inventory rows with the queued offline deltas (below) added. */
-export function withPendingStock(rows: Inventory[], deltas: Map<string, number>): Inventory[] {
-  if (deltas.size === 0) return rows;
-  return rows.map((row) => {
-    const delta = deltas.get(inventoryKey(row.shopId, row.productId));
-    return delta ? { ...row, qtyBaseUnits: row.qtyBaseUnits + delta } : row;
-  });
-}
 
 // ----------------------------------------------------------------------
 // Unresolved local stock effects (Batch 2A, owner decision D-NEW-1).

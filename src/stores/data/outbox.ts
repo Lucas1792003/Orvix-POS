@@ -146,11 +146,6 @@ export async function blockingEarlierWork(subject: DependencySubject): Promise<S
   return work.filter((r) => mayDepend(subject, r, ctx));
 }
 
-/** Any unsent work at all (diagnostics / tests). */
-export async function queueHasUnsentWork(): Promise<boolean> {
-  return (await unsentWork()).length > 0;
-}
-
 /** The entry is waiting for its creator (another app user). */
 const ownedByOther = (entry: SyncOutboxEntry, me: string | null): boolean => {
   const owner = entry.kind === "rpc" ? actorOf(entry) : null;
@@ -2007,9 +2002,4 @@ export async function countPendingOutbox(): Promise<number> {
  *  fails (and sends it back to Set aside). */
 export async function countUnsyncedOutbox(): Promise<number> {
   return localDb.syncOutbox.filter((r) => r.status !== "reconciled").count();
-}
-
-export async function listReconciledEntries(): Promise<SyncOutboxEntry[]> {
-  const rows = (await localDb.syncOutbox.where("status").equals("reconciled").toArray()) as OutboxRow[];
-  return rows.sort(byQueueOrder);
 }

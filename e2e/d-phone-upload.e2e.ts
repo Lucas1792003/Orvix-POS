@@ -562,7 +562,7 @@ test("D-race: two concurrent uploads of the same session (real client code) -> o
     const results = await P.page.evaluate(async (b64) => {
       // the phone page's own upload code (phone-upload-page client.js), with
       // the token it read from its own #fragment
-      const page = (window as any).shwePhaLaPhoneUpload;
+      const page = (window as any).orvixPhoneUpload;
       const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
       const image = { blob: new Blob([bytes], { type: "image/webp" }), bytes: bytes.length, mimeType: "image/webp" };
       const rs = await Promise.allSettled([page.uploadImage(image), page.uploadImage(image)]);
@@ -785,7 +785,7 @@ const G5_REFUSED = [
 /** The phone page's own upload code with an arbitrary blob (as the D-race case). */
 const pageUpload = (P: Terminal, b64: string, type: string) =>
   P.page.evaluate(async ([data, t]) => {
-    const page = (window as any).shwePhaLaPhoneUpload;
+    const page = (window as any).orvixPhoneUpload;
     const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
     try {
       const r = await page.uploadImage({ blob: new Blob([bytes], { type: t }), bytes: bytes.length, mimeType: t });

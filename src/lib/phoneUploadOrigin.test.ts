@@ -26,7 +26,7 @@ describe("resolvePhoneUploadPage", () => {
 
   it.each([
     ["the 'null' origin a file:// page reports", "null"],
-    ["a custom app:// protocol", "app://shwe-pos"],
+    ["a custom app:// protocol", "app://orvix-pos"],
     ["no origin at all", undefined],
     ["an empty origin", ""],
   ])("never uses %s: always the configured API origin", (_label, locationOrigin) => {

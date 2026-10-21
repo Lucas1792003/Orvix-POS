@@ -1,6 +1,6 @@
 # Desktop app — Electron POS
 
-The Shwe Pha La POS Electron app (`com.shwephala.pos`): builds, releases on GitHub (`Lucas1792003/ShwePhaLa`, auto-update via `electron-updater`), which backend each build talks to, and the shop tills.
+The Orvix POS Electron app (packaged as `Shwe Pha La POS`, `com.shwephala.pos`): builds, releases on GitHub (`Lucas1792003/ShwePhaLa`, auto-update via `electron-updater`), which backend each build talks to, and the shop tills.
 
 | File | Answers |
 |---|---|

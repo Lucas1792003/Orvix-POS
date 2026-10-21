@@ -164,7 +164,7 @@ export const PhoneProductImageUploadPage = () => {
             </div>
             <div className="flex-1">
               <h1 className="text-lg font-bold">{t("phoneUpload", "title")}</h1>
-              <p className="text-sm text-slate-500">ShwePhaLa Retail</p>
+              <p className="text-sm text-slate-500">Orvix POS</p>
             </div>
             <button
               type="button"

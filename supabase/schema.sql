@@ -1,5 +1,5 @@
 -- ============================================================
--- ShwePhaLa Database Schema
+-- Orvix POS Database Schema (historical pre-050 snapshot; see supabase/baseline/README.md)
 -- Run this entire file in Supabase SQL Editor
 -- ============================================================
 

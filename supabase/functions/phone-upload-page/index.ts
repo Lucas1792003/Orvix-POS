@@ -122,8 +122,8 @@ const renderPage = (anonKey: string, n: string): string => {
 <main>
 <div class="card">
 <div class="head">
-<div class="badge" aria-hidden="true">SPL</div>
-<div class="grow"><h1 id="title">Product photo upload</h1><p class="sub">ShwePhaLa Retail</p></div>
+<div class="badge" aria-hidden="true">OX</div>
+<div class="grow"><h1 id="title">Product photo upload</h1><p class="sub">Orvix POS</p></div>
 <button type="button" class="lang" id="lang">မြန်မာ</button>
 </div>
 <div class="status" id="status" role="status" aria-live="polite">Checking upload link...</div>

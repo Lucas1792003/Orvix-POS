@@ -43,8 +43,6 @@ export const CLIENT_CAPABILITIES = [
   "update-guard-v1",
 ] as const;
 
-export type ClientCapability = (typeof CLIENT_CAPABILITIES)[number];
-
 /** Value of the X-Client-Info request header. */
 export function clientInfoHeader(
   version: string = APP_VERSION,

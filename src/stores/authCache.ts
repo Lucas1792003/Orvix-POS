@@ -19,10 +19,6 @@ export function setActiveAuthId(authId: string | null): void {
   activeAuthId = authId;
 }
 
-export function getActiveAuthId(): string | null {
-  return activeAuthId;
-}
-
 /** Record a successful authenticated server round trip. Cheap (one
  *  IndexedDB update), safe to fire-and-forget, never throws. */
 export async function touchAuthCache(): Promise<void> {

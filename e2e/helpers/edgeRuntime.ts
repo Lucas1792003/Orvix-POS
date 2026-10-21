@@ -73,7 +73,7 @@ export async function startLocalFunctions(names: LocalFunctionName[], timeoutMs 
   const cfg = liveCfg();
   const dir = path.join(RESULTS_DIR, "edge-runtime", "functions");
   fetchRouterFromLucashome(dir);
-  const container = `spl-e2e-phone-upload-${process.pid}`;
+  const container = `orvix-pos-e2e-phone-upload-${process.pid}`;
   spawnSync("docker", ["rm", "-f", container], { stdio: "ignore" });
 
   const env = {

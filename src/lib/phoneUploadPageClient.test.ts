@@ -126,7 +126,7 @@ describe("phone-upload-page client: loading", () => {
     expect(p.els.take.disabled).toBe(false);
     expect(p.els.choose.disabled).toBe(false);
     expect(p.els.error.hidden).toBe(true);
-    expect(p.win.shwePhaLaPhoneUpload).toBe(p.api);
+    expect(p.win.orvixPhoneUpload).toBe(p.api);
   });
 
   it.each([["no fragment", ""], ["too short", "#abc"], ["markup", `#${encodeURIComponent("<script>" + "x".repeat(40))}`], ["bad escape", "#%E0%A4%A"]])(

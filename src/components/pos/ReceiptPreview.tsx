@@ -1,5 +1,5 @@
 import type { Sale, Shop, User } from "../../types";
-import { formatDateTime, formatMmk } from "../../lib/utils";
+import { formatAmount, formatDateTime, formatMmk } from "../../lib/utils";
 import { useTranslation } from "../../hooks/useTranslation";
 import { useDataStore } from "../../stores/dataStore";
 
@@ -22,10 +22,10 @@ interface ReceiptPreviewProps {
   statusNote?: string;
 }
 
-// Plain grouped integer — used inside the items table where the "MMK"
-// label would just add noise to every row. The totals block still uses
-// `formatMmk` so the currency is shown once, clearly.
-const fmtAmount = (value: number) => value.toLocaleString("en-US");
+// Plain grouped integer (`formatAmount`) inside the items table where the
+// "MMK" label would just add noise to every row. The totals block still
+// uses `formatMmk` so the currency is shown once, clearly.
+const fmtAmount = formatAmount;
 
 const formatCashierName = (name: string | undefined): string => {
   const withoutDigits = (name ?? "").replace(/\d+/g, "").trim();

@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // A "terminal" is one running copy of the POS UI: the real Electron app
 // (terminal A, launched through Playwright's Electron support with the
-// SHWE_POS_E2E hooks in electron/main.cjs) or a Chromium page on the same
+// ORVIX_POS_E2E hooks in electron/main.cjs) or a Chromium page on the same
 // Vite dev server (terminal B — same renderer code; the only difference is
 // the http origin instead of Electron's file:// origin and the absence of
 // window.electronAPI). Both get their own IndexedDB/localStorage.
@@ -161,8 +161,8 @@ export class Terminal {
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
       VITE_DEV_SERVER_URL: DEV_SERVER_URL,
-      SHWE_POS_E2E: "1",
-      SHWE_POS_E2E_USER_DATA: userDataDir,
+      ORVIX_POS_E2E: "1",
+      ORVIX_POS_E2E_USER_DATA: userDataDir,
     };
     // This shell (Claude Code) exports ELECTRON_RUN_AS_NODE=1, which turns
     // the Electron binary into plain Node and makes it reject Chromium's

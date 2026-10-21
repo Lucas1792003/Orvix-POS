@@ -457,6 +457,6 @@ export function phoneUploadPage(win, cfg, deps) {
     handleFile: handleFile,
     uploadImage: function (image) { return upload(token, image, {}); },
   };
-  win.shwePhaLaPhoneUpload = api;
+  win.orvixPhoneUpload = api;
   return api;
 }

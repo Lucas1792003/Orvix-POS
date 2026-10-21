@@ -250,7 +250,7 @@ export const Sidebar = () => {
           </div>
           <div
             className="sidebar-backend"
-            title={`Shwe Pha La POS ${APP_VERSION} · ${CAPABILITY_SUMMARY}`}
+            title={`Orvix POS ${APP_VERSION} · ${CAPABILITY_SUMMARY}`}
             data-testid="sidebar-client-info"
           >
             v{APP_VERSION}{BUILD_LABEL ? ` ${BUILD_LABEL}` : ""} · {CAPABILITY_SUMMARY}

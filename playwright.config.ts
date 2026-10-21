@@ -1,6 +1,6 @@
 // Phase E end-to-end verification (docs/selfhost-migration/phase-e/).
 //
-// Drives the real Electron app (electron/main.cjs, SHWE_POS_E2E=1) and a
+// Drives the real Electron app (electron/main.cjs, ORVIX_POS_E2E=1) and a
 // second "terminal" (a Chromium page) against ONE Vite dev server that is
 // pointed at the self-hosted Supabase stack. The stack URL and anon key come
 // from the environment only (E2E_SUPABASE_URL / E2E_ANON_KEY; the service

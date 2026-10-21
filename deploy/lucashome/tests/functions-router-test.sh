@@ -157,7 +157,7 @@ else
     n="$(basename "$d")"; mounts+=(-v "$d:/home/deno/functions/$n:ro"); names="$names $n"
     mkdir -p "$R/$n"   # so verify enumerates the same set as on the server
   done
-  CONTAINER="spl-router-test-$$"
+  CONTAINER="orvix-pos-router-test-$$"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   docker run -d --name "$CONTAINER" -p 127.0.0.1::9000 \
     -v "$R/main:/home/deno/functions/main:ro" -v "$R/deno.jsonc:/home/deno/functions/deno.jsonc:ro" \

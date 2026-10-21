@@ -59,7 +59,6 @@ Re-run **every** live suite after any migration, not only the targeted one
 | `src/features/pos/barcodeLookup.test.ts` | Unit-linked barcode lookup, SKU fallback to default unit, and parity with label printer |
 | `src/features/suppliers/debt.test.ts` | Debt math (debt starts on RECEIVED only) |
 | `src/features/suppliers/actions.test.ts` | `getPurchaseOrderActionState(po, user)` matrix |
-| `src/features/inventory/selectors.test.ts` | Per-shop stock isolation + composite PK |
 | `src/features/inventory/stockDisplay.test.ts` | `decomposeBaseQuantity` greedy unit picking (214 cans → 8 Package 22 Can), inactive/other-product unit filtering, `formatStockQuantity` fallback when registry is empty, `convertToBaseQuantity` clamps (10 packages × 24 = 240 cans, 2 cases × 24 = 48 cans) |
 | `src/features/inventory/unitAwareWorkflows.test.ts` | Migration 028 + 029 SQL guards: snapshot columns on `purchase_order_items` / `stock_transfer_items` / `inventory_movements`; `receive_purchase_order`, `adjust_stock`, and `create_stock_transfer` server-side unit-to-base conversion and unit ownership checks; `complete_stock_transfer` propagates the snapshot into both `TRANSFER_OUT` and `TRANSFER_IN` rows |
 | `src/features/transfers/unitTransfer.test.ts` | Transfer-create unit math: 2 Cases = 48 base units, legacy base-unit path, mixed-unit stock totals, max unit qty from remaining base stock |

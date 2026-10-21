@@ -186,7 +186,7 @@ Security notes:
   input, and the strict nonce CSP blocks injected script.
 - **What a page visitor can do.** The anon key and the QR token already
   allow everything the page does.
-- **`window.shwePhaLaPhoneUpload`.** It exposes the page's own upload entry
+- **`window.orvixPhoneUpload`** (formerly `shwePhaLaPhoneUpload`). It exposes the page's own upload entry
   point for the e2e race check. It grants nothing beyond what the page's own
   address bar already holds.
 

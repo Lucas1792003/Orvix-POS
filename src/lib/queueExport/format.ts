@@ -477,7 +477,7 @@ export function parseEnvelope(input: string | unknown): QueueExportEnvelope {
   }
   const v = value as { format?: unknown; formatVersion?: unknown } | null;
   if (!v || typeof v !== "object" || v.format !== QUEUE_EXPORT_FORMAT) {
-    throw new QueueExportError("bad-format", "Not a Shwe Pha La queue export file.");
+    throw new QueueExportError("bad-format", "Not an Orvix POS queue export file.");
   }
   if (typeof v.formatVersion === "number" && (v.formatVersion > MAX_FORMAT_VERSION || !SUPPORTED_FORMAT_VERSIONS.includes(v.formatVersion))) {
     throw new QueueExportError("unsupported-version", `Export format ${v.formatVersion} is newer than this tool supports (${MAX_FORMAT_VERSION}).`);

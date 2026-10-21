@@ -11,10 +11,7 @@ import { allOnlineOperations } from "./onlineOnly";
 import { bootstrapDeltaCursors, pullDeltaChanges } from "./deltaSync";
 import { refreshInventoryIfNotLive } from "./inventoryRealtime";
 import { fetchAllRows, fetchAllRowsIn, fetchServerTime, type ReadResult, type Row } from "./fetchAll";
-import { inventoryKey, withPendingStock } from "./pendingStock";
 import { serializeLedger } from "./stockLedger";
-import type { BufferedInventoryEvent } from "./types";
-import type { Inventory } from "../../types";
 import { applyRecordedWrites, beginWriteRecording, endWriteRecording } from "./localWrites";
 import { refreshAuthCacheSnapshot, touchAuthCache } from "../authCache";
 import { useAuthStore } from "../authStore";
@@ -429,24 +426,6 @@ let loadInFlight: Promise<void> | null = null;
 let staleLoadDiscarded = false;
 /** Full loads that replaced the state with server data (verified reload). */
 let completedServerLoads = 0;
-
-/** Re-apply Realtime inventory events captured during a full load: those
- *  committed at/after the load's server time (or with no known time) win
- *  over the pages; the queued offline deltas apply to them too. */
-export function applyLiveInventoryEvents(
-  rows: Inventory[], events: BufferedInventoryEvent[], serverTimeBeforeLoad: string | null, pending: Map<string, number>,
-): Inventory[] {
-  const since = serverTimeBeforeLoad ? Date.parse(serverTimeBeforeLoad) : Number.NEGATIVE_INFINITY;
-  const live = events.filter((e) => !(e.ts < since));
-  if (live.length === 0) return rows;
-  const byKey = new Map(rows.map((r) => [inventoryKey(r.shopId, r.productId), r]));
-  for (const e of live) {
-    const key = inventoryKey(e.shopId, e.productId);
-    if (e.row) byKey.set(key, withPendingStock([e.row], pending)[0]);
-    else byKey.delete(key);
-  }
-  return [...byKey.values()];
-}
 
 /** Re-order a complete read client-side (the keyset read is in key order).
  *  Like Postgres: NULLs last ascending, first descending; ties by id (or the

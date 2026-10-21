@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ProductImageUploadSessionStatusResult } from "./productImagePhoneUpload";
 import {
   classifyStatusPollError,
-  parseRetryAfter,
+  parseRetryAfterSeconds,
   startUploadStatusPolling,
   UploadStatusRequestError,
   type ReconnectingInfo,
@@ -165,7 +165,7 @@ describe("startUploadStatusPolling", () => {
   });
 });
 
-describe("classifyStatusPollError / parseRetryAfter", () => {
+describe("classifyStatusPollError / parseRetryAfterSeconds", () => {
   it("classifies", () => {
     expect(classifyStatusPollError(new TypeError("Failed to fetch"))).toEqual({ kind: "transient" });
     expect(classifyStatusPollError(http(503, "x", 5))).toEqual({ kind: "transient", retryAfterMs: 5000 });
@@ -175,9 +175,9 @@ describe("classifyStatusPollError / parseRetryAfter", () => {
   });
 
   it("parses Retry-After seconds and dates", () => {
-    expect(parseRetryAfter("12")).toBe(12);
-    expect(parseRetryAfter(new Date(T0 + 7_500).toUTCString(), T0)).toBe(7);
-    expect(parseRetryAfter("soon")).toBeUndefined();
-    expect(parseRetryAfter(null)).toBeUndefined();
+    expect(parseRetryAfterSeconds("12")).toBe(12);
+    expect(parseRetryAfterSeconds(new Date(T0 + 7_500).toUTCString(), T0)).toBe(7);
+    expect(parseRetryAfterSeconds("soon")).toBeUndefined();
+    expect(parseRetryAfterSeconds(null)).toBeUndefined();
   });
 });

@@ -3,7 +3,11 @@ import type { Shop, User } from "../types";
 export const cn = (...classes: Array<string | false | null | undefined>) =>
   classes.filter(Boolean).join(" ");
 
-export const formatMmk = (value: number) => `MMK ${value.toLocaleString("en-US")}`;
+/** Plain grouped integer, no currency label (receipt/voucher item rows show
+ *  the currency once in the totals block via `formatMmk`). */
+export const formatAmount = (value: number) => value.toLocaleString("en-US");
+
+export const formatMmk = (value: number) => `MMK ${formatAmount(value)}`;
 
 export const formatDateTime = (value: string | number | Date) =>
   new Date(value).toLocaleString("en-GB", {
