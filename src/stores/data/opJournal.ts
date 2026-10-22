@@ -3,7 +3,6 @@ import Dexie from "dexie";
 import { getTillId } from "../../lib/tillId";
 import { useAuthStore } from "../authStore";
 import { captureJournal } from "../../recovery/journalCapture";
-import { independentTrustSource } from "../../recovery/trust";
 
 // ----------------------------------------------------------------------
 // Till operation journal (W8/W10 Phase 0, disaster-recovery.md W8).
@@ -246,7 +245,8 @@ async function upsert(key: string, make: () => JournalRecord | null, change: (re
   if (!rec) rec = make();
   if (!rec) return;
   change(rec);
-  if (independentTrustSource()) await captureJournal(rec);
+  // Step 5: an owner-approved till (deviceTrust.ts) signs its journal too; captureJournal is a no-op without either identity
+  await captureJournal(rec);
   await table.put({ key: keyOf(key), value: JSON.stringify(rec), updatedAt: rec.updatedAt });
 }
 

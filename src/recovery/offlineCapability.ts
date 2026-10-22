@@ -16,6 +16,8 @@ import { localDb } from "../lib/localDb";
 import { currentBackendOrigin } from "../lib/backendOrigin";
 import { supabase } from "../lib/supabase";
 import { runRequest } from "../stores/data/idempotentRpc";
+import { DEVICE_HEADER, signRequest, trustedTill, type TillIdentity } from "./deviceTrust";
+import { independentTrustSource } from "./trust";
 
 export const OFFLINE_HEADER = "x-orvix-offline";
 /** Operations a capability can authorize (the server's allowed_ops). */
@@ -172,7 +174,10 @@ export async function maintainOfflineCapability(orgId: string, shopId: string, u
   const origin = options.origin ?? currentBackendOrigin();
   const current = await read(origin, orgId, shopId);
   const now = Date.now();
+  // Step 5: an EXHAUSTED (or otherwise unusable) capability is never "fresh": while connected the till surrenders it (once its
+  // operations are synced) and asks for a new one, instead of waiting until half its lifetime has passed
   const fresh = current && !current.withdrawn && current.capability.userId === userId
+    && evaluate(current, userId, now, false).state === "valid"
     && now < Date.parse(current.capability.issuedAt) + (Date.parse(current.capability.expiresAt) - Date.parse(current.capability.issuedAt)) * REFRESH_AT_FRACTION;
   if ((fresh && !options.force) || (typeof navigator !== "undefined" && navigator.onLine === false)) {
     return offlineAuthorizationView(orgId, shopId, userId, origin);
@@ -180,11 +185,24 @@ export async function maintainOfflineCapability(orgId: string, shopId: string, u
   if (!options.force && now - lastAskAt < 30_000) return offlineAuthorizationView(orgId, shopId, userId, origin);
   lastAskAt = now;
   try {
-    const deviceId = await offlineDeviceId(origin);
+    // Step 5: offline authority belongs to THIS owner-approved till (its enrolled device id), requested with its signature.
+    // (Only when a Step 4 independent trust source is injected — tests of the Step 4 protocol — the Step 4 request is kept.)
+    const stepFour = independentTrustSource() !== null;
+    const till = stepFour ? null : await trustedTill(origin, orgId, shopId, { online: true }).catch(() => null);
+    if (!stepFour && !till) return offlineAuthorizationView(orgId, shopId, userId, origin);
+    const deviceId = till ? till.deviceId : await offlineDeviceId(origin);
+    // a previous capability whose recorded operations have ALL reached the server is surrendered first (verified by the server
+    // against its synced usage), so its reservation is released for the new one; otherwise it stays reserved until its deadline
+    // (only one this till can no longer use: a still-valid capability is kept until a new one is actually issued)
+    if (till && current && !current.withdrawn) {
+      const state = evaluate(current, userId, Date.now(), false).state;
+      if (state === "expired" || state === "exhausted") await surrenderIfSynced(origin, orgId, shopId, current, till).catch(() => undefined);
+    }
     const askedAt = Date.now();
     const withdrawalsBefore = withdrawals;
+    const request = supabase.rpc("recovery_v1_offline_capability", { p_org_id: orgId, p_shop_id: shopId, p_device_id: deviceId });
     const outcome = await runRequest(
-      supabase.rpc("recovery_v1_offline_capability", { p_org_id: orgId, p_shop_id: shopId, p_device_id: deviceId }),
+      till ? withHeader(request, await signRequest(till, `recovery_v1_offline_capability:${shopId}:${deviceId}`)) : request,
       "recovery_v1_offline_capability", 15_000);
     const { data, error } = outcome;
     if (error) return offlineAuthorizationView(orgId, shopId, userId, origin);
@@ -208,9 +226,32 @@ export async function maintainOfflineCapability(orgId: string, shopId: string, u
         const anchored = Date.now();
         await localDb.syncState.put({ key: clockKey(origin), value: String(anchored), updatedAt: new Date().toISOString() });
       });
-    } else if (d.outcome === "refused" && d.reason && ["organization_not_active", "device_revoked"].includes(d.reason)) {
-      await withdrawOfflineCapability(orgId, shopId, d.reason === "device_revoked" ? "this till was revoked" : "the organization is not active", origin);
+    } else if (d.outcome === "refused" && d.reason && ["organization_not_active", "device_revoked", "device_suspended", "device_replaced", "device_expired", "device_invalid"].includes(d.reason)) {
+      await withdrawOfflineCapability(orgId, shopId, d.reason === "organization_not_active" ? "the organization is not active" : `this till's device authorization ended (${d.reason})`, origin);
     }
   } catch { /* network: keep what we have, with its own expiry */ }
   return offlineAuthorizationView(orgId, shopId, userId, origin);
+}
+
+type HeaderBuilder = { setHeader?: (name: string, value: string) => unknown };
+function withHeader<T>(builder: T, value: string): T {
+  const b = builder as unknown as HeaderBuilder;
+  if (typeof b.setHeader !== "function") throw new Error("DEVICE_HEADER_UNSUPPORTED");
+  return b.setHeader(DEVICE_HEADER, value) as T;
+}
+
+/** Step 5: release a capability's reservation once everything recorded under it has reached the server (the server checks the
+ *  device-signed report against its own synced usage; any mismatch keeps the reservation until the sync deadline). */
+async function surrenderIfSynced(origin: string, orgId: string, shopId: string, s: Stored, till: TillIdentity): Promise<void> {
+  const waiting = await localDb.syncOutbox.filter((e) => (e as { offlineAuth?: OfflineAuth | null }).offlineAuth?.capabilityId === s.capability.id && !e.serverOutcome).count();
+  if (waiting > 0) return;
+  const ops = s.usedOps; const amount = s.usedAmountMmk;
+  const outcome = await runRequest(
+    withHeader(supabase.rpc("recovery_v1_call", { p_action: "offline.surrender", p_args: { capabilityId: s.capability.id, opsRecorded: ops, amountRecordedMmk: amount } }),
+      await signRequest(till, `recovery_v1_offline_surrender:${s.capability.id}:${ops}:${amount}`)),
+    "recovery_v1_call offline.surrender", 15_000);
+  const d = (outcome.data ?? {}) as { outcome?: string };
+  if (!outcome.error && (d.outcome === "surrendered" || d.outcome === "already_surrendered")) {
+    await withdrawOfflineCapability(orgId, shopId, "surrendered after every operation recorded under it reached the server", origin);
+  }
 }

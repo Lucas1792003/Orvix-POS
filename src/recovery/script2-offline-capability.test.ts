@@ -12,6 +12,11 @@ import {
   authorizeOfflineOperation, maintainOfflineCapability, offlineAuthorizationView, offlineDeviceId, OfflineAuthorizationUnavailable,
   resetOfflineCapabilityForTests, withdrawOfflineCapability, type OfflineCapability,
 } from "./offlineCapability";
+// Step 5: offline authority belongs to an owner-approved till; the tests run on a synthetic one (testing.ts)
+import { installSyntheticTrustedTill } from "./testing";
+import { resetTillVaultForTests } from "./deviceTrust";
+import { currentBackendOrigin } from "../lib/backendOrigin";
+let tillDeviceId = "";
 
 const T0 = Date.parse("2026-10-21T08:00:00Z");
 const HOUR = 3600_000;
@@ -19,7 +24,7 @@ let reply: () => { data: unknown; error: unknown; status: number } = () => ({ da
 let n = 0;
 
 const capability = async (over: Partial<OfflineCapability> = {}): Promise<OfflineCapability> => ({
-  protocol: "orvix-offline-capability-v1", id: `cap-${++n}`, orgId: "org-1", shopId: "shop-1", deviceId: await offlineDeviceId(),
+  protocol: "orvix-offline-capability-v1", id: `cap-${++n}`, orgId: "org-1", shopId: "shop-1", deviceId: tillDeviceId,
   userId: "user-1", offlineEpoch: 0, policyScope: "*", policyStatus: "OWNER_APPROVED",
   issuedAt: new Date(Date.now()).toISOString(), expiresAt: new Date(Date.now() + HOUR).toISOString(),
   syncDeadline: new Date(Date.now() + 25 * HOUR).toISOString(), maxOps: 3, maxAmountMmk: 20_000, allowedOps: ["complete_sale"], ...over,
@@ -41,13 +46,14 @@ beforeEach(async () => {
   vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(T0);
   fake.reset(); resetOfflineCapabilityForTests(); n = 0;
   await Promise.all(localDb.tables.map((t) => t.clear()));
+  await resetTillVaultForTests(); tillDeviceId = (await installSyntheticTrustedTill({ origin: currentBackendOrigin() })).deviceId;
   vi.stubGlobal("navigator", { onLine: true });
   const real = fake.rpc;
   vi.spyOn(fake, "rpc").mockImplementation((name, args = {}) => {
     if (name !== "recovery_v1_offline_capability") return real(name, args);
     fake.calls.push({ name, args, mode: "succeed", replayed: false });
     const promise = Promise.resolve(reply());
-    const builder = { abortSignal: () => builder, then: promise.then.bind(promise) };
+    const builder = { abortSignal: () => builder, setHeader: () => builder, then: promise.then.bind(promise) };
     return builder as ReturnType<typeof real>;
   });
 });

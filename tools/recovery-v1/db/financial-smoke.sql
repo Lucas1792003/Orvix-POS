@@ -12,7 +12,9 @@ SELECT public.recovery_v1_transition('org-test','RESTRICTED','synthetic cost tes
 RESET ROLE;
 SELECT test.expect_error('cost-side direct SQL cannot bypass restricted mode', $$UPDATE public.product_costs SET cost_mmk=1 WHERE product_id='prod-1'$$,'ORG_SUSPENDED');
 SELECT test.check('PFIN report + PSAFE guard preserved',to_regprocedure('public.fin_report_summary(text,date,date,text)') IS NOT NULL AND EXISTS(SELECT 1 FROM pg_event_trigger WHERE evtname='zz_orvix_no_086_after_087' AND evtenabled='A'));
-UPDATE recovery_v1.org_state SET state='ACTIVE' WHERE org_id='org-test';
+-- Step 5: genuine owner-signed reopening (synthetic owner), not a superuser edit
+\set fx_org org-test
+\ir ../step5/fixture-activate.psql
 -- Review round 3: PCOST-A writes cost side rows BEFORE their parent exists (deferred FKs). Normal
 -- single-organization creation with a cost must keep working in an ACTIVE organization.
 INSERT INTO public.products SELECT (jsonb_populate_record(NULL::public.products, to_jsonb(x)

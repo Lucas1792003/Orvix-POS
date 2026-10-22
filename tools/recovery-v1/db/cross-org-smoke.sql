@@ -45,7 +45,8 @@ SELECT test.expect_error('superuser direct SQL: the same cross-organization refe
   $$INSERT INTO public.supplier_payments(id,supplier_id,purchase_order_id,shop_id,amount_mmk,payment_method,created_by) VALUES('x-pay-2','sup-1','po-unrel','shop-a',100,'CASH','u-mgr-a')$$, 'ORG_SUSPENDED');
 
 -- Isolation is enforced even when BOTH organizations are ACTIVE (synthetic superuser fixture).
-UPDATE recovery_v1.org_state SET state='ACTIVE' WHERE org_id='org-unrelated';
+\set fx_org org-unrelated
+\ir ../step5/fixture-activate.psql
 SET ROLE service_role;
 SELECT test.expect_error('both ACTIVE: a row linking two organizations is still refused',
   $$INSERT INTO public.sales SELECT (jsonb_populate_record(NULL::public.sales, sale||'{"id":"x-sale-3","receipt_no":"X-3","shift_id":"shift-unrel"}')).* FROM xorg_template$$, 'ORG_SUSPENDED');
@@ -76,5 +77,6 @@ SET ROLE authenticated;
 SELECT public.recovery_v1_transition('org-unrelated',repeat('x',100000),repeat('r',100000),repeat('e',100000)) AS big \gset
 RESET ROLE;
 SELECT test.check('an oversized foreign-org attempt is denied, recorded under the CALLER org, with every input capped',
-  :'big'::jsonb->>'outcome'='denied' AND NOT EXISTS(SELECT 1 FROM recovery_v1.audit WHERE org_id='org-unrelated' AND kind LIKE 'transition%')
+  :'big'::jsonb->>'outcome'='denied' AND NOT EXISTS(SELECT 1 FROM recovery_v1.audit WHERE org_id='org-unrelated' AND kind LIKE 'transition%'
+                                                       AND coalesce(detail->>'by','') <> 'superuser:fixture')   -- Step 5: the genuine reopening fixture's own containment step
   AND (SELECT max(octet_length(detail::text)) FROM recovery_v1.audit WHERE kind LIKE 'transition%') < 2000);

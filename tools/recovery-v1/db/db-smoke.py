@@ -49,7 +49,9 @@ def main():
             def check(name,ok,detail=''):
                 sql("SELECT test.check(%s, %s, %s);" % ("'"+name.replace("'","''")+"'", 'true' if ok else 'false', "'"+str(detail)[-300:].replace("'","''")+"'"),'script2-record.log')
             ctx=dict(ROOT=ROOT,run=run,dbargs=dbargs,env=env,sql=sql,file=file,command=command,sock=sock,data=data,check=check,args=args,phase=phase,
-                     sim=ROOT/'tools/recovery-v1/owner/owner-sim.mjs',keydir=run/'owner-keys')
+                     sim=ROOT/'tools/recovery-v1/owner/owner-sim.mjs',keydir=run/'owner-keys',
+                     # Step 5: genuine owner-signed reopening (after the V1 install only)
+                     activate=(lambda org: activate(org)))
             mod.run(ctx)
     verifier=ROOT/'tools/migration-sequence/verify.py'
     def facts_and_plan(label,expect_violation=None,facts_text=None):
@@ -85,6 +87,11 @@ def main():
             if 61<n<=args.stage:file(path,f'migration-{n}.log',transaction=True)
         file(ROOT/'supabase/tests/phase-d/sql/01_test_schema.sql','test-schema.log')
         file(ROOT/'supabase/tests/phase-d/sql/02_seed.sql','seed.log')
+        # Step 5: the test-only FIXTURE device signer (tools/recovery-v1/step5/s5lib.py) is created now, before 087 and V1
+        # snapshot the public tables; it does nothing until owner-approved fixture devices are enrolled after the V1 install
+        sys.path.insert(0,str(ROOT/'tools/recovery-v1/step5')); import s5lib
+        s5lib.install_fixture_signer(sql)
+        s5=dict(dev=None)
         # Original focused financial tests, before guard installation, establish
         # actual business execution and replay on this full schema.
         file(ROOT/'supabase/tests/phase-d/sql/t02_shift.sql','baseline-shift.log')
@@ -101,14 +108,17 @@ def main():
             # Normal-operation regression: do the existing business suites still pass with V1 installed
             # and every organization ACTIVE (synthetic superuser fixture), compared with no V1 at all?
             if args.phase_d_regression=='guarded':
-                command(['psql',*dbargs,'-v','recovery_v1_install_ack=restrict-every-organization','-f',str(ROOT/'supabase/migrations-provisional/RECOVERY_V1_guards.sql')],'install-guards.log')
-                sql("UPDATE recovery_v1.org_state SET state='ACTIVE';",'force-active.log')
-                # Synthetic fixture ONLY: the suites create these organizations mid-run. In V1 a new
-                # organization has no recovery state and is refused (onboarding is closed). Pre-seeding
-                # ACTIVE states isolates the question 'does V1 break legitimate ACTIVE flows?' and lets
-                # the native RLS/business refusals surface for the ones the suites expect refused.
-                ids=sorted(set(re.findall(r"'(org-[a-z0-9-]+)'",''.join((ROOT/'supabase/tests/phase-d/sql'/f).read_text() for f in os.listdir(ROOT/'supabase/tests/phase-d/sql') if f.startswith('t')))))
-                sql("INSERT INTO recovery_v1.org_state(org_id,state) SELECT unnest(ARRAY["+','.join("'"+i+"'" for i in ids)+"]),'ACTIVE' ON CONFLICT DO NOTHING;",'force-active-new-orgs.log')
+                sim=ROOT/'tools/recovery-v1/owner/owner-sim.mjs'; keydir=run/'owner-keys'
+                owner_pub=subprocess.run(['node',str(sim),'keygen',str(keydir),'owner-sim-1'],text=True,capture_output=True,check=True).stdout.strip()
+                command(['psql',*dbargs,'-v','recovery_v1_install_ack=restrict-every-organization','-v','recovery_v1_owner_public_key='+owner_pub,'-f',str(ROOT/'supabase/migrations-provisional/RECOVERY_V1_guards.sql')],'install-guards.log')
+                # Step 5: every organization that exists is reopened through the GENUINE owner-signed protocol and its shops get
+                # owner-approved fixture devices (s5lib). Organizations the suites create mid-run start RESTRICTED (incident 1)
+                # and stay so: a superuser can no longer pre-seed them ACTIVE (that was the pre-Step-5 fixture; V1 now refuses it).
+                s5['dev']=s5lib.DeviceSim(ROOT); owner=s5lib.Owner(sql,sim,keydir,run/'s5')
+                for org,shop,user in [('org-test','shop-a','u-cash-a1'),('org-test','shop-b','u-cash-b')]:
+                    s5lib.add_fixture_device(sql,owner,s5['dev'],org,shop,user,label='default:'+shop)
+                for org in sql("SELECT string_agg(id,' ' ORDER BY id) FROM public.organizations;",'orgs.log').split():
+                    s5lib.reopen(sql,owner,org)
             suites=['t05_stock_supplier','t06_po_transfer_records','t07_multi_terminal','t08_consistency_close','t09_org_isolation','t10_review','t11_second_org','t13_new_org_price_levels','t14_upload_security','t15_anon_audit','t16_completion_url','t19_old_client_compat']
             aborted={}
             for t in suites:
@@ -206,6 +216,15 @@ def main():
         sim=ROOT/'tools/recovery-v1/owner/owner-sim.mjs'; keydir=run/'owner-keys'
         owner_pub=subprocess.run(['node',str(sim),'keygen',str(keydir),'owner-sim-1'],text=True,capture_output=True,check=True).stdout.strip()
         command(['psql',*dbargs,'-v','recovery_v1_install_ack=restrict-every-organization','-v','recovery_v1_owner_public_key='+owner_pub,'-f',str(guards)],'install-guards.log')
+        # Step 5: owner-approved FIXTURE devices for the shops the pre-Step-5 suites sell in (genuine request + owner approval;
+        # their keys are held by the s5fx test signer), and the SQL suites' reopening fixture (fixture-activate.psql)
+        s5['dev']=s5lib.DeviceSim(ROOT); s5owner=s5lib.Owner(sql,sim,keydir,run/'s5')
+        for org,shop,user in [('org-test','shop-a','u-cash-a1'),('org-test','shop-b','u-cash-b'),('org-unrelated','shop-unrel','u-unrel')]:
+            s5lib.add_fixture_device(sql,s5owner,s5['dev'],org,shop,user,label='default:'+shop)
+        for label in ['dev1','dev2','dev3','dev4','dev5']:   # the offline smoke's separate tills of shop-a (one enrollment each)
+            s5lib.add_fixture_device(sql,s5owner,s5['dev'],'org-test','shop-a','u-cash-a1',label=label)
+        env.update(S5FX_PSQL=json.dumps(dbargs),S5FX_SIM=str(sim),S5FX_KEYDIR=str(keydir),S5FX_DIR=str(run/'s5'),S5FX_PYTHON=sys.executable,S5FX_ROOT=str(ROOT))
+        def activate(org): return s5lib.reopen(sql,s5owner,org)
         if args.with_087:
             # Interrupted / repeated install: a second run is refused and changes nothing.
             r=subprocess.run(['psql',*dbargs,'-v','recovery_v1_install_ack=restrict-every-organization','-f',str(guards)],text=True,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
@@ -218,8 +237,9 @@ def main():
             st=Suite(ROOT,run,dbargs,env,sql,command,sim,keydir)
             refused=sql("SELECT test.login('a0000000-0000-4000-8000-000000000003'); SET ROLE authenticated; SELECT public.recovery_v1_offline_capability('org-test','shop-a','device-test-0000')->>'reason'; RESET ROLE; SELECT test.logout();",'s4-unapproved.log')
             st.check('k00 without an owner-signed policy (and no test-defaults flag) no offline capability is issued','offline_policy_not_approved' in refused, refused[-200:])
-            sql("UPDATE recovery_v1.org_state SET state='ACTIVE' WHERE org_id='org-test';",'s4-active.log')   # synthetic fixture
-            st.offline_policy('owner-sim-1',{'scope':'*','maxLifetimeSeconds':3600,'maxOps':3,'maxAmountMmk':20000,'syncGraceSeconds':86400})
+            activate('org-test')   # Step 5: genuine owner-signed reopening (synthetic owner), no superuser edit
+            st.offline_policy('owner-sim-1',{'scope':'*','maxLifetimeSeconds':3600,'maxOps':3,'maxAmountMmk':20000,'syncGraceSeconds':86400,
+                                              'orgBudgetMmk':1000000,'shopBudgetMmk':500000,'deviceBudgetMmk':100000})
             file(ROOT/'tools/recovery-v1/db/offline-smoke.sql','offline-smoke.log')
             st.migrations('owner-sim-1')
             st.hardening('owner-sim-1')
@@ -227,7 +247,7 @@ def main():
             (run/'step4-results.json').write_text(json.dumps(st.results,indent=1)+'\n')
             for name,ok,detail in st.results:
                 sql("SELECT test.check(%s, %s, %s);" % ("'"+name.replace("'","''")+"'", 'true' if ok else 'false', "'"+detail.replace("'","''")+"'"),'s4-record.log')
-            sql("UPDATE recovery_v1.org_state SET state='ACTIVE' WHERE org_id='org-test';",'s4-active-after.log')
+            activate('org-test')
         # Dump an independent tiny synthetic DB, not business records, for Part C.
         sql('CREATE DATABASE recovery_backup_fixture;','backup-db.log')
         original=dbargs[dbargs.index('-d')+1];dbargs[dbargs.index('-d')+1]='recovery_backup_fixture'
@@ -321,6 +341,7 @@ def main():
         (run/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2),flush=True)
         if counts['failed'] or race_ok is False or not restored:raise RuntimeError('Smoke assertion failure')
     finally:
+        if 's5' in locals() and s5.get('dev'): s5['dev'].close()
         if started and (run/'OWNED_DISPOSABLE_CLUSTER').is_file():
             command(['pg_ctl','-D',str(data),'-m','fast','-w','stop'],'stop.log')
         print('Preserved private disposable evidence at '+str(run),flush=True)

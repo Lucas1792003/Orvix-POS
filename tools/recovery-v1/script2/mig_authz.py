@@ -205,4 +205,4 @@ def run(ctx):
     check('a28 (recorded) PostgreSQL 16 has no event_triggers GUC; the SET event_triggers path is PG17-only', guc == '0', 'settings='+guc)
 
     # leave org-test ACTIVE for the harness checks that follow
-    sql("UPDATE recovery_v1.org_state SET state='ACTIVE' WHERE org_id='org-test';", 's2-authz-leave-active.log')
+    ctx['activate']('org-test')   # Step 5: genuine owner-signed reopening (synthetic owner), not a superuser edit

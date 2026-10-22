@@ -203,7 +203,7 @@
       "id": "RECOVERY_V1",
       "kind": "provisional",
       "file": "supabase/migrations-provisional/RECOVERY_V1_guards.sql",
-      "sha256": "c3d877a34dac42781c5898fb002fdd743d2bcba172fd964c391672a731752c3f",
+      "sha256": "f59cd54a6dfa30702b8118e678313c3931248c5e7ed5a1df597e44a42abf114e",
       "status": "provisional; local implementation only",
       "requires": [
         "085|086"

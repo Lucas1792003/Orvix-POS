@@ -9,6 +9,8 @@ import { currentBackendOrigin } from "../../lib/backendOrigin";
 import { RecoveryV1Blocked, requireRecoveryV1Write } from "../../recovery/client";
 import { captureTransmission, EvidenceIntegrityError } from "../../recovery/journalCapture";
 import { OFFLINE_HEADER, type OfflineAuth } from "../../recovery/offlineCapability";
+import { DEVICE_HEADER, signOperation, trustedTill } from "../../recovery/deviceTrust";
+import { independentTrustSource } from "../../recovery/trust";
 import {
   currentOpEpoch, noteEpochStale, noteRecoveryRefusal, noteWitness, recoveryBlocksSending, recoveryCapability, recoveryMessage,
   recoveryView, storedEpoch, v87Context,
@@ -405,8 +407,8 @@ export function fromExecutorReply(rpc: string, data: unknown, status?: number): 
 //    list to that one sale; the reply shape is exactly that route's reply;
 //  - an operation recorded offline under a capability carries the x-orvix-offline header on every attempt.
 // ----------------------------------------------------------------------
-export interface SendContext { payments: unknown[] | null; offlineAuth: OfflineAuth | null }
-const NO_SEND: SendContext = { payments: null, offlineAuth: null };
+export interface SendContext { payments: unknown[] | null; offlineAuth: OfflineAuth | null; /** Step 5: x-orvix-device (signed by this till) */ deviceHeader?: string | null }
+const NO_SEND: SendContext = { payments: null, offlineAuth: null, deviceHeader: null };
 export const SPLIT_RPC = "fin_complete_sale_split";
 type Builder = PromiseLike<RawResponse> & { setHeader?: (name: string, value: string) => unknown };
 function rpcRequest(fn: string, params: Record<string, unknown>, send: SendContext): PromiseLike<RawResponse> {
@@ -428,6 +430,14 @@ function rpcRequest(fn: string, params: Record<string, unknown>, send: SendConte
         "OFFLINE_HEADER_UNSUPPORTED: this client cannot attach its offline authorization; not sent [offline_header_unsupported]" } } as unknown as RawResponse);
     }
     builder = builder.setHeader(OFFLINE_HEADER, JSON.stringify({ capabilityId: send.offlineAuth.capabilityId, deviceSeq: send.offlineAuth.deviceSeq })) as Builder;
+  }
+  if (send.deviceHeader) {
+    // Step 5: an operation this till signed is never sent without its signature (the server would refuse it anyway)
+    if (typeof builder.setHeader !== "function") {
+      return Promise.resolve({ data: null, status: 0, error: { code: "PT503", message:
+        "DEVICE_HEADER_UNSUPPORTED: this client cannot attach its device signature; not sent [device_header_unsupported]" } } as unknown as RawResponse);
+    }
+    builder = builder.setHeader(DEVICE_HEADER, send.deviceHeader) as Builder;
   }
   return builder;
 }
@@ -643,6 +653,7 @@ async function attempt(name: string, args: Record<string, unknown>, timeoutMs: n
   offlineAuth?: OfflineAuth | null): Promise<RpcOutcome> {
   // Final common financial boundary, including automatic retries. No signed
   // identity is regenerated and no old operation is given a replacement key.
+  let deviceHeader: string | null = null;
   try {
     const { useAuthStore } = await import("../authStore");
     const { useAppStore } = await import("../appStore");
@@ -652,8 +663,14 @@ async function attempt(name: string, args: Record<string, unknown>, timeoutMs: n
     const orgId = original?.orgId ?? useAuthStore.getState().currentOrgId ?? null;
     const shopId = original?.shopId ?? (typeof args.p_shop_id === "string" ? args.p_shop_id : useAppStore.getState().currentShopId ?? null);
     if (await requireRecoveryV1Write(orgId, shopId)) {
-      await captureTransmission({ orgId, shopId, backendOrigin: original?.backendOrigin ?? currentBackendOrigin(), actorId,
+      const origin = original?.backendOrigin ?? currentBackendOrigin();
+      await captureTransmission({ orgId, shopId, backendOrigin: origin, actorId,
         key, rpc: name, args, opEpoch: opEpoch ?? null, createdAt: original?.createdAt ?? new Date().toISOString() });
+      // Step 5: the server accepts the operation only with this till's signature over (enrollment, org, shop, key, rpc, counter)
+      if (!independentTrustSource() && orgId && shopId) {
+        const till = await trustedTill(origin, orgId, shopId, { online: true });
+        deviceHeader = await signOperation(till, key, name, offlineAuth ?? null);
+      }
     }
   } catch (error) {
     // Nothing was sent in any of these cases. A communication failure with a
@@ -669,7 +686,7 @@ async function attempt(name: string, args: Record<string, unknown>, timeoutMs: n
   // Step 4: a split payment travels beside the sale's own (hashed) arguments, never inside them
   const payments = name === "complete_sale" && Array.isArray(args.p_payments) ? (args.p_payments as unknown[]) : null;
   if (payments) { const { p_payments: _drop, ...rest } = args; void _drop; args = rest; }
-  const send: SendContext = { payments, offlineAuth: offlineAuth ?? null };
+  const send: SendContext = { payments, offlineAuth: offlineAuth ?? null, deviceHeader };
   // 087 backend: executor RPCs only through op_execute_v87 (legacy paths are closed there)
   // (an operation that carries an epoch was created against an 087 server: always the v87 path)
   if (EXECUTOR_RPCS.has(name) && (v87Routing() || opEpoch)) return viaExecutor87(name, args, timeoutMs, actorId, opEpoch, send);

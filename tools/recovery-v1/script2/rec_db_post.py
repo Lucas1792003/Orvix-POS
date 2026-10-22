@@ -306,11 +306,13 @@ def r3x_authorization(x):
                        text=True, env=x.c['env'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     (x.run / 'rec-r37-migration-reopen.log').write_text(q.stdout)
     x.record('r37', 'owner-SIGNED migration whose SQL reopens the organization', 'refused (an authorized migration only adds); state unchanged',
-             f"{err(q.stdout)} state={val(q.stdout,'S')}", 'PASS' if 'MIGRATION_SCOPE' in q.stdout and val(q.stdout, 'S') == 'RESTRICTED' else 'FAIL')
-    _, o = x.psql("SELECT 'R='||coalesce((SELECT string_agg(DISTINCT kind, ',') FROM recovery_v1.audit WHERE kind ~ '(reopen|release|activ)'),'none');", 'r38-audit-kinds')
-    x.record('r38', 'implementation status of owner-authorized reopening', 'documented as not implemented',
-             f"no SQL function sets org_state ACTIVE (only the transition() allow-list RESTRICTED/RECONCILING/QUARANTINED); no audit kind for release ({val(o)}); "
-             "client assessRecovery() hard-codes reopenAuthorized:false + INDEPENDENT_OWNER_RELEASE_NOT_IMPLEMENTED", 'BLOCKED')
+             # Step 5: refused by the migration scope check or, first, by the ACTIVE gate on org_state itself
+             f"{err(q.stdout)} state={val(q.stdout,'S')}", 'PASS' if ('MIGRATION_SCOPE' in q.stdout or 'REOPEN_AUTHORIZATION_REQUIRED' in q.stdout) and val(q.stdout, 'S') == 'RESTRICTED' else 'FAIL')
+    # Step 5: owner-authorized reopening is IMPLEMENTED (recovery_v1.reopen_apply behind the org_state ACTIVE gate); the
+    # containment paths still never set ACTIVE. Its behaviour is tested by tools/recovery-v1/step5/s5_suite.py (R01-R18).
+    _, o = x.psql("SELECT 'R='||(to_regprocedure('recovery_v1.reopen_apply(text,text,text)') IS NOT NULL AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='recovery_v1_org_state_guard' AND tgenabled='A'))::text;", 'r38-reopen-path')
+    x.record('r38', 'implementation status of owner-authorized reopening (Step 5)', 'implemented behind the ACTIVE gate; containment never sets ACTIVE',
+             f"reopen_apply + org_state guard present: {val(o)}", 'PASS' if val(o) == 'true' else 'FAIL')
 
 
 # ------------------------------------------------------------------------------------------------ r40-r46 refusals
@@ -434,6 +436,7 @@ def run(ctx):
         r61_retention_under_v1(x)
         x.record('r62', 'email archive delivery (real offsite)', 'owner retrieves an offsite copy', 'not exercised: only the simulated mailbox (deliverToSimulatedRecipient / backup-fixture-roundtrip) is used; delivery disabled by design', 'BLOCKED')
     finally:
-        # FIXTURE RESTORE ONLY (not a recovery): the harness's own two-session race test after this module needs org-test ACTIVE.
-        x.psql("UPDATE recovery_v1.org_state SET state='ACTIVE' WHERE org_id='org-test';", 'zz-fixture-restore-active')
+        # FIXTURE RESTORE (Step 5: genuine owner-signed reopening, synthetic owner): the harness's race test after this module needs org-test ACTIVE.
+        try: x.c['activate']('org-test')
+        except Exception as e: x.record('zz', 'fixture reopening of org-test', 'reopened', f'could not reopen: {e}'[:300], 'FAIL')
         (x.run / 'rec-post-results.json').write_text(json.dumps(x.results, indent=1) + '\n')

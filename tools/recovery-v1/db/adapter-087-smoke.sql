@@ -17,16 +17,16 @@ SELECT test.check('a04 every organization still RESTRICTED (install never sets A
   (SELECT bool_and(state='RESTRICTED') FROM recovery_v1.org_state));
 SELECT test.check('a05 087 still installed held and untouched (no lease, state hold)',
   (SELECT state='hold' FROM recovery.continuity) AND NOT EXISTS(SELECT 1 FROM recovery.lease));
-SELECT test.check('a06 the 6 public V1 entry points are SECURITY INVOKER wrappers owned by recovery_owner',
-  (SELECT count(*)=6 FROM pg_proc WHERE pronamespace='public'::regnamespace AND proname LIKE 'recovery\_v1\_%'
+SELECT test.check('a06 the 7 public V1 entry points (Step 5: + recovery_v1_call) are SECURITY INVOKER wrappers owned by recovery_owner',
+  (SELECT count(*)=7 FROM pg_proc WHERE pronamespace='public'::regnamespace AND proname LIKE 'recovery\_v1\_%'
      AND NOT prosecdef AND proowner='recovery_owner'::regrole));
 SELECT test.check('a07 V1 implementations stay SECURITY DEFINER and are not owned by an 087 role',
   (SELECT count(*)=4 FROM pg_proc WHERE oid IN('recovery_v1.status(text)'::regprocedure,'recovery_v1.transition(text,text,text,text)'::regprocedure,
      'recovery_v1.store_evidence(jsonb)'::regprocedure,'recovery_v1.store_checkpoint(jsonb)'::regprocedure) AND prosecdef AND proowner<>'recovery_owner'::regrole));
 -- evaluated exactly as recovery_guard.ddl_guard does (regprocedure text depends on search_path)
 SET search_path = pg_catalog, pg_temp;
-SELECT test.check('a08 087 registry includes the 6 wrappers and its whole backstop condition is clean',
-  (SELECT count(*)=6 FROM recovery_guard.functions WHERE fn LIKE 'public.recovery\_v1\_%')
+SELECT test.check('a08 087 registry includes the 7 wrappers and its whole backstop condition is clean',
+  (SELECT count(*)=7 FROM recovery_guard.functions WHERE fn LIKE 'public.recovery\_v1\_%')
   AND NOT EXISTS (SELECT 1 FROM recovery_guard.snapshot g WHERE NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.oid=g.relid)
                    OR g.fingerprint IS DISTINCT FROM recovery_guard.fingerprint(g.relid))
   AND NOT EXISTS (SELECT 1 FROM recovery_guard.functions f WHERE NOT EXISTS (SELECT 1 FROM pg_proc p WHERE p.oid=f.fnid
@@ -53,8 +53,9 @@ SELECT test.expect_error('h06 authenticated cannot call V1 internals despite sch
 SELECT test.expect_error('h07 087 executor refused while 087 is held', $$SELECT public.op_execute_v87(gen_random_uuid(),'open_shift','{}'::jsonb,'u-admin','{}'::jsonb)$$, 'ORG_SUSPENDED');
 RESET ROLE;
 SELECT test.logout();
--- V1 ACTIVE alone is not enough while 087 holds (synthetic superuser fixture)
-UPDATE recovery_v1.org_state SET state='ACTIVE' WHERE org_id='org-test';
+-- V1 ACTIVE alone is not enough while 087 holds (Step 5: genuine owner-signed reopening, synthetic owner)
+\set fx_org org-test
+\ir ../step5/fixture-activate.psql
 SELECT test.expect_error('h08 V1 ACTIVE + 087 held: write refused by 087', $$UPDATE public.shops SET address='x' WHERE id='shop-a'$$, 'ORG_SUSPENDED: server recovery in progress');
 SELECT test.login('a0000000-0000-4000-8000-000000000001');
 SET ROLE authenticated;
@@ -120,12 +121,16 @@ SELECT test.check('d08 non-superuser unrelated DDL passed every DDL guard (087 r
 -- (ALTER/DROP/CREATE EVENT TRIGGER fire no event trigger; they rewrite the catalog row the install pinned).
 -- Each probe runs in a transaction that is rolled back; results are carried out in psql variables.
 CREATE FUNCTION pg_temp.try(p_sql text) RETURNS text LANGUAGE plpgsql AS $t$BEGIN EXECUTE p_sql; RETURN 'ALLOWED'; EXCEPTION WHEN OTHERS THEN RETURN SQLERRM; END$t$;
+-- Step 5: the probes below need an ACTIVE organization (genuine owner-signed reopening; was a superuser UPDATE inside the
+-- rolled-back transaction), and org-test is restricted again afterwards exactly as before (o02 expects RESTRICTED)
+\set fx_org org-test
+\ir ../step5/fixture-activate.psql
 BEGIN;
-UPDATE recovery_v1.org_state SET state='ACTIVE' WHERE org_id='org-test';
 ALTER EVENT TRIGGER zz_recovery_v1_ddl DISABLE;
 ALTER EVENT TRIGGER zz_recovery_v1_ddl ENABLE ALWAYS;   -- the disable window is over, enabled again
 SELECT recovery_v1.integrity_problem() AS ip_v1window, pg_temp.try($$UPDATE public.shops SET address='x' WHERE id='shop-a'$$) AS w_v1window \gset
 ROLLBACK;
+UPDATE recovery_v1.org_state SET state='RESTRICTED' WHERE org_id='org-test';   -- back to the state the original sequence had here
 BEGIN;
 ALTER EVENT TRIGGER zz_recovery_ddl_guard DISABLE;
 SELECT recovery_v1.integrity_problem() AS ip_087off \gset
@@ -178,7 +183,8 @@ SELECT recovery.owner_open('harness-person-a','harness-person-b');
 UPDATE recovery.settings SET legacy_paths='open';   -- owner SQL decision D7 in 087; fixture only (direct SQL test writes)
 SELECT test.check('o01 synthetic 087 opening worked', :'renewed'='RENEWED' AND (SELECT state='open' FROM recovery.continuity) AND recovery.lease_ok());
 SELECT test.expect_error('o02 087 open + V1 RESTRICTED: write refused by V1', $$UPDATE public.shops SET address='x' WHERE id='shop-a'$$, 'ORG_SUSPENDED: recovery evidence unresolved');
-UPDATE recovery_v1.org_state SET state='ACTIVE',uncertainties='["SYNTHETIC FIXTURE ONLY"]' WHERE org_id='org-test';
+\set fx_org org-test
+\ir ../step5/fixture-activate.psql
 UPDATE public.shops SET address='Synthetic composed write' WHERE id='shop-a';
 SELECT test.check('o03 087 open + V1 ACTIVE: write allowed (both guards pass)', (SELECT address='Synthetic composed write' FROM public.shops WHERE id='shop-a'));
 SELECT test.login('a0000000-0000-4000-8000-000000000001');

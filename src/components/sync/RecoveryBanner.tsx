@@ -8,6 +8,7 @@ import { onRecoveryV1Change, recoveryV1View, type RecoveryV1Status } from "../..
 import { offlineAuthorizationView, type OfflineView } from "../../recovery/offlineCapability";
 import { useAppStore } from "../../stores/appStore";
 import { formatDateTime, formatMmk } from "../../lib/utils";
+import { DeviceTrustPanel } from "./DeviceTrustPanel";
 
 // Migration 087: the till's recovery state, shown on every screen
 // (docs/selfhost-migration/phase-g/migration-087.md, "Client contract").
@@ -112,6 +113,7 @@ export function RecoveryBanner() {
           Existing device records are preserved. Financial operations require current server and independent device authorization.
         </div>
       )}
+      {v1.present && orgId && shopId ? <DeviceTrustPanel orgId={orgId} shopId={shopId} /> : null}
       {blocked && view.mode !== "normal" && view.mode !== "legacy-server" && (
         <div role="alert" data-testid="recovery-banner" data-mode={view.mode}
           className="flex flex-wrap items-center justify-between gap-3 border-b border-rose-300 bg-rose-50 px-4 py-2 text-sm text-rose-900 print-hidden">

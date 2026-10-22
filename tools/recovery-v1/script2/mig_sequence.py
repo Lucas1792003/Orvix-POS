@@ -136,4 +136,4 @@ def run(ctx):
     check('s10 deploy/lucashome migration_plan unit suite passes without Docker (checksum/gap/order/rollback refusals)',
           r.returncode == 0 and re.search(r'OK', r.stdout) is not None, r.stdout[-160:])
 
-    sql("UPDATE recovery_v1.org_state SET state='ACTIVE' WHERE org_id='org-test';", 'seq-leave-active.log')
+    ctx['activate']('org-test')   # Step 5: genuine owner-signed reopening (synthetic owner), not a superuser edit

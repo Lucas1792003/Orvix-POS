@@ -6,16 +6,21 @@ vi.mock("../lib/supabase", async () => ({ supabase: (await import("../stores/dat
 import { fakeSupabase as fake } from "../stores/data/testing/fakeSupabase";
 import { localDb } from "../lib/localDb";
 import {
-  authorizeOfflineOperation, maintainOfflineCapability, offlineAuthorizationView, offlineDeviceId, OfflineAuthorizationUnavailable,
+  authorizeOfflineOperation, maintainOfflineCapability, offlineAuthorizationView, OfflineAuthorizationUnavailable,
   resetOfflineCapabilityForTests, withdrawOfflineCapability, type OfflineCapability,
 } from "./offlineCapability";
+// Step 5: offline authority belongs to an owner-approved till; the tests run on a synthetic one (testing.ts)
+import { installSyntheticTrustedTill } from "./testing";
+import { resetTillVaultForTests } from "./deviceTrust";
+import { currentBackendOrigin } from "../lib/backendOrigin";
+let tillDeviceId = "";
 
 const T0 = Date.parse("2026-10-21T08:00:00Z");
 let reply: () => { data: unknown; error: unknown; status: number } = () => ({ data: null, error: { code: "PGRST202", message: "missing" }, status: 404 });
 let capCalls = 0;
 
 const capability = async (over: Partial<OfflineCapability> = {}): Promise<OfflineCapability> => ({
-  protocol: "orvix-offline-capability-v1", id: `cap-${++capCalls}`, orgId: "org-1", shopId: "shop-1", deviceId: await offlineDeviceId(),
+  protocol: "orvix-offline-capability-v1", id: `cap-${++capCalls}`, orgId: "org-1", shopId: "shop-1", deviceId: tillDeviceId,
   userId: "user-1", offlineEpoch: 0, policyScope: "*", policyStatus: "DEFAULT_UNAPPROVED",
   issuedAt: new Date(Date.now()).toISOString(), expiresAt: new Date(Date.now() + 2 * 3600_000).toISOString(),
   syncDeadline: new Date(Date.now() + 9 * 86400_000).toISOString(), maxOps: 3, maxAmountMmk: 10_000, allowedOps: ["complete_sale"], ...over,
@@ -37,13 +42,14 @@ beforeEach(async () => {
   vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(T0);
   fake.reset(); resetOfflineCapabilityForTests(); capCalls = 0;
   await Promise.all(localDb.tables.map((t) => t.clear()));
+  await resetTillVaultForTests(); tillDeviceId = (await installSyntheticTrustedTill({ origin: currentBackendOrigin() })).deviceId;
   vi.stubGlobal("navigator", { onLine: true });
   const real = fake.rpc;
   vi.spyOn(fake, "rpc").mockImplementation((name, args = {}) => {
     if (name !== "recovery_v1_offline_capability") return real(name, args);
     fake.calls.push({ name, args, mode: "succeed", replayed: false });
     const promise = Promise.resolve(reply());
-    const builder = { abortSignal: () => builder, then: promise.then.bind(promise) };
+    const builder = { abortSignal: () => builder, setHeader: () => builder, then: promise.then.bind(promise) };
     return builder as ReturnType<typeof real>;
   });
 });
@@ -63,6 +69,17 @@ describe("offline capability (client enforcement)", () => {
     expect(await sale(2000)).toEqual({ capabilityId: cap.id, deviceSeq: 2 });
     const v = await offlineAuthorizationView("org-1", "shop-1", "user-1");
     expect(v).toMatchObject({ state: "valid", remainingOps: 1, remainingAmountMmk: 7000 });
+  });
+
+  it("Step 5 regression: an EXHAUSTED capability is not 'fresh' — while connected the till asks for a new one before half its lifetime", async () => {
+    await issue({ maxOps: 1 });
+    await sale(1000);
+    expect(await refusal(sale(1000))).toBe("exhausted");
+    const next = await capability();
+    reply = () => ({ data: { outcome: "issued", capability: next, serverTime: new Date(Date.now()).toISOString() }, error: null, status: 200 });
+    resetOfflineCapabilityForTests();                               // past the 30 s ask throttle; still within the first half of the lifetime
+    await maintainOfflineCapability("org-1", "shop-1", "user-1");   // not forced
+    expect(await refusal(sale(1000))).toBe("authorized");
   });
 
   it("exhaustion: the count and the value limits stop offline selling", async () => {
@@ -159,7 +176,7 @@ describe("offline capability (client enforcement)", () => {
     vi.spyOn(fake, "rpc").mockImplementation((name, args = {}) => {
       if (name !== "recovery_v1_offline_capability") return real(name, args);
       const promise = gate.then(() => reply());
-      const builder = { abortSignal: () => builder, then: promise.then.bind(promise) };
+      const builder = { abortSignal: () => builder, setHeader: () => builder, then: promise.then.bind(promise) };
       return builder as ReturnType<typeof real>;
     });
     const pending = maintainOfflineCapability("org-1", "shop-1", "user-1", { force: true });

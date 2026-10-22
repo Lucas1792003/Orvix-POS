@@ -7,7 +7,8 @@ SELECT test.expect_error('superuser: a cost row updated by a RESTRICTED org user
   $$UPDATE public.product_costs SET updated_by='u-unrel' WHERE product_id='prod-1'$$, 'ORG_SUSPENDED');
 -- Review round 4: a cost row written FIRST for a not-yet-existing id must not let that id be
 -- created in another organization afterwards (even with BOTH organizations ACTIVE).
-UPDATE recovery_v1.org_state SET state='ACTIVE' WHERE org_id='org-unrelated';
+\set fx_org org-unrelated
+\ir ../step5/fixture-activate.psql
 SELECT test.expect_error('both ACTIVE: org-test cost row first, then the product created in org-unrelated, is refused',
   $$DO $x$ BEGIN
     INSERT INTO public.product_costs(product_id,org_id,cost_mmk) VALUES('p-future','org-test',42);

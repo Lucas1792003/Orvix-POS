@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { digest, sign, syntheticSigningKey } from "./canonical";
 import { signEvidence, verifyEvidence, verifyEvidencePrefix, type EvidenceBody, type EvidenceRecord } from "./evidence";
-import { createCheckpoint, LocalTestWitness, MemoryTestWitnessStore, verifyWitnessBoundary, verifyWitnessReceipt, type Checkpoint, type WitnessReceipt } from "./witness";
+import { createCheckpoint, LocalTestWitness, MemoryTestWitnessStore, verifyWitnessBoundary, verifyWitnessReceipt, type Checkpoint } from "./witness";
 import { assessRecovery } from "./assessment";
 import type { DeviceIdentity } from "./deviceVault";
 import type { Enrollment, IndependentTrustSource } from "./trust";

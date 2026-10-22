@@ -5,6 +5,7 @@ import { digest } from "./canonical";
 import { enrolledDevice } from "./deviceVault";
 import { evidenceStream, signEvidence, type EvidenceRecord } from "./evidence";
 import { independentTrustSource, TrustUnavailable } from "./trust";
+import { currentTill, tillEvidenceIdentity } from "./deviceTrust";
 
 export const DEVICE_EVIDENCE_PREFIX = "rv1:evidence:";
 export const WITNESS_RECEIPT_PREFIX = "rv1:witness:";
@@ -27,7 +28,12 @@ interface CaptureInput {
  *  per call (no shared state), so concurrent captures can never swap or erase each other's gap. */
 interface Captured { hash: string | null; gap: string | null }
 async function capture(input: CaptureInput, observation: unknown, kind: "journal-observation" | "transmission", required: boolean): Promise<Captured> {
-  if (!independentTrustSource()) {
+  // Step 5: an owner-approved till (deviceTrust.ts) signs its evidence with its bound ECDSA evidence key when no Step 4
+  // independent trust source is injected
+  // (the vault read is started INSIDE waitFor, as below: the caller's IndexedDB transaction must stay alive)
+  const stepFive = !independentTrustSource() && Boolean(input.orgId && input.shopId && input.backendOrigin)
+    && Boolean(await Dexie.waitFor(Promise.resolve().then(() => currentTill(input.backendOrigin!, input.orgId!, input.shopId!)).catch(() => null)));
+  if (!independentTrustSource() && !stepFive) {
     if (required) throw new TrustUnavailable();
     return { hash: null, gap: null }; // Existing legacy data is retained, never retroactively called signed.
   }
@@ -37,7 +43,9 @@ async function capture(input: CaptureInput, observation: unknown, kind: "journal
   }
   // Resolve inside waitFor even on an unavailable key. This keeps the caller's
   // IDB transaction active while still retaining critical outcome observations.
-  const identity = await Dexie.waitFor(Promise.resolve().then(() => enrolledDevice(input.backendOrigin!, input.orgId!, input.shopId!)).catch(() => null));
+  const identity = await Dexie.waitFor(Promise.resolve().then(() => stepFive
+    ? tillEvidenceIdentity(input.backendOrigin!, input.orgId!, input.shopId!)
+    : enrolledDevice(input.backendOrigin!, input.orgId!, input.shopId!)).catch(() => null));
   if (!identity) {
     if (required) throw new TrustUnavailable("The enrolled signing identity is unavailable; it will not be regenerated.");
     return { hash: null, gap: "device-authorization-unavailable" };

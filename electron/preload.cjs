@@ -20,6 +20,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   appVersion: () => ipcRenderer.invoke("app:get-version"),
 
+  /** Recovery V1 Step 5: the owner key fingerprints provisioned on this till (read-only; strings only). */
+  ownerTrustAnchors: () => ipcRenderer.invoke("owner-trust:anchors"),
+
   /** Manually triggers an update check — progress/result arrives via onUpdateStatus. */
   checkForUpdates: () => ipcRenderer.invoke("updates:check"),
 

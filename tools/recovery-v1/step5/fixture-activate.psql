@@ -1,0 +1,13 @@
+-- SYNTHETIC FIXTURE (Step 5): reopen :fx_org through the GENUINE owner-signed protocol (RECONCILING, recorded report,
+-- owner signature over its digest from the synthetic signer outside the database, submission). Replaces the pre-Step-5
+-- superuser "UPDATE recovery_v1.org_state SET state='ACTIVE'" fixtures, which V1 now refuses.
+-- Usage inside a suite (outside any open transaction):  \set fx_org org-test  then  \ir ../step5/fixture-activate.psql
+\setenv S5FX_ORG :fx_org
+\! "$S5FX_PYTHON" -I "$S5FX_ROOT/tools/recovery-v1/step5/fixture_cli.py" activate >> "$S5FX_DIR/fixture-activate.log" 2>&1
+SELECT set_config('s5fx.org', :'fx_org', false);
+DO $fx$ BEGIN
+  IF recovery_v1.activation_problem(current_setting('s5fx.org')) IS NOT NULL THEN
+    RAISE EXCEPTION 'FIXTURE REOPEN FAILED for %: % (state %)', current_setting('s5fx.org'), recovery_v1.activation_problem(current_setting('s5fx.org')),
+      (SELECT state FROM recovery_v1.org_state WHERE org_id = current_setting('s5fx.org'));
+  END IF;
+END $fx$;

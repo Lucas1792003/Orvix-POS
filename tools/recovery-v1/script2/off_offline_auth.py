@@ -12,8 +12,17 @@ Check naming: "OFF-oNN <scenario>". Checks that demonstrate a design limitation 
 "LIMITATION: ..." and pass when the limitation is DEMONSTRATED (the number is recorded in the detail). Policy-dependent
 behaviour is named "POLICY: ...". A defect is a check that asserts the CORRECT behaviour and therefore fails.
 Machine-readable evidence: <run>/off-offline-auth.json.
+
+Step 5 port (docs/recovery-v1/STEP5-DESIGN.md): a capability is issued only to an OWNER-APPROVED device that signs the request,
+and an offline operation must carry the capability's own device signature. Every till below is therefore an owner-approved
+fixture device (tools/recovery-v1/step5/s5lib.py, enrolled through the genuine protocol, its key held by the s5fx test signer):
+issue() asks through s5fx.capability, and a sale is signed by the capability's device (s5fx.device). Three Script 2
+LIMITATION checks are resolved by Step 5 and now assert the correct behaviour instead: o11 (a capability presented from another
+device is held), o25 (cumulative exposure is bounded by the aggregate budgets), o27 (a renamed device id gets no capability).
 """
-import json, re, subprocess, time, uuid
+import json, pathlib, re, subprocess, sys, time, uuid
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'step5'))
+import s5lib
 
 A_ADMIN = 'a0000000-0000-4000-8000-000000000001'
 A_MGR_A = 'a0000000-0000-4000-8000-000000000002'
@@ -29,6 +38,22 @@ class Off:
         self.ctx, self.run = ctx, ctx['run']
         self.results = []
         self.n = 0
+        self.cap_dev = {}       # capability id -> the fixture device label it was issued to
+        self.dev_user = {}      # fixture device label -> (org, shop, device id)
+
+    def enroll_devices(self, specs):
+        """Step 5: every till of this module is an owner-approved fixture device (genuine request + synthetic owner approval)."""
+        dev = s5lib.DeviceSim(self.ctx['ROOT'])
+        owner = s5lib.Owner(self.ctx['sql'], self.ctx['sim'], self.ctx['keydir'], self.run / 'off-owner')
+        try:
+            for label, org, shop, user in specs:
+                e = s5lib.add_fixture_device(self.ctx['sql'], owner, dev, org, shop, user, label=label)
+                self.dev_user[label] = (org, shop, e['deviceId'])
+        finally:
+            dev.close()
+
+    def device_id(self, label):
+        return self.dev_user[label][2]
 
     # -------------------------------------------------------------- plumbing
     def psql(self, script, label):
@@ -75,18 +100,22 @@ class Off:
         return (f"DO $p$ DECLARE r jsonb; BEGIN r := {call}; RAISE NOTICE 'PROBE|{tag}|accepted %', coalesce(r->'sale'->>'id', left(r::text, 80)); "
                 f"EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'PROBE|{tag}|%', SQLERRM; END $p$;")
 
-    def as_user(self, auth, body, tx=None):
-        """body runs as `authenticated` for auth; tx = None (autocommit), 'commit' or 'rollback'."""
+    def as_user(self, auth, body, tx=None, device=''):
+        """body runs as `authenticated` for auth; tx = None (autocommit), 'commit' or 'rollback'. device: the fixture device label whose
+        signature the s5fx test signer attaches to ledger operations (Step 5; '' = the shop's default fixture device)."""
         pre = 'BEGIN;\n' if tx else ''
         post = ('COMMIT;\n' if tx == 'commit' else 'ROLLBACK;\n') if tx else ''
-        return f"{pre}SELECT test.login('{auth}');\nSET ROLE authenticated;\n{body}\nRESET ROLE;\n{self.NOHDR}\n{post}"
+        return f"{pre}SELECT set_config('s5fx.device', '{device}', false);\nSELECT test.login('{auth}');\nSET ROLE authenticated;\n{body}\nRESET ROLE;\n{self.NOHDR}\n{post}"
 
     def issue(self, auth, device, shop='shop-a', org='org-test'):
-        rc, out = self.psql(self.as_user(auth, f"SELECT public.recovery_v1_offline_capability('{org}', '{shop}', '{device}')::text;"), 'issue')
+        """Step 5: the device-signed capability request of an owner-approved fixture device (label)."""
+        rc, out = self.psql(self.as_user(auth, f"SELECT s5fx.capability('{org}', '{shop}', '{device}')::text;"), 'issue')
         line = next((l for l in out.splitlines() if l.startswith('{')), None)
         if rc or not line:
             return {'outcome': 'error', 'raw': out[-400:]}
-        return json.loads(line)
+        r = json.loads(line)
+        if r.get('outcome') == 'issued': self.cap_dev[r['capability']['id']] = device
+        return r
 
     def cap_id(self, auth, device, shop='shop-a'):
         r = self.issue(auth, device, shop)
@@ -94,8 +123,12 @@ class Off:
             raise RuntimeError(f'capability not issued for {auth}/{device}: {r}')
         return r['capability']['id']
 
-    def sale(self, auth, header_sql, shift, key, tag='s', **kw):
-        rc, out = self.psql(self.as_user(auth, header_sql + '\n' + self.probe(tag, self.sale_call(shift, key, **kw))), 'sale-' + tag)
+    def sale(self, auth, header_sql, shift, key, tag='s', device=None, **kw):
+        """device: the fixture device that signs (default: the device of the capability named in the header, if known)."""
+        if device is None:
+            m = re.search(r"'capabilityId', '([0-9a-f-]{36})'", header_sql)
+            device = self.cap_dev.get(m.group(1), '') if m else ''
+        rc, out = self.psql(self.as_user(auth, header_sql + '\n' + self.probe(tag, self.sale_call(shift, key, **kw)), device=device), 'sale-' + tag)
         return self.probes(out).get(tag, f'NO-PROBE rc={rc} {out[-300:]}')
 
     def usage(self, cap):
@@ -105,26 +138,30 @@ class Off:
         sid = self.q(f"SELECT id FROM public.shifts WHERE cashier_id = '{user_id}' AND shop_id = '{shop}' AND ended_at IS NULL ORDER BY 1 LIMIT 1;")
         if sid:
             return sid
-        rc, out = self.psql(self.as_user(auth, self.NOHDR + f"\nSELECT public.open_shift('{shop}', 0, NULL, NULL, '{uuid.uuid4()}')->'shift'->>'id';"), 'open-shift')
+        rc, out = self.psql(self.as_user(auth, self.NOHDR + f"\nSELECT public.open_shift('{shop}', 0, NULL, NULL, '{uuid.uuid4()}')->'shift'->>'id';",
+                                         device=f'default:{shop}'), 'open-shift')   # Step 5: signed by a device OF that shop
         sid = self.q(f"SELECT id FROM public.shifts WHERE cashier_id = '{user_id}' AND shop_id = '{shop}' AND ended_at IS NULL ORDER BY 1 LIMIT 1;")
         if not sid:
             raise RuntimeError(f'no open shift for {user_id} in {shop}: {out[-400:]}')
         return sid
 
-    def fixture_cap(self, src_cap, new_id, device, expires_sql, deadline_sql, issued_sql="now() - interval '2 days'", mac_override=None, doc_patch=''):
+    def fixture_cap(self, src_cap, new_id, device, expires_sql, deadline_sql, issued_sql="now() - interval '2 days'", mac_override=None, doc_patch='', label='a1-fx'):
         """Insert a capability row as the superuser (like offline-smoke.sql o22): the document is re-built for new_id and
         MAC'd with the server key unless mac_override is given. doc_patch is a jsonb expression merged into the document."""
         mac = mac_override or "encode(recovery_v1.hmac_sha256(convert_to(x.doc::text, 'UTF8'), (SELECT k FROM recovery_v1.keys WHERE name = 'offline-mac')), 'hex')"
         patch = f" || {doc_patch}" if doc_patch else ''
+        # Step 5: the row is bound to an owner-approved fixture device (its enrollment and device id)
+        device = self.device_id(label); self.cap_dev[new_id] = label
+        enr = self.q(f"SELECT enrollment_id FROM s5fx.devices WHERE label = '{label}';")
         return self.psql(f"""
 INSERT INTO recovery_v1.offline_capabilities
 SELECT '{new_id}'::uuid, c.org_id, c.shop_id, '{device}', c.user_id, y.ep, c.policy_scope, c.policy_status, {issued_sql}, y.ex, y.dl,
-       (x.doc->>'maxOps')::int, (x.doc->>'maxAmountMmk')::bigint, c.allowed_ops, x.doc::text, {mac}
+       (x.doc->>'maxOps')::int, (x.doc->>'maxAmountMmk')::bigint, c.allowed_ops, x.doc::text, {mac}, '{enr}'::uuid
   FROM recovery_v1.offline_capabilities c,
   LATERAL (SELECT (SELECT offline_epoch FROM recovery_v1.org_state WHERE org_id = c.org_id) AS ep,
                   date_trunc('milliseconds', {expires_sql}) AS ex, date_trunc('milliseconds', {deadline_sql}) AS dl) y,
   LATERAL (SELECT jsonb_build_object('protocol','orvix-offline-capability-v1','id','{new_id}','orgId',c.org_id,'shopId',c.shop_id,'deviceId','{device}',
-     'userId',c.user_id,'offlineEpoch',y.ep,'policyScope',c.policy_scope,'policyStatus',c.policy_status,
+     'userId',c.user_id,'enrollmentId','{enr}','offlineEpoch',y.ep,'policyScope',c.policy_scope,'policyStatus',c.policy_status,
      'expiresAt', to_char(y.ex AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
      'maxOps',c.max_ops,'maxAmountMmk',c.max_amount_mmk,
      'syncDeadline', to_char(y.dl AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')){patch} AS doc) x
@@ -138,6 +175,11 @@ SELECT '{new_id}'::uuid, c.org_id, c.shop_id, '{device}', c.user_id, y.ep, c.pol
                    pol == '3/20000/3600/86400/OWNER_APPROVED' and q("SELECT state FROM recovery_v1.org_state WHERE org_id='org-test';") == 'ACTIVE', pol)
         # synthetic stock fixture so that no scenario is decided by "insufficient stock" (superuser, org-test is ACTIVE)
         q("UPDATE public.inventory SET qty_base_units = 100000 WHERE shop_id IN ('shop-a','shop-b') AND product_id IN ('prod-1','prod-2','prod-3');")
+        # Step 5: the module's tills, each an owner-approved fixture device (one enrollment per label)
+        a1 = ['off-dev-a1-0001', 'off-dev-a1-dev1', 'a1-fx', 'off-dev-a1-expo', 'off-dev-a1-ops1', 'off-dev-a1-nall', 'off-dev-a1-conc', 'off-dev-a1-revk', 'off-dev-a1-epch']
+        self.enroll_devices([(d, 'org-test', 'shop-a', 'u-cash-a1') for d in a1] + [('off-dev-admin-01', 'org-test', 'shop-a', 'u-admin')]
+                            + [(d, 'org-test', 'shop-a', 'u-cash-a2') for d in ['off-dev-a2-cumu'] + [f'off-a2-rate{i}' for i in range(1, 6)]]
+                            + [(f'off-dev-b-cumu{i}', 'org-test', 'shop-b', 'u-cash-b') for i in (1, 2, 3)])
         s_a1 = self.open_shift(A_A1, 'u-cash-a1', 'shop-a')
         s_a2 = self.open_shift(A_A2, 'u-cash-a2', 'shop-a')
         sale = self.sale
@@ -192,53 +234,23 @@ SELECT '{new_id}'::uuid, c.org_id, c.shop_id, '{device}', c.user_id, y.ep, c.pol
         r9 = sale(A_A2, self.hdr(cap, 2), s_a2, str(uuid.uuid4()), 'o09')
         self.check('OFF-o09 another cashier presenting A1\'s capability is held (offline_capability_binding)', 'offline_capability_binding' in r9, r9)
         # o10 another organization's capability (org-unrelated made ACTIVE for this rolled-back transaction only)
-        devu = 'off-dev-unrel-01'
-        rc, out = self.psql(f"""BEGIN;
-UPDATE recovery_v1.org_state SET state='ACTIVE' WHERE org_id='org-unrelated';
-SELECT test.login('{A_UNREL}'); SET ROLE authenticated;
-SELECT public.recovery_v1_offline_capability('org-unrelated','shop-unrel','{devu}')->'capability'->>'id' AS ucap \\gset
-RESET ROLE; SELECT test.login('{A_A1}');
+        # Step 5: org-unrelated is reopened through the genuine owner-signed protocol (was a rolled-back superuser UPDATE) and its
+        # capability is requested by its own owner-approved fixture device
+        self.ctx['activate']('org-unrelated')
+        rc, out = self.psql(f"""SELECT test.login('{A_UNREL}'); SET ROLE authenticated;
+SELECT s5fx.capability('org-unrelated','shop-unrel','default:shop-unrel')->'capability'->>'id' AS ucap \\gset
+RESET ROLE; SELECT test.login('{A_A1}'); SELECT set_config('s5fx.device', 'off-dev-a1-0001', false);
 SELECT set_config('request.headers', jsonb_build_object('x-orvix-offline', jsonb_build_object('capabilityId', :'ucap', 'deviceSeq', 1)::text)::text, false);
 SET ROLE authenticated;
 {self.probe('o10', self.sale_call(s_a1, uuid.uuid4()))}
-RESET ROLE; {self.NOHDR}
-ROLLBACK;""", 'o10')
+RESET ROLE; {self.NOHDR}""", 'o10')
         r10 = self.probes(out).get('o10', out[-300:])
         self.check('OFF-o10 a capability of another organization is held (offline_capability_binding)', 'offline_capability_binding' in r10, r10)
         # o11 capability of another DEVICE: the header carries no device identity
         cap_d1 = self.cap_id(A_A1, 'off-dev-a1-dev1')
-        r11 = sale(A_A1, self.hdr(cap_d1, 1), s_a1, str(uuid.uuid4()), 'o11')
-        self.check('OFF-o11 LIMITATION: a capability issued for device D1 and presented from any other till of the same cashier is accepted '
-                   '(x-orvix-offline carries no device identity; device binding is advisory)', r11.startswith('accepted'), r11)
-
-        # o12 MAC-tampered row / copied row / forged with the key ---------------------------------------
-        t_id = str(uuid.uuid4())
-        rc, out = self.fixture_cap(cap, t_id, 'off-dev-a1-tamp', "now() + interval '1 hour'", "now() + interval '1 day'", mac_override="repeat('0', 64)")
-        r12 = sale(A_A1, self.hdr(t_id, 1), s_a1, str(uuid.uuid4()), 'o12') if rc == 0 else f'fixture failed {out[-200:]}'
-        self.check('OFF-o12 a row whose MAC does not match its document is held (offline_capability_integrity)', 'offline_capability_integrity' in r12, r12)
-        c_id = str(uuid.uuid4())
-        rc, out = self.psql(f"""INSERT INTO recovery_v1.offline_capabilities SELECT '{c_id}'::uuid, org_id, shop_id, device_id, user_id, offline_epoch, policy_scope, policy_status,
-  now() - interval '2 days', expires_at, sync_deadline, 1000, 1000000000, allowed_ops, document, mac FROM recovery_v1.offline_capabilities WHERE id = '{cap}'::uuid;""", 'copy')
-        r13 = sale(A_A1, self.hdr(c_id, 1), s_a1, str(uuid.uuid4()), 'o13') if rc == 0 else f'fixture failed {out[-200:]}'
-        self.check('OFF-o13 a copied row (another capability\'s document + MAC under a new id, raised limits) is held (offline_capability_integrity)',
-                   'offline_capability_integrity' in r13, r13)
-        f_id = str(uuid.uuid4())
-        rc, out = self.fixture_cap(cap, f_id, 'off-dev-a1-forg', "now() + interval '1 hour'", "now() + interval '1 day'",
-                                   doc_patch="jsonb_build_object('maxOps', 1000, 'maxAmountMmk', 1000000000)")
-        r14 = sale(A_A1, self.hdr(f_id, 1), s_a1, str(uuid.uuid4()), 'o14', product='prod-3', qty=10) if rc == 0 else f'fixture failed {out[-200:]}'
-        self.check('OFF-o14 LIMITATION: a database superuser who reads recovery_v1.keys can mint a valid capability with any limits '
-                   '(the MAC key lives in the same database; MAC only stops edits made without it)', r14.startswith('accepted'), r14)
-
-        # o15 expired but before deadline / o16 after deadline ------------------------------------------
-        e_id = str(uuid.uuid4())
-        rc, out = self.fixture_cap(cap, e_id, 'off-dev-a1-expd', "now() - interval '10 minutes'", "now() + interval '20 hours'")
-        r15 = sale(A_A1, self.hdr(e_id, 1), s_a1, str(uuid.uuid4()), 'o15') if rc == 0 else f'fixture failed {out[-200:]}'
-        self.check('OFF-o15 POLICY: an operation synced AFTER expires_at but before sync_deadline is ACCEPTED (server checks only the deadline; '
-                   'expiry is enforced by the till alone)', r15.startswith('accepted'), r15)
-        d_id = str(uuid.uuid4())
-        rc, out = self.fixture_cap(cap, d_id, 'off-dev-a1-dead', "now() - interval '2 days'", "now() - interval '1 second'")
-        r16 = sale(A_A1, self.hdr(d_id, 1), s_a1, str(uuid.uuid4()), 'o16') if rc == 0 else f'fixture failed {out[-200:]}'
-        self.check('OFF-o16 an operation synced after the sync deadline is held (offline_capability_sync_deadline)', 'offline_capability_sync_deadline' in r16, r16)
+        r11 = sale(A_A1, self.hdr(cap_d1, 1), s_a1, str(uuid.uuid4()), 'o11', device='off-dev-a1-0001')
+        self.check('OFF-o11 (Step 5: limitation resolved) a capability issued for device D1 and presented from another till of the same cashier is held '
+                   '(offline_capability_device: the operation must carry D1\'s own device signature)', 'offline_capability_device' in r11, r11)
 
         # o17 exposure: ops and amount ------------------------------------------------------------------
         cx = self.cap_id(A_A1, 'off-dev-a1-expo')
@@ -270,7 +282,7 @@ ROLLBACK;""", 'o10')
 
         # o21 concurrent syncs of one capability cannot exceed the amount ----------------------------------
         cc = self.cap_id(A_A1, 'off-dev-a1-conc')
-        s1 = (f"BEGIN; SELECT test.login('{A_A1}'); {self.hdr(cc, 1)} SET ROLE authenticated; "
+        s1 = (f"BEGIN; SELECT test.login('{A_A1}'); SELECT set_config('s5fx.device', 'off-dev-a1-conc', false); {self.hdr(cc, 1)} SET ROLE authenticated; "
               f"{self.probe('c1', self.sale_call(s_a1, uuid.uuid4(), product='prod-3', qty=5))} SELECT pg_sleep(2); COMMIT;")
         p1 = subprocess.Popen(['psql', *self.ctx['dbargs']], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=self.ctx['env'])
         p1.stdin.write(s1); p1.stdin.close()
@@ -298,10 +310,16 @@ ROLLBACK;""", 'o23')
         self.check('OFF-o23 an unapproved (DEFAULT_UNAPPROVED) org policy issues nothing (offline_policy_not_approved; superuser fixture, rolled back)',
                    'R=offline_policy_not_approved' in out, out[-300:])
         # o24 rate limit 30 / hour / cashier (A2, rolled back)
-        rc, out = self.psql(self.as_user(A_A2, """DO $r$ DECLARE r jsonb; n int := 0; i int; first_refusal int; BEGIN
- FOR i IN 1..35 LOOP r := public.recovery_v1_offline_capability('org-test','shop-a','off-dev-a2-rate'||lpad(i::text,3,'0'));
+        # Step 5: the aggregate budgets would stop issuance before 30, so this rolled-back transaction gives org-test a generous
+        # (superuser fixture) policy; the requests come from 5 owner-approved fixture devices of A2, in turn
+        rc, out = self.psql("BEGIN;\nINSERT INTO recovery_v1.authorized_txn(txid, purpose, ref) VALUES (txid_current(), 'offline-policy', 'org-test');\n"
+            "INSERT INTO recovery_v1.offline_policy(scope, max_lifetime_seconds, max_ops, max_amount_mmk, sync_grace_seconds, status, auth_sha256, org_budget_mmk, shop_budget_mmk, device_budget_mmk)"
+            " VALUES ('org-test', 3600, 3, 20000, 86400, 'OWNER_APPROVED', repeat('0',64), 1000000000, 1000000000, 1000000000);\n"
+            "DELETE FROM recovery_v1.authorized_txn WHERE txid = txid_current();\n"
+            + self.as_user(A_A2, """DO $r$ DECLARE r jsonb; n int := 0; i int; first_refusal int; BEGIN
+ FOR i IN 1..35 LOOP r := s5fx.capability('org-test','shop-a','off-a2-rate'||(1 + i % 5)::text);
    IF r->>'outcome' = 'issued' THEN n := n + 1; ELSIF first_refusal IS NULL THEN first_refusal := i; RAISE NOTICE 'PROBE|why|%', r->>'reason'; END IF; END LOOP;
- RAISE NOTICE 'PROBE|rate|%|%', n, first_refusal; END $r$;""", tx='rollback'), 'o24')
+ RAISE NOTICE 'PROBE|rate|%|%', n, first_refusal; END $r$;""") + "ROLLBACK;\n", 'o24')
         pr = self.probes(out)
         existing = q("SELECT count(*) FROM recovery_v1.offline_capabilities WHERE user_id='u-cash-a2' AND issued_at > now() - interval '1 hour';")
         self.check('OFF-o24 issuance is rate limited at 30 per cashier per hour (rate_limited)',
@@ -312,36 +330,74 @@ ROLLBACK;""", 'o23')
 
         # o26 revocation while offline, then sync => held; o27 device fungibility -------------------------
         cr = self.cap_id(A_A1, 'off-dev-a1-revk')
-        rc, out = self.psql(self.as_user(A_ADMIN, "SELECT public.recovery_v1_revoke_device('org-test','off-dev-a1-revk','Synthetic: till lost')::text;"), 'revoke')
+        rc, out = self.psql(self.as_user(A_ADMIN, f"SELECT public.recovery_v1_revoke_device('org-test','{self.device_id('off-dev-a1-revk')}','Synthetic: till lost')::text;"), 'revoke')
         r26 = sale(A_A1, self.hdr(cr, 1), s_a1, str(uuid.uuid4()), 'o26')
         again = self.issue(A_A1, 'off-dev-a1-revk')
-        self.check('OFF-o26 revoked while offline: the sync is held (offline_device_revoked) and the device gets no new capability (device_revoked)',
-                   'offline_device_revoked' in r26 and again.get('reason') == 'device_revoked', f'{r26} | {again}')
-        fresh = self.issue(A_A1, 'off-dev-a1-revk-renamed')
-        r27 = sale(A_A1, self.hdr(fresh['capability']['id'], 1), s_a1, str(uuid.uuid4()), 'o27') if fresh.get('outcome') == 'issued' else str(fresh)
-        self.check('OFF-o27 LIMITATION: revocation is per client-chosen device-id string -- the same signed-in cashier obtains a new capability under '
-                   'another device id at once and its offline sales are accepted', fresh.get('outcome') == 'issued' and r27.startswith('accepted'), f'{fresh.get("outcome")} | {r27}')
+        # Step 5: the revoked device's signature is refused by the device-trust check itself (device_revoked), before the offline check
+        self.check('OFF-o26 revoked while offline: the sync is held (device_revoked / offline_device_revoked) and the device gets no new capability (device_revoked)',
+                   ('offline_device_revoked' in r26 or 'device_revoked' in r26) and again.get('reason') == 'device_revoked', f'{r26} | {again}')
+        renamed = 'till-renamed-' + uuid.uuid4().hex[:8]
+        rc, out = self.psql(self.as_user(A_A1, f"""SELECT s5fx.request_header('org-test', 'off-dev-a1-0001', 'recovery_v1_offline_capability:shop-a:{renamed}') IS NOT NULL AS h,
+  public.recovery_v1_offline_capability('org-test', 'shop-a', '{renamed}')->>'reason' AS why \\gset
+SELECT 'PROBE|o27|'||:'why';"""), 'o27')
+        r27 = self.probes(out).get('o27', out[-300:])
+        self.check('OFF-o27 (Step 5: limitation resolved) a renamed, unapproved device id gets no capability (the request must come from the owner-approved '
+                   'device it names: device_binding); revocation cannot be bypassed by renaming', r27 == 'device_binding', r27)
 
         # o28 org restricted while offline, reactivated (epoch bump) => held (LAST: invalidates every outstanding capability)
         ce = self.cap_id(A_A1, 'off-dev-a1-epch')
         ep0 = q("SELECT offline_epoch FROM recovery_v1.org_state WHERE org_id='org-test';")
         rc, out = self.psql(self.as_user(A_ADMIN, "SELECT public.recovery_v1_transition('org-test','RESTRICTED','synthetic recovery event','synthetic-evidence')::text;"), 'restrict')
         r28a = sale(A_A1, self.hdr(ce, 1), s_a1, str(uuid.uuid4()), 'o28a')
-        q("UPDATE recovery_v1.org_state SET state='ACTIVE' WHERE org_id='org-test';")   # synthetic fixture only
+        self.ctx['activate']('org-test')   # Step 5: genuine owner-signed reopening of the new incident (synthetic owner)
         ep1 = q("SELECT offline_epoch FROM recovery_v1.org_state WHERE org_id='org-test';")
         r28b = sale(A_A1, self.hdr(ce, 1), s_a1, str(uuid.uuid4()), 'o28b')
         self.check('OFF-o28 restricted while offline: refused while RESTRICTED (ORG_SUSPENDED), and after reactivation the older-epoch capability is held '
                    '(offline_capability_stale_epoch); epoch +1', 'ORG_SUSPENDED' in r28a and 'offline_capability_stale_epoch' in r28b and int(ep1) == int(ep0) + 1,
                    f'{r28a} | {r28b} | epoch {ep0}->{ep1}')
+        # Step 5: the superuser-planted capability rows below (o13 copy / o14 forgery with 1,000,000,000 MMK limits) count against the
+        # aggregate budgets like any capability (fail-safe), so they run AFTER o28 (a new offline epoch), not before the issuance scenarios
+        # o12 MAC-tampered row / copied row / forged with the key ---------------------------------------
+        t_id = str(uuid.uuid4())
+        rc, out = self.fixture_cap(cap, t_id, None, "now() + interval '1 hour'", "now() + interval '1 day'", mac_override="repeat('0', 64)")
+        r12 = sale(A_A1, self.hdr(t_id, 1), s_a1, str(uuid.uuid4()), 'o12') if rc == 0 else f'fixture failed {out[-200:]}'
+        self.check('OFF-o12 a row whose MAC does not match its document is held (offline_capability_integrity)', 'offline_capability_integrity' in r12, r12)
+        c_id = str(uuid.uuid4())
+        rc, out = self.psql(f"""INSERT INTO recovery_v1.offline_capabilities SELECT '{c_id}'::uuid, org_id, shop_id, device_id, user_id, offline_epoch, policy_scope, policy_status,
+  now() - interval '2 days', expires_at, sync_deadline, 1000, 1000000000, allowed_ops, document, mac, enrollment_id FROM recovery_v1.offline_capabilities WHERE id = '{cap}'::uuid;""", 'copy')
+        r13 = sale(A_A1, self.hdr(c_id, 1), s_a1, str(uuid.uuid4()), 'o13') if rc == 0 else f'fixture failed {out[-200:]}'
+        self.check('OFF-o13 a copied row (another capability\'s document + MAC under a new id, raised limits) is held (offline_capability_integrity)',
+                   'offline_capability_integrity' in r13, r13)
+        f_id = str(uuid.uuid4())
+        rc, out = self.fixture_cap(cap, f_id, None, "now() + interval '1 hour'", "now() + interval '1 day'",
+                                   doc_patch="jsonb_build_object('maxOps', 1000, 'maxAmountMmk', 1000000000)")
+        r14 = sale(A_A1, self.hdr(f_id, 1), s_a1, str(uuid.uuid4()), 'o14', product='prod-3', qty=10) if rc == 0 else f'fixture failed {out[-200:]}'
+        self.check('OFF-o14 LIMITATION: a database superuser who reads recovery_v1.keys can mint a valid capability with any limits '
+                   '(the MAC key lives in the same database; MAC only stops edits made without it)', r14.startswith('accepted'), r14)
+
+        # o15 expired but before deadline / o16 after deadline ------------------------------------------
+        e_id = str(uuid.uuid4())
+        rc, out = self.fixture_cap(cap, e_id, None, "now() - interval '10 minutes'", "now() + interval '20 hours'")
+        r15 = sale(A_A1, self.hdr(e_id, 1), s_a1, str(uuid.uuid4()), 'o15') if rc == 0 else f'fixture failed {out[-200:]}'
+        self.check('OFF-o15 POLICY: an operation synced AFTER expires_at but before sync_deadline is ACCEPTED (server checks only the deadline; '
+                   'expiry is enforced by the till alone)', r15.startswith('accepted'), r15)
+        d_id = str(uuid.uuid4())
+        rc, out = self.fixture_cap(cap, d_id, None, "now() - interval '2 days'", "now() - interval '1 second'")
+        r16 = sale(A_A1, self.hdr(d_id, 1), s_a1, str(uuid.uuid4()), 'o16') if rc == 0 else f'fixture failed {out[-200:]}'
+        self.check('OFF-o16 an operation synced after the sync deadline is held (offline_capability_sync_deadline)', 'offline_capability_sync_deadline' in r16, r16)
+
         (self.run / 'off-offline-auth.json').write_text(json.dumps(self.results, indent=1) + '\n')
 
     def cumulative(self, s_a2):
-        """One cashier / one device: how much offline value can be ACCEPTED in one hour? (rolled back)"""
+        """One cashier / one device: how much offline value can be ACCEPTED in one hour? (rolled back)
+        Step 5: issuance is bounded by the AGGREGATE budgets (owner-signed policy: device 100,000 / shop 500,000 / org 1,000,000);
+        a cashier cannot invent device ids (only owner-approved devices sign), so B uses its 3 approved devices in turn."""
         s_b = self.open_shift(A_B, 'u-cash-b', 'shop-b')
         body = """DO $x$ DECLARE r jsonb; s jsonb; n_cap int := 0; n_ok int := 0; v bigint := 0; i int; dev text; BEGIN
  FOR i IN 1..40 LOOP
-   dev := CASE WHEN %(one_device)s THEN '%(dev)s' ELSE '%(dev)s-'||i END;
-   r := public.recovery_v1_offline_capability('org-test', '%(shop)s', dev);
+   dev := CASE WHEN %(one_device)s THEN '%(dev)s' ELSE '%(dev)s'||(1 + i %% 3)::text END;
+   r := s5fx.capability('org-test', '%(shop)s', dev);
+   PERFORM set_config('s5fx.device', dev, false);
    EXIT WHEN r->>'outcome' <> 'issued';
    n_cap := n_cap + 1;
    PERFORM set_config('request.headers', jsonb_build_object('x-orvix-offline', jsonb_build_object('capabilityId', r->'capability'->>'id', 'deviceSeq', 1)::text)::text, false);
@@ -357,7 +413,7 @@ ROLLBACK;""", 'o23')
             + self.as_user(A_A2, body % dict(one_device='true', dev='off-dev-a2-cumu', shop='shop-a', shift=s_a2, tag='a2'))
             + self.as_user(A_B, body % dict(one_device='false', dev='off-dev-b-cumu', shop='shop-b', shift=s_b, tag='b'))
             + "SELECT 'TOTAL='||coalesce(sum(u.amount_mmk),0)||'/'||count(*) FROM recovery_v1.offline_usage u JOIN recovery_v1.offline_capabilities c ON c.id=u.capability_id "
-              "WHERE c.device_id LIKE 'off-dev-a2-cumu%' OR c.device_id LIKE 'off-dev-b-cumu%';\nROLLBACK;\n")
+              "WHERE c.enrollment_id IN (SELECT enrollment_id FROM s5fx.devices WHERE label LIKE 'off-dev-a2-cumu%' OR label LIKE 'off-dev-b-cumu%');\nROLLBACK;\n")
         rc, out = self.psql(script, 'o25-cumulative')
         pr = self.probes(out)
         a2 = [int(x) for x in pr.get('a2', '0|0|0').split('|')]
@@ -365,12 +421,14 @@ ROLLBACK;""", 'o23')
         tot = re.search(r'TOTAL=(\d+)/(\d+)', out)
         accepted = int(tot.group(1)) if tot else -1
         cashiers = int(self.q("SELECT count(*) FROM public.users WHERE org_id='org-test';"))
-        detail = (f'policy maxAmount=20000/cap; cashier A2 ONE device: {a2[0]} caps, {a2[1]} sales accepted = {a2[2]} MMK in <1h; '
-                  f'cashier B, a new device id per cap: {b[0]} caps, {b[2]} MMK; accepted total {accepted} MMK = {accepted // 20000} x maxAmount; '
-                  f'org-wide bound per hour of issuance = users({cashiers}) x 30 x 20000 = {cashiers * 30 * 20000} MMK; no org/shop/device cumulative cap')
-        self.check('OFF-o25 LIMITATION: cumulative offline exposure is not capped -- one cashier on ONE device obtains a new full-limit capability per '
-                   'issuance (until 30/h), every cashier has their own 30/h, so shop-wide exposure = N x maxAmount',
-                   a2[1] >= 2 and a2[2] > 20000 and b[2] > 20000 and accepted == a2[2] + b[2], detail + ' ' + json.dumps({k: v for k, v in pr.items() if k.startswith('err')})[:200])
+        dev_budget = int(self.q("SELECT device_budget_mmk FROM recovery_v1.offline_policy WHERE scope='*';"))
+        shop_budget = int(self.q("SELECT shop_budget_mmk FROM recovery_v1.offline_policy WHERE scope='*';"))
+        detail = (f'policy maxAmount=20000/cap, budgets device {dev_budget} / shop {shop_budget}; cashier A2 ONE device: {a2[0]} caps, {a2[1]} sales accepted = {a2[2]} MMK; '
+                  f'cashier B, its 3 approved devices in turn: {b[0]} caps, {b[2]} MMK; accepted total {accepted} MMK (Script 2 without budgets: unbounded per hour)')
+        self.check('OFF-o25 (Step 5: limitation resolved) cumulative offline exposure is bounded: one device stops at its device budget, a cashier '
+                   'cannot invent device ids, and every issuance counts against the shop and organization budgets',
+                   a2[2] <= dev_budget and a2[0] == dev_budget // 20000 and b[2] <= 3 * dev_budget and accepted == a2[2] + b[2] and accepted <= shop_budget,
+                   detail + ' ' + json.dumps({k: v for k, v in pr.items() if k.startswith('err')})[:200])
         (self.run / 'off-cumulative.txt').write_text(detail + '\n')
 
 

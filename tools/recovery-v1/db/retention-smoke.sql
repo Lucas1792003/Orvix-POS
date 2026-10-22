@@ -1,8 +1,9 @@
 -- Correction pass P5: installation acknowledgement and ledger retention reporting.
 \set ON_ERROR_STOP on
 SELECT test.check('install recorded its explicit acknowledgement', (SELECT install_ack='restrict-every-organization' FROM recovery_v1.install));
-SELECT test.check('install is audited with the number of organizations it restricted and no reopen path',
-  EXISTS(SELECT 1 FROM recovery_v1.audit WHERE kind='installed' AND (detail->>'organizations_restricted')::int>=2 AND detail->>'reopen_path' LIKE 'none:%'));
+-- Step 5: installed WITH an owner key, the only reopen path recorded is the owner-signed reopening
+SELECT test.check('install is audited with the number of organizations it restricted and its only reopen path (owner-signed)',
+  EXISTS(SELECT 1 FROM recovery_v1.audit WHERE kind='installed' AND (detail->>'organizations_restricted')::int>=2 AND detail->>'reopen_path' LIKE 'owner-signed reopening%'));
 SELECT count(*) AS ledger_before FROM public.idempotency_keys \gset
 SET ROLE orvix_recovery_operator;
 SELECT recovery_v1.ledger_retention_report() AS report \gset

@@ -187,7 +187,11 @@ GRANT SELECT ON public.loyalty_points TO authenticated;"""
         chain_before = self.sql("SELECT count(*) FROM recovery_v1.applied_migrations;", 's4-h-before.log').strip()
         cases = [
             ('h01 an authorized migration that changes recovery data (reopens organizations) is rolled back',
-             "UPDATE recovery_v1.org_state SET state = 'ACTIVE';", [], 'MIGRATION_SCOPE'),
+             # Step 5: refused first by the ACTIVE gate on org_state itself (only an owner-signed reopening sets ACTIVE)
+             "UPDATE recovery_v1.org_state SET state = 'ACTIVE';", [], 'REOPEN_AUTHORIZATION_REQUIRED'),
+            # (review 3, M3) the MIGRATION_SCOPE refusal of recovery-data edits stays covered: an edit that does not touch ACTIVE
+            ('h01b an authorized migration that edits recovery data without reopening (org_state.reason) is rolled back',
+             "UPDATE recovery_v1.org_state SET reason = reason || ' (edited by a migration)';", [], 'MIGRATION_SCOPE'),
             ('h02 an authorized migration cannot lift its own command scope (authorized_txn is part of the checked state)',
              "UPDATE recovery_v1.authorized_txn SET ref = ref || '#guards' WHERE txid = txid_current(); CREATE INDEX zz_h02 ON public.loyalty_points (points);",
              ['CREATE INDEX'], 'MIGRATION_SCOPE'),

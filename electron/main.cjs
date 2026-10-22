@@ -217,6 +217,25 @@ const checkForUpdates = () => updater.checkForUpdates();
 ipcMain.handle("app:get-version", () => app.getVersion());
 
 // ------------------------------------------------------------------
+// Recovery V1, Step 5: the owner's key fingerprints this till trusts (device enrollment approvals are verified against them,
+// never against keys the server reports). Provisioned OUT OF BAND by whoever installs the till, as
+// <userData>/owner-trust.json  {"ownerKeyFingerprints": ["<64 hex>", ...]}. In an automated E2E run only (ORVIX_POS_E2E=1),
+// ORVIX_POS_E2E_OWNER_TRUST may carry the SYNTHETIC test owner's fingerprints instead. Missing or malformed: no anchor, and the
+// till never considers itself trusted. Read-only for the renderer.
+function ownerTrustAnchors() {
+  const valid = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && /^[0-9a-f]{64}$/.test(x)).slice(0, 8) : []);
+  // (review 4, L2) never in a packaged build: there the anchor comes only from owner-trust.json
+  if (isE2E && !app.isPackaged && process.env.ORVIX_POS_E2E_OWNER_TRUST) {
+    try { return valid(JSON.parse(process.env.ORVIX_POS_E2E_OWNER_TRUST)); } catch { return []; }
+  }
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(app.getPath("userData"), "owner-trust.json"), "utf8"));
+    return valid(raw && raw.ownerKeyFingerprints);
+  } catch { return []; }
+}
+ipcMain.handle("owner-trust:anchors", () => ownerTrustAnchors());
+
+// ------------------------------------------------------------------
 // Owner reconciliation (RC3, electron/reconcileAuthority.cjs). Only the app
 // window may ask. attest = fresh server owner check + seal; never cached,
 // refused offline. Every decision is logged without the token.

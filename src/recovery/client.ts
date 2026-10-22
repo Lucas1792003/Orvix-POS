@@ -2,7 +2,8 @@ import { localDb } from "../lib/localDb";
 import { currentBackendOrigin } from "../lib/backendOrigin";
 import { supabase } from "../lib/supabase";
 import { enrolledDevice } from "./deviceVault";
-import { TrustUnavailable } from "./trust";
+import { independentTrustSource, TrustUnavailable } from "./trust";
+import { trustedTill } from "./deviceTrust";
 import { withdrawOfflineCapability } from "./offlineCapability";
 import { recoveryCapability } from "../stores/data/recoveryState";
 
@@ -197,8 +198,12 @@ export async function requireRecoveryV1Write(orgId: string | null, shopId: strin
   if (status.state !== "ACTIVE") throw new RecoveryV1Blocked(status.state, "The organization is closed for financial and ownership writes pending independent recovery review.");
   if (options.requireDevice !== false) {
     if (!shopId) throw new RecoveryV1Blocked("RESTRICTED", "The operation has no unambiguous shop. It cannot be signed safely.");
-    try { await enrolledDevice(origin, orgId, shopId); }
-    catch (error) { throw new RecoveryV1Blocked("RESTRICTED", error instanceof TrustUnavailable ? error.message : "Independent device authorization could not be verified.", "restricted"); }
+    // Step 5: the owner-approved till identity (deviceTrust.ts), verified against this till's pinned owner keys and the server's
+    // current device state. (A Step 4 independent trust source, when one is injected, keeps its own path.)
+    try {
+      if (independentTrustSource()) await enrolledDevice(origin, orgId, shopId);
+      else await trustedTill(origin, orgId, shopId, { online: typeof navigator === "undefined" || navigator.onLine !== false });
+    } catch (error) { throw new RecoveryV1Blocked("RESTRICTED", error instanceof TrustUnavailable ? error.message : "Independent device authorization could not be verified.", "restricted"); }
   }
   return true;
 }

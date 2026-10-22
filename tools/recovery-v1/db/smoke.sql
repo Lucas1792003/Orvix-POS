@@ -38,8 +38,11 @@ SELECT test.check('fencing records unresolved dependencies without executing the
 SELECT test.check('unfence requires independent authority and retains fence',:'uf'::jsonb->>'outcome'='denied' AND (:'uf'::jsonb->>'fence_retained')::boolean);
 SELECT test.check('existing completed operation preserved without fence overwrite',:'existing'::jsonb->>'outcome'='existing_record_preserved' AND NOT EXISTS(SELECT 1 FROM recovery_v1.fences WHERE key='22222222-0000-4000-8000-000000000001'));
 SELECT test.expect_error('original signed/fenced registry immutable', $$DELETE FROM recovery_v1.fences WHERE key='99999999-0000-4000-8000-000000000001'$$,'RECOVERY_V1_EVIDENCE_IMMUTABLE');
--- Fixture-only direct superuser setup. NO production release function exists.
-UPDATE recovery_v1.org_state SET state='ACTIVE',uncertainties='["SYNTHETIC FIXTURE ONLY"]' WHERE org_id='org-test';
+-- Step 5: a superuser can no longer set ACTIVE; the organization is reopened through the genuine owner-signed protocol
+-- (synthetic owner key outside the database), as the tests below need an ACTIVE organization.
+SELECT test.expect_error('superuser cannot set ACTIVE by hand (Step 5)', $$UPDATE recovery_v1.org_state SET state='ACTIVE' WHERE org_id='org-test'$$,'RECOVERY_V1_REOPEN_AUTHORIZATION_REQUIRED');
+\set fx_org org-test
+\ir ../step5/fixture-activate.psql
 SELECT test.check('unrelated organization remains restricted',(SELECT state='RESTRICTED' FROM recovery_v1.org_state WHERE org_id='org-unrelated'));
 UPDATE public.shops SET address='Synthetic active write' WHERE id='shop-a';
 SELECT test.check('active org can write independently',(SELECT address='Synthetic active write' FROM public.shops WHERE id='shop-a'));
@@ -84,5 +87,6 @@ SELECT test.check('witness receipt retry immutable/idempotent',public.recovery_v
 SELECT test.expect_error('same witness boundary tamper rejected',format($q$SELECT public.recovery_v1_store_checkpoint(jsonb_set(%L::jsonb,'{body,checkpoint,digest}',to_jsonb(repeat('f',64))))$q$,:'receipt'),'RECOVERY_V1_IMMUTABLE_CHECKPOINT_CONFLICT');
 SELECT test.check('evidence + checkpoint storage never releases quarantine',public.recovery_v1_status('org-test')->>'state'='QUARANTINED');
 RESET ROLE;
--- Restore ACTIVE fixture for the independent two-session lock-race smoke.
-UPDATE recovery_v1.org_state SET state='ACTIVE' WHERE org_id='org-test';
+-- Restore ACTIVE for the independent two-session lock-race smoke (Step 5: genuine owner-signed reopening).
+\set fx_org org-test
+\ir ../step5/fixture-activate.psql
