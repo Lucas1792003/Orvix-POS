@@ -4,6 +4,7 @@ import { supabase } from "../lib/supabase";
 import { enrolledDevice } from "./deviceVault";
 import { TrustUnavailable } from "./trust";
 import { withdrawOfflineCapability } from "./offlineCapability";
+import { recoveryCapability } from "../stores/data/recoveryState";
 
 export type RecoveryV1State = "ACTIVE" | "RESTRICTED" | "RECONCILING" | "QUARANTINED";
 export interface RecoveryV1Status {
@@ -113,7 +114,12 @@ export async function refreshRecoveryV1(orgId: string, options: { origin?: strin
     }
   };
   // Unknown server and the request failed: legacy rules (not cached as "absent").
-  const legacyUnknown = (): null => { unreachableAt.set(failKey, Date.now()); return null; };
+  // review (first-contact window): a server known to run 087 is never treated as legacy because ONE status request
+  // failed — Recovery V1 is installed after 087, so an unanswered status there is a communication failure
+  const legacyUnknown = (): null => {
+    if (recoveryCapability() === "present") unreachable();
+    unreachableAt.set(failKey, Date.now()); return null;
+  };
   const unreachable = (): never => {
     throw new RecoveryV1Blocked("RESTRICTED", "Not saved and nothing was sent (an operation that was already queued stays queued with its key). The recovery-aware server could not be asked for its recovery state. Preserve the device profile.", "communication");
   };

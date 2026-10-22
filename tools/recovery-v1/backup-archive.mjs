@@ -51,9 +51,15 @@ function validateMetadata(metadata) {
 }
 
 function decode(value, expectedLength) {
-  if (typeof value !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) throw new Error('INVALID_BASE64');
+  if (typeof value !== 'string') throw new Error('INVALID_BASE64');
   if (value.length > MAX_ARCHIVE_BYTES * 2) throw new Error('ARCHIVE_TOO_LARGE');
+  // Script 2 (r18e): linear checks (the former single backtracking regex overflowed the stack on multi-megabyte
+  // archives, so every real-size archive failed closed). Strict: length multiple of 4, base64 alphabet only, padding
+  // only at the end, and the canonical re-encoding must be identical (no non-zero trailing bits, no alternative forms).
+  const pad = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+  if (value.length % 4 !== 0 || /[^A-Za-z0-9+/]/.test(value.slice(0, value.length - pad))) throw new Error('INVALID_BASE64');
   const decoded = Buffer.from(value, 'base64');
+  if (decoded.toString('base64') !== value) throw new Error('INVALID_BASE64');
   if (expectedLength !== undefined && decoded.length !== expectedLength) throw new Error('INVALID_CRYPTO_FIELD_LENGTH');
   return decoded;
 }

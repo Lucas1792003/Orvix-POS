@@ -3,6 +3,11 @@
 -- With 087 installed: superuser session, server OPEN (the copy-back writes
 -- guarded tables), and nothing else drifted from the 087 snapshot.
 -- WARNING: after this rollback cost is again readable by every org user.
+-- Script 2 (migration review D2): never after Recovery V1 (forward repair only), like PFIN-D / PFIN-E
+DO $s2_no_rollback_after_v1$
+BEGIN
+  IF to_regnamespace('recovery_v1') IS NOT NULL THEN RAISE EXCEPTION 'PCOST-A rollback: Recovery V1 is installed (forward repair only)'; END IF;
+END $s2_no_rollback_after_v1$;
 SET lock_timeout = '3s';
 SET LOCAL search_path = pg_catalog, pg_temp;
 

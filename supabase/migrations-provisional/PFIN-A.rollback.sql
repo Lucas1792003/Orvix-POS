@@ -1,5 +1,10 @@
 -- Rollback of provisional PFIN-A (indexes only; no data). With 087 installed: superuser session,
 -- and only when nothing else has drifted from the 087 snapshot.
+-- Script 2 (migration review D2): never after Recovery V1 (forward repair only), like PFIN-D / PFIN-E
+DO $s2_no_rollback_after_v1$
+BEGIN
+  IF to_regnamespace('recovery_v1') IS NOT NULL THEN RAISE EXCEPTION 'PFIN-A rollback: Recovery V1 is installed (forward repair only)'; END IF;
+END $s2_no_rollback_after_v1$;
 SET lock_timeout = '3s';
 SET LOCAL search_path = pg_catalog, pg_temp;
 DO $pfin_pfin_a_rb_pre$

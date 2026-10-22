@@ -131,13 +131,26 @@ test('WAL enumeration includes required segments with exclusive end and correct 
   assert.throws(() => expectedWalFiles({ timeline: 0, startLsn: '0/0', endLsnExclusive: '0/10', segmentBytes: 1024 * 1024 }), /INVALID_WAL_RANGE/);
 });
 
+/** A synthetic segment that starts with a valid long page header for its own position (Script 2: zero-filled segments are damaged). */
+function walSegment(name, segmentBytes) {
+  const b = Buffer.alloc(segmentBytes), perLog = 0x100000000n / BigInt(segmentBytes);
+  const segno = BigInt(`0x${name.slice(8, 16)}`) * perLog + BigInt(`0x${name.slice(16, 24)}`);
+  b.writeUInt16LE(0xd113, 0); b.writeUInt16LE(0x0002, 2); b.writeUInt32LE(Number.parseInt(name.slice(0, 8), 16), 4);
+  b.writeBigUInt64LE(segno * BigInt(segmentBytes), 8); b.writeUInt32LE(segmentBytes, 32);
+  return b;
+}
+
 test('WAL coverage distinguishes absent, short, complete and unsupported cross-timeline chains', () => {
   const requirement = { timeline: 1, startLsn: '0/0', endLsnExclusive: '0/200000', segmentBytes: 1024 * 1024 };
-  const names = expectedWalFiles(requirement), content = new Map([[`wal/${names[0]}`, Buffer.alloc(requirement.segmentBytes)]]);
+  const names = expectedWalFiles(requirement), content = new Map([[`wal/${names[0]}`, walSegment(names[0], requirement.segmentBytes)]]);
   assert.equal(verifyWalCoverage(content, requirement).status, 'incomplete');
   content.set(`wal/${names[1]}`, Buffer.alloc(1));
   assert.deepEqual(verifyWalCoverage(content, requirement).damaged, [names[1]]);
-  content.set(`wal/${names[1]}`, Buffer.alloc(requirement.segmentBytes));
+  content.set(`wal/${names[1]}`, Buffer.alloc(requirement.segmentBytes));      // right size, zero-filled: damaged
+  assert.deepEqual(verifyWalCoverage(content, requirement).damaged, [names[1]]);
+  content.set(`wal/${names[1]}`, walSegment(names[0], requirement.segmentBytes)); // a real header of ANOTHER segment: damaged
+  assert.deepEqual(verifyWalCoverage(content, requirement).damaged, [names[1]]);
+  content.set(`wal/${names[1]}`, walSegment(names[1], requirement.segmentBytes));
   assert.equal(verifyWalCoverage(content, requirement).status, 'verified');
   assert.equal(verifyWalCoverage(content, { ...requirement, timelineHistory: ['00000002.history'] }).status, 'unsupported');
 });

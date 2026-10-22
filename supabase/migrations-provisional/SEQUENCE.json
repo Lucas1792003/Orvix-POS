@@ -63,7 +63,7 @@
       "id": "PFIN-B",
       "kind": "provisional",
       "file": "supabase/migrations-provisional/PFIN-B_financial_reports.sql",
-      "sha256": "a1a3b02d8b2de40fbe1fcca403d4dd4021d0f79fe61e8a3ae22f07b858acb3c5",
+      "sha256": "6f1b9d0c090eeef0a7820a22bfd6ccc753149675559f480b586da8f2c59dd07a",
       "rollback": "supabase/migrations-provisional/PFIN-B.rollback.sql",
       "status": "provisional",
       "requires": [
@@ -203,7 +203,7 @@
       "id": "RECOVERY_V1",
       "kind": "provisional",
       "file": "supabase/migrations-provisional/RECOVERY_V1_guards.sql",
-      "sha256": "7a865a91ac0ea6daf6b7cb4051690f13c1861e1a81c01d4cfb05b0f86920141c",
+      "sha256": "c3d877a34dac42781c5898fb002fdd743d2bcba172fd964c391672a731752c3f",
       "status": "provisional; local implementation only",
       "requires": [
         "085|086"

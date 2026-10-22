@@ -1,19 +1,19 @@
 {
     "data": {
         "basis": {
-            "to": "2026-10-20",
-            "asOf": "2026-10-20T14:11:12.983678+00:00",
-            "from": "2025-10-19",
-            "fromUtc": "2025-10-18T17:30:00+00:00",
+            "to": "2026-10-22",
+            "asOf": "2026-10-22T01:02:37.932479+00:00",
+            "from": "2025-10-21",
+            "fromUtc": "2025-10-20T17:30:00+00:00",
             "timezone": "Asia/Yangon",
             "refundBasis": "SALE_DATE",
-            "toUtcExclusive": "2026-10-20T17:30:00+00:00",
+            "toUtcExclusive": "2026-10-22T17:30:00+00:00",
             "pendingRequestsBasis": "SALES_RUNG_UP_IN_RANGE",
             "refundMethodAssumption": "ORIGINAL_SALE_METHOD"
         },
         "byDay": [
             {
-                "date": "2025-10-19",
+                "date": "2025-10-21",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -26,7 +26,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-10-20",
+                "date": "2025-10-22",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -39,7 +39,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-10-21",
+                "date": "2025-10-23",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -52,7 +52,7 @@
                 "grossProfitMmk": 8750
             },
             {
-                "date": "2025-10-22",
+                "date": "2025-10-24",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -65,7 +65,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2025-10-23",
+                "date": "2025-10-25",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -78,7 +78,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-10-24",
+                "date": "2025-10-26",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -91,7 +91,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-10-25",
+                "date": "2025-10-27",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -104,7 +104,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-10-26",
+                "date": "2025-10-28",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -117,7 +117,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-10-27",
+                "date": "2025-10-29",
                 "cogsMmk": 10800,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -130,7 +130,7 @@
                 "grossProfitMmk": 7200
             },
             {
-                "date": "2025-10-28",
+                "date": "2025-10-30",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -143,7 +143,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-10-29",
+                "date": "2025-10-31",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -156,7 +156,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-10-30",
+                "date": "2025-11-01",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -169,7 +169,7 @@
                 "grossProfitMmk": 8750
             },
             {
-                "date": "2025-10-31",
+                "date": "2025-11-02",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -182,7 +182,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-11-01",
+                "date": "2025-11-03",
                 "cogsMmk": 46800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -195,7 +195,7 @@
                 "grossProfitMmk": 30150
             },
             {
-                "date": "2025-11-02",
+                "date": "2025-11-04",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -208,7 +208,7 @@
                 "grossProfitMmk": 8750
             },
             {
-                "date": "2025-11-03",
+                "date": "2025-11-05",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -221,7 +221,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-11-04",
+                "date": "2025-11-06",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -234,7 +234,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-11-05",
+                "date": "2025-11-07",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -247,7 +247,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2025-11-06",
+                "date": "2025-11-08",
                 "cogsMmk": 93600,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -260,7 +260,7 @@
                 "grossProfitMmk": 60300
             },
             {
-                "date": "2025-11-07",
+                "date": "2025-11-09",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -273,7 +273,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-11-08",
+                "date": "2025-11-10",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -286,7 +286,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-11-09",
+                "date": "2025-11-11",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -299,7 +299,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-11-10",
+                "date": "2025-11-12",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -312,7 +312,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-11-11",
+                "date": "2025-11-13",
                 "cogsMmk": 11400,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -325,7 +325,7 @@
                 "grossProfitMmk": 7550
             },
             {
-                "date": "2025-11-12",
+                "date": "2025-11-14",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -338,7 +338,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-11-13",
+                "date": "2025-11-15",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -351,7 +351,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-11-14",
+                "date": "2025-11-16",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -364,7 +364,7 @@
                 "grossProfitMmk": 8750
             },
             {
-                "date": "2025-11-15",
+                "date": "2025-11-17",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -377,7 +377,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-11-16",
+                "date": "2025-11-18",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -390,7 +390,7 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2025-11-17",
+                "date": "2025-11-19",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -403,7 +403,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2025-11-18",
+                "date": "2025-11-20",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -416,7 +416,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-11-19",
+                "date": "2025-11-21",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -429,7 +429,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-11-20",
+                "date": "2025-11-22",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -442,7 +442,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2025-11-21",
+                "date": "2025-11-23",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -455,7 +455,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2025-11-22",
+                "date": "2025-11-24",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -468,7 +468,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-11-23",
+                "date": "2025-11-25",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -481,7 +481,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-11-24",
+                "date": "2025-11-26",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -494,7 +494,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-11-25",
+                "date": "2025-11-27",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -507,7 +507,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-11-26",
+                "date": "2025-11-28",
                 "cogsMmk": 11400,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -520,7 +520,7 @@
                 "grossProfitMmk": 7550
             },
             {
-                "date": "2025-11-27",
+                "date": "2025-11-29",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -533,7 +533,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-11-28",
+                "date": "2025-11-30",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -546,7 +546,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-11-29",
+                "date": "2025-12-01",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -559,7 +559,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2025-11-30",
+                "date": "2025-12-02",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -572,7 +572,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-12-01",
+                "date": "2025-12-03",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -585,7 +585,7 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2025-12-02",
+                "date": "2025-12-04",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -598,7 +598,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2025-12-03",
+                "date": "2025-12-05",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -611,7 +611,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-12-04",
+                "date": "2025-12-06",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -624,7 +624,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-12-05",
+                "date": "2025-12-07",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -637,7 +637,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2025-12-06",
+                "date": "2025-12-08",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -650,7 +650,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2025-12-07",
+                "date": "2025-12-09",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -663,7 +663,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-12-08",
+                "date": "2025-12-10",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -676,7 +676,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-12-09",
+                "date": "2025-12-11",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -689,7 +689,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-12-10",
+                "date": "2025-12-12",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -702,7 +702,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-12-11",
+                "date": "2025-12-13",
                 "cogsMmk": 10800,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -715,7 +715,7 @@
                 "grossProfitMmk": 7200
             },
             {
-                "date": "2025-12-12",
+                "date": "2025-12-14",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -728,7 +728,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-12-13",
+                "date": "2025-12-15",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -741,7 +741,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-12-14",
+                "date": "2025-12-16",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -754,7 +754,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2025-12-15",
+                "date": "2025-12-17",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -767,7 +767,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-12-16",
+                "date": "2025-12-18",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -780,7 +780,7 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2025-12-17",
+                "date": "2025-12-19",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -793,7 +793,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2025-12-18",
+                "date": "2025-12-20",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -806,7 +806,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-12-19",
+                "date": "2025-12-21",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -819,7 +819,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-12-20",
+                "date": "2025-12-22",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -832,7 +832,7 @@
                 "grossProfitMmk": 8750
             },
             {
-                "date": "2025-12-21",
+                "date": "2025-12-23",
                 "cogsMmk": 93600,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -845,7 +845,7 @@
                 "grossProfitMmk": 60300
             },
             {
-                "date": "2025-12-22",
+                "date": "2025-12-24",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -858,7 +858,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-12-23",
+                "date": "2025-12-25",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -871,7 +871,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-12-24",
+                "date": "2025-12-26",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -884,7 +884,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-12-25",
+                "date": "2025-12-27",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -897,7 +897,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2025-12-26",
+                "date": "2025-12-28",
                 "cogsMmk": 11400,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -910,7 +910,7 @@
                 "grossProfitMmk": 7600
             },
             {
-                "date": "2025-12-27",
+                "date": "2025-12-29",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -923,7 +923,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-12-28",
+                "date": "2025-12-30",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -936,7 +936,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2025-12-29",
+                "date": "2025-12-31",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -949,7 +949,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2025-12-30",
+                "date": "2026-01-01",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -962,7 +962,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2025-12-31",
+                "date": "2026-01-02",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -975,7 +975,7 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2026-01-01",
+                "date": "2026-01-03",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -988,7 +988,7 @@
                 "grossProfitMmk": 8750
             },
             {
-                "date": "2026-01-02",
+                "date": "2026-01-04",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1001,7 +1001,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-01-03",
+                "date": "2026-01-05",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1014,7 +1014,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-01-04",
+                "date": "2026-01-06",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -1027,7 +1027,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-01-05",
+                "date": "2026-01-07",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1040,7 +1040,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2026-01-06",
+                "date": "2026-01-08",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1053,7 +1053,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-01-07",
+                "date": "2026-01-09",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -1066,7 +1066,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-01-08",
+                "date": "2026-01-10",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1079,7 +1079,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-01-09",
+                "date": "2026-01-11",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1092,7 +1092,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-01-10",
+                "date": "2026-01-12",
                 "cogsMmk": 10800,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -1105,7 +1105,7 @@
                 "grossProfitMmk": 7200
             },
             {
-                "date": "2026-01-11",
+                "date": "2026-01-13",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1118,7 +1118,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-01-12",
+                "date": "2026-01-14",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1131,7 +1131,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-01-13",
+                "date": "2026-01-15",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -1144,7 +1144,7 @@
                 "grossProfitMmk": 8750
             },
             {
-                "date": "2026-01-14",
+                "date": "2026-01-16",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1157,7 +1157,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-01-15",
+                "date": "2026-01-17",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1170,7 +1170,7 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2026-01-16",
+                "date": "2026-01-18",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -1183,7 +1183,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-01-17",
+                "date": "2026-01-19",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1196,7 +1196,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-01-18",
+                "date": "2026-01-20",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1209,7 +1209,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-01-19",
+                "date": "2026-01-21",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -1222,7 +1222,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-01-20",
+                "date": "2026-01-22",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1235,7 +1235,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2026-01-21",
+                "date": "2026-01-23",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1248,7 +1248,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-01-22",
+                "date": "2026-01-24",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -1261,7 +1261,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-01-23",
+                "date": "2026-01-25",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1274,7 +1274,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-01-24",
+                "date": "2026-01-26",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1287,7 +1287,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-01-25",
+                "date": "2026-01-27",
                 "cogsMmk": 11400,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -1300,7 +1300,7 @@
                 "grossProfitMmk": 7550
             },
             {
-                "date": "2026-01-26",
+                "date": "2026-01-28",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1313,7 +1313,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-01-27",
+                "date": "2026-01-29",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1326,7 +1326,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-01-28",
+                "date": "2026-01-30",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -1339,7 +1339,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-01-29",
+                "date": "2026-01-31",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1352,7 +1352,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-01-30",
+                "date": "2026-02-01",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1365,7 +1365,7 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2026-01-31",
+                "date": "2026-02-02",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -1378,7 +1378,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-02-01",
+                "date": "2026-02-03",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1391,7 +1391,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-02-02",
+                "date": "2026-02-04",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1404,7 +1404,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-02-03",
+                "date": "2026-02-05",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -1417,7 +1417,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-02-04",
+                "date": "2026-02-06",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1430,7 +1430,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2026-02-05",
+                "date": "2026-02-07",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1443,7 +1443,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-02-06",
+                "date": "2026-02-08",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -1456,7 +1456,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-02-07",
+                "date": "2026-02-09",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1469,7 +1469,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-02-08",
+                "date": "2026-02-10",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1482,7 +1482,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-02-09",
+                "date": "2026-02-11",
                 "cogsMmk": 11400,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -1495,7 +1495,7 @@
                 "grossProfitMmk": 7600
             },
             {
-                "date": "2026-02-10",
+                "date": "2026-02-12",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1508,7 +1508,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-02-11",
+                "date": "2026-02-13",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1521,7 +1521,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-02-12",
+                "date": "2026-02-14",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -1534,7 +1534,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-02-13",
+                "date": "2026-02-15",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1547,7 +1547,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-02-14",
+                "date": "2026-02-16",
                 "cogsMmk": 46800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1560,7 +1560,7 @@
                 "grossProfitMmk": 30150
             },
             {
-                "date": "2026-02-15",
+                "date": "2026-02-17",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -1573,7 +1573,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-02-16",
+                "date": "2026-02-18",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1586,7 +1586,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-02-17",
+                "date": "2026-02-19",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1599,7 +1599,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-02-18",
+                "date": "2026-02-20",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -1612,7 +1612,7 @@
                 "grossProfitMmk": 8750
             },
             {
-                "date": "2026-02-19",
+                "date": "2026-02-21",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1625,7 +1625,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2026-02-20",
+                "date": "2026-02-22",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1638,7 +1638,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-02-21",
+                "date": "2026-02-23",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -1651,7 +1651,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-02-22",
+                "date": "2026-02-24",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1662,217 +1662,22 @@
                 "grossSalesMmk": 165900,
                 "netRevenueMmk": 165900,
                 "grossProfitMmk": 65100
-            },
-            {
-                "date": "2026-02-23",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 82950,
-                "netRevenueMmk": 82950,
-                "grossProfitMmk": 32550
-            },
-            {
-                "date": "2026-02-24",
-                "cogsMmk": 10800,
-                "voidMmk": 0,
-                "refundMmk": 6650,
-                "saleCount": 25,
-                "voidCount": 0,
-                "refundCount": 7,
-                "cogsComplete": true,
-                "grossSalesMmk": 24650,
-                "netRevenueMmk": 18000,
-                "grossProfitMmk": 7200
             },
             {
                 "date": "2026-02-25",
-                "cogsMmk": 100800,
+                "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
                 "saleCount": 28,
                 "voidCount": 0,
                 "refundCount": 0,
                 "cogsComplete": true,
-                "grossSalesMmk": 165900,
-                "netRevenueMmk": 165900,
-                "grossProfitMmk": 65100
+                "grossSalesMmk": 82950,
+                "netRevenueMmk": 82950,
+                "grossProfitMmk": 32550
             },
             {
                 "date": "2026-02-26",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": false,
-                "grossSalesMmk": 84400,
-                "netRevenueMmk": 84400,
-                "grossProfitMmk": null
-            },
-            {
-                "date": "2026-02-27",
-                "cogsMmk": 12600,
-                "voidMmk": 0,
-                "refundMmk": 6650,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 7,
-                "cogsComplete": true,
-                "grossSalesMmk": 27650,
-                "netRevenueMmk": 21000,
-                "grossProfitMmk": 8400
-            },
-            {
-                "date": "2026-02-28",
-                "cogsMmk": 100800,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 165900,
-                "netRevenueMmk": 165900,
-                "grossProfitMmk": 65100
-            },
-            {
-                "date": "2026-03-01",
-                "cogsMmk": 45000,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 25,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 73950,
-                "netRevenueMmk": 73950,
-                "grossProfitMmk": 28950
-            },
-            {
-                "date": "2026-03-02",
-                "cogsMmk": 13200,
-                "voidMmk": 0,
-                "refundMmk": 5700,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 6,
-                "cogsComplete": true,
-                "grossSalesMmk": 27650,
-                "netRevenueMmk": 21950,
-                "grossProfitMmk": 8750
-            },
-            {
-                "date": "2026-03-03",
-                "cogsMmk": 100800,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": false,
-                "grossSalesMmk": 167350,
-                "netRevenueMmk": 167350,
-                "grossProfitMmk": null
-            },
-            {
-                "date": "2026-03-04",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 82950,
-                "netRevenueMmk": 82950,
-                "grossProfitMmk": 32550
-            },
-            {
-                "date": "2026-03-05",
-                "cogsMmk": 12600,
-                "voidMmk": 0,
-                "refundMmk": 6650,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 7,
-                "cogsComplete": true,
-                "grossSalesMmk": 27650,
-                "netRevenueMmk": 21000,
-                "grossProfitMmk": 8400
-            },
-            {
-                "date": "2026-03-06",
-                "cogsMmk": 90000,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 25,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 147900,
-                "netRevenueMmk": 147900,
-                "grossProfitMmk": 57900
-            },
-            {
-                "date": "2026-03-07",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 82950,
-                "netRevenueMmk": 82950,
-                "grossProfitMmk": 32550
-            },
-            {
-                "date": "2026-03-08",
-                "cogsMmk": 12600,
-                "voidMmk": 0,
-                "refundMmk": 6650,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 7,
-                "cogsComplete": false,
-                "grossSalesMmk": 29100,
-                "netRevenueMmk": 22450,
-                "grossProfitMmk": null
-            },
-            {
-                "date": "2026-03-09",
-                "cogsMmk": 100800,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 165900,
-                "netRevenueMmk": 165900,
-                "grossProfitMmk": 65100
-            },
-            {
-                "date": "2026-03-10",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 82950,
-                "netRevenueMmk": 82950,
-                "grossProfitMmk": 32550
-            },
-            {
-                "date": "2026-03-11",
                 "cogsMmk": 10800,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -1885,7 +1690,7 @@
                 "grossProfitMmk": 7200
             },
             {
-                "date": "2026-03-12",
+                "date": "2026-02-27",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1898,7 +1703,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-03-13",
+                "date": "2026-02-28",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1911,20 +1716,20 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-03-14",
-                "cogsMmk": 13200,
+                "date": "2026-03-01",
+                "cogsMmk": 12600,
                 "voidMmk": 0,
-                "refundMmk": 5700,
+                "refundMmk": 6650,
                 "saleCount": 28,
                 "voidCount": 0,
-                "refundCount": 6,
+                "refundCount": 7,
                 "cogsComplete": true,
                 "grossSalesMmk": 27650,
-                "netRevenueMmk": 21950,
-                "grossProfitMmk": 8750
+                "netRevenueMmk": 21000,
+                "grossProfitMmk": 8400
             },
             {
-                "date": "2026-03-15",
+                "date": "2026-03-02",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1937,7 +1742,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-03-16",
+                "date": "2026-03-03",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1950,20 +1755,20 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2026-03-17",
-                "cogsMmk": 12600,
+                "date": "2026-03-04",
+                "cogsMmk": 13200,
                 "voidMmk": 0,
-                "refundMmk": 6650,
+                "refundMmk": 5700,
                 "saleCount": 28,
                 "voidCount": 0,
-                "refundCount": 7,
+                "refundCount": 6,
                 "cogsComplete": true,
                 "grossSalesMmk": 27650,
-                "netRevenueMmk": 21000,
-                "grossProfitMmk": 8400
+                "netRevenueMmk": 21950,
+                "grossProfitMmk": 8750
             },
             {
-                "date": "2026-03-18",
+                "date": "2026-03-05",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1976,7 +1781,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-03-19",
+                "date": "2026-03-06",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -1989,7 +1794,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-03-20",
+                "date": "2026-03-07",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -2002,7 +1807,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-03-21",
+                "date": "2026-03-08",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2015,7 +1820,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2026-03-22",
+                "date": "2026-03-09",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2028,7 +1833,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-03-23",
+                "date": "2026-03-10",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -2041,7 +1846,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-03-24",
+                "date": "2026-03-11",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2054,7 +1859,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-03-25",
+                "date": "2026-03-12",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2067,7 +1872,202 @@
                 "grossProfitMmk": 32550
             },
             {
+                "date": "2026-03-13",
+                "cogsMmk": 10800,
+                "voidMmk": 0,
+                "refundMmk": 6650,
+                "saleCount": 25,
+                "voidCount": 0,
+                "refundCount": 7,
+                "cogsComplete": true,
+                "grossSalesMmk": 24650,
+                "netRevenueMmk": 18000,
+                "grossProfitMmk": 7200
+            },
+            {
+                "date": "2026-03-14",
+                "cogsMmk": 100800,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 165900,
+                "netRevenueMmk": 165900,
+                "grossProfitMmk": 65100
+            },
+            {
+                "date": "2026-03-15",
+                "cogsMmk": 50400,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": false,
+                "grossSalesMmk": 84400,
+                "netRevenueMmk": 84400,
+                "grossProfitMmk": null
+            },
+            {
+                "date": "2026-03-16",
+                "cogsMmk": 13200,
+                "voidMmk": 0,
+                "refundMmk": 5700,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 6,
+                "cogsComplete": true,
+                "grossSalesMmk": 27650,
+                "netRevenueMmk": 21950,
+                "grossProfitMmk": 8750
+            },
+            {
+                "date": "2026-03-17",
+                "cogsMmk": 100800,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 165900,
+                "netRevenueMmk": 165900,
+                "grossProfitMmk": 65100
+            },
+            {
+                "date": "2026-03-18",
+                "cogsMmk": 45000,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 25,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 73950,
+                "netRevenueMmk": 73950,
+                "grossProfitMmk": 28950
+            },
+            {
+                "date": "2026-03-19",
+                "cogsMmk": 12600,
+                "voidMmk": 0,
+                "refundMmk": 6650,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 7,
+                "cogsComplete": true,
+                "grossSalesMmk": 27650,
+                "netRevenueMmk": 21000,
+                "grossProfitMmk": 8400
+            },
+            {
+                "date": "2026-03-20",
+                "cogsMmk": 100800,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": false,
+                "grossSalesMmk": 167350,
+                "netRevenueMmk": 167350,
+                "grossProfitMmk": null
+            },
+            {
+                "date": "2026-03-21",
+                "cogsMmk": 50400,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 82950,
+                "netRevenueMmk": 82950,
+                "grossProfitMmk": 32550
+            },
+            {
+                "date": "2026-03-22",
+                "cogsMmk": 12600,
+                "voidMmk": 0,
+                "refundMmk": 6650,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 7,
+                "cogsComplete": true,
+                "grossSalesMmk": 27650,
+                "netRevenueMmk": 21000,
+                "grossProfitMmk": 8400
+            },
+            {
+                "date": "2026-03-23",
+                "cogsMmk": 90000,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 25,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 147900,
+                "netRevenueMmk": 147900,
+                "grossProfitMmk": 57900
+            },
+            {
+                "date": "2026-03-24",
+                "cogsMmk": 50400,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 82950,
+                "netRevenueMmk": 82950,
+                "grossProfitMmk": 32550
+            },
+            {
+                "date": "2026-03-25",
+                "cogsMmk": 12600,
+                "voidMmk": 0,
+                "refundMmk": 6650,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 7,
+                "cogsComplete": false,
+                "grossSalesMmk": 29100,
+                "netRevenueMmk": 22450,
+                "grossProfitMmk": null
+            },
+            {
                 "date": "2026-03-26",
+                "cogsMmk": 100800,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 165900,
+                "netRevenueMmk": 165900,
+                "grossProfitMmk": 65100
+            },
+            {
+                "date": "2026-03-27",
+                "cogsMmk": 50400,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 82950,
+                "netRevenueMmk": 82950,
+                "grossProfitMmk": 32550
+            },
+            {
+                "date": "2026-03-28",
                 "cogsMmk": 11400,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -2080,7 +2080,7 @@
                 "grossProfitMmk": 7550
             },
             {
-                "date": "2026-03-27",
+                "date": "2026-03-29",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2093,7 +2093,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-03-28",
+                "date": "2026-03-30",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2106,7 +2106,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-03-29",
+                "date": "2026-03-31",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -2119,7 +2119,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-03-30",
+                "date": "2026-04-01",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2132,7 +2132,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-03-31",
+                "date": "2026-04-02",
                 "cogsMmk": 46800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2145,7 +2145,7 @@
                 "grossProfitMmk": 30150
             },
             {
-                "date": "2026-04-01",
+                "date": "2026-04-03",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -2158,7 +2158,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-04-02",
+                "date": "2026-04-04",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2171,7 +2171,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-04-03",
+                "date": "2026-04-05",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2184,7 +2184,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-04-04",
+                "date": "2026-04-06",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -2197,7 +2197,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-04-05",
+                "date": "2026-04-07",
                 "cogsMmk": 93600,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2210,7 +2210,7 @@
                 "grossProfitMmk": 60300
             },
             {
-                "date": "2026-04-06",
+                "date": "2026-04-08",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2223,7 +2223,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-04-07",
+                "date": "2026-04-09",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -2236,7 +2236,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-04-08",
+                "date": "2026-04-10",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2249,7 +2249,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-04-09",
+                "date": "2026-04-11",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2262,7 +2262,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-04-10",
+                "date": "2026-04-12",
                 "cogsMmk": 10800,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -2275,7 +2275,7 @@
                 "grossProfitMmk": 7200
             },
             {
-                "date": "2026-04-11",
+                "date": "2026-04-13",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2288,7 +2288,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-04-12",
+                "date": "2026-04-14",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2301,7 +2301,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-04-13",
+                "date": "2026-04-15",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -2312,230 +2312,74 @@
                 "grossSalesMmk": 27650,
                 "netRevenueMmk": 21000,
                 "grossProfitMmk": 8400
-            },
-            {
-                "date": "2026-04-14",
-                "cogsMmk": 100800,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 165900,
-                "netRevenueMmk": 165900,
-                "grossProfitMmk": 65100
-            },
-            {
-                "date": "2026-04-15",
-                "cogsMmk": 45000,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 25,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 73950,
-                "netRevenueMmk": 73950,
-                "grossProfitMmk": 28950
             },
             {
                 "date": "2026-04-16",
-                "cogsMmk": 12600,
+                "cogsMmk": 100800,
                 "voidMmk": 0,
-                "refundMmk": 6650,
+                "refundMmk": 0,
                 "saleCount": 28,
                 "voidCount": 0,
-                "refundCount": 7,
+                "refundCount": 0,
                 "cogsComplete": true,
-                "grossSalesMmk": 27650,
-                "netRevenueMmk": 21000,
-                "grossProfitMmk": 8400
+                "grossSalesMmk": 165900,
+                "netRevenueMmk": 165900,
+                "grossProfitMmk": 65100
             },
             {
                 "date": "2026-04-17",
-                "cogsMmk": 100800,
+                "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
-                "saleCount": 28,
+                "saleCount": 25,
                 "voidCount": 0,
                 "refundCount": 0,
-                "cogsComplete": false,
-                "grossSalesMmk": 167375,
-                "netRevenueMmk": 167375,
-                "grossProfitMmk": null
+                "cogsComplete": true,
+                "grossSalesMmk": 73950,
+                "netRevenueMmk": 73950,
+                "grossProfitMmk": 28950
             },
             {
                 "date": "2026-04-18",
-                "cogsMmk": 50400,
+                "cogsMmk": 12600,
                 "voidMmk": 0,
-                "refundMmk": 0,
+                "refundMmk": 6650,
                 "saleCount": 28,
                 "voidCount": 0,
-                "refundCount": 0,
+                "refundCount": 7,
                 "cogsComplete": true,
-                "grossSalesMmk": 82950,
-                "netRevenueMmk": 82950,
-                "grossProfitMmk": 32550
+                "grossSalesMmk": 27650,
+                "netRevenueMmk": 21000,
+                "grossProfitMmk": 8400
             },
             {
                 "date": "2026-04-19",
-                "cogsMmk": 13200,
+                "cogsMmk": 100800,
                 "voidMmk": 0,
-                "refundMmk": 5700,
+                "refundMmk": 0,
                 "saleCount": 28,
                 "voidCount": 0,
-                "refundCount": 6,
-                "cogsComplete": true,
-                "grossSalesMmk": 27650,
-                "netRevenueMmk": 21950,
-                "grossProfitMmk": 8750
+                "refundCount": 0,
+                "cogsComplete": false,
+                "grossSalesMmk": 167375,
+                "netRevenueMmk": 167375,
+                "grossProfitMmk": null
             },
             {
                 "date": "2026-04-20",
-                "cogsMmk": 90000,
+                "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
-                "saleCount": 25,
+                "saleCount": 28,
                 "voidCount": 0,
                 "refundCount": 0,
                 "cogsComplete": true,
-                "grossSalesMmk": 147900,
-                "netRevenueMmk": 147900,
-                "grossProfitMmk": 57900
+                "grossSalesMmk": 82950,
+                "netRevenueMmk": 82950,
+                "grossProfitMmk": 32550
             },
             {
                 "date": "2026-04-21",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 82950,
-                "netRevenueMmk": 82950,
-                "grossProfitMmk": 32550
-            },
-            {
-                "date": "2026-04-22",
-                "cogsMmk": 12600,
-                "voidMmk": 0,
-                "refundMmk": 6650,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 7,
-                "cogsComplete": false,
-                "grossSalesMmk": 29125,
-                "netRevenueMmk": 22475,
-                "grossProfitMmk": null
-            },
-            {
-                "date": "2026-04-23",
-                "cogsMmk": 100800,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 165900,
-                "netRevenueMmk": 165900,
-                "grossProfitMmk": 65100
-            },
-            {
-                "date": "2026-04-24",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 82950,
-                "netRevenueMmk": 82950,
-                "grossProfitMmk": 32550
-            },
-            {
-                "date": "2026-04-25",
-                "cogsMmk": 10800,
-                "voidMmk": 0,
-                "refundMmk": 6650,
-                "saleCount": 25,
-                "voidCount": 0,
-                "refundCount": 7,
-                "cogsComplete": true,
-                "grossSalesMmk": 24650,
-                "netRevenueMmk": 18000,
-                "grossProfitMmk": 7200
-            },
-            {
-                "date": "2026-04-26",
-                "cogsMmk": 100800,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 165900,
-                "netRevenueMmk": 165900,
-                "grossProfitMmk": 65100
-            },
-            {
-                "date": "2026-04-27",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": false,
-                "grossSalesMmk": 84425,
-                "netRevenueMmk": 84425,
-                "grossProfitMmk": null
-            },
-            {
-                "date": "2026-04-28",
-                "cogsMmk": 12600,
-                "voidMmk": 0,
-                "refundMmk": 6650,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 7,
-                "cogsComplete": true,
-                "grossSalesMmk": 27650,
-                "netRevenueMmk": 21000,
-                "grossProfitMmk": 8400
-            },
-            {
-                "date": "2026-04-29",
-                "cogsMmk": 100800,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 165900,
-                "netRevenueMmk": 165900,
-                "grossProfitMmk": 65100
-            },
-            {
-                "date": "2026-04-30",
-                "cogsMmk": 45000,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 25,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 73950,
-                "netRevenueMmk": 73950,
-                "grossProfitMmk": 28950
-            },
-            {
-                "date": "2026-05-01",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -2548,46 +2392,7 @@
                 "grossProfitMmk": 8750
             },
             {
-                "date": "2026-05-02",
-                "cogsMmk": 100800,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": false,
-                "grossSalesMmk": 167375,
-                "netRevenueMmk": 167375,
-                "grossProfitMmk": null
-            },
-            {
-                "date": "2026-05-03",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 82950,
-                "netRevenueMmk": 82950,
-                "grossProfitMmk": 32550
-            },
-            {
-                "date": "2026-05-04",
-                "cogsMmk": 12600,
-                "voidMmk": 0,
-                "refundMmk": 6650,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 7,
-                "cogsComplete": true,
-                "grossSalesMmk": 27650,
-                "netRevenueMmk": 21000,
-                "grossProfitMmk": 8400
-            },
-            {
-                "date": "2026-05-05",
+                "date": "2026-04-22",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2600,7 +2405,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2026-05-06",
+                "date": "2026-04-23",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2613,7 +2418,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-05-07",
+                "date": "2026-04-24",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -2626,7 +2431,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-05-08",
+                "date": "2026-04-25",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2639,7 +2444,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-05-09",
+                "date": "2026-04-26",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2652,7 +2457,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-05-10",
+                "date": "2026-04-27",
                 "cogsMmk": 10800,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -2665,7 +2470,7 @@
                 "grossProfitMmk": 7200
             },
             {
-                "date": "2026-05-11",
+                "date": "2026-04-28",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2678,7 +2483,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-05-12",
+                "date": "2026-04-29",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2691,20 +2496,20 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-05-13",
-                "cogsMmk": 13200,
+                "date": "2026-04-30",
+                "cogsMmk": 12600,
                 "voidMmk": 0,
-                "refundMmk": 5700,
+                "refundMmk": 6650,
                 "saleCount": 28,
                 "voidCount": 0,
-                "refundCount": 6,
+                "refundCount": 7,
                 "cogsComplete": true,
                 "grossSalesMmk": 27650,
-                "netRevenueMmk": 21950,
-                "grossProfitMmk": 8750
+                "netRevenueMmk": 21000,
+                "grossProfitMmk": 8400
             },
             {
-                "date": "2026-05-14",
+                "date": "2026-05-01",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2717,7 +2522,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-05-15",
+                "date": "2026-05-02",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2730,20 +2535,20 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2026-05-16",
-                "cogsMmk": 12600,
+                "date": "2026-05-03",
+                "cogsMmk": 13200,
                 "voidMmk": 0,
-                "refundMmk": 6650,
+                "refundMmk": 5700,
                 "saleCount": 28,
                 "voidCount": 0,
-                "refundCount": 7,
+                "refundCount": 6,
                 "cogsComplete": true,
                 "grossSalesMmk": 27650,
-                "netRevenueMmk": 21000,
-                "grossProfitMmk": 8400
+                "netRevenueMmk": 21950,
+                "grossProfitMmk": 8750
             },
             {
-                "date": "2026-05-17",
+                "date": "2026-05-04",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2756,7 +2561,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-05-18",
+                "date": "2026-05-05",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2769,7 +2574,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-05-19",
+                "date": "2026-05-06",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -2782,7 +2587,202 @@
                 "grossProfitMmk": 8400
             },
             {
+                "date": "2026-05-07",
+                "cogsMmk": 90000,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 25,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 147900,
+                "netRevenueMmk": 147900,
+                "grossProfitMmk": 57900
+            },
+            {
+                "date": "2026-05-08",
+                "cogsMmk": 50400,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 82950,
+                "netRevenueMmk": 82950,
+                "grossProfitMmk": 32550
+            },
+            {
+                "date": "2026-05-09",
+                "cogsMmk": 12600,
+                "voidMmk": 0,
+                "refundMmk": 6650,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 7,
+                "cogsComplete": false,
+                "grossSalesMmk": 29125,
+                "netRevenueMmk": 22475,
+                "grossProfitMmk": null
+            },
+            {
+                "date": "2026-05-10",
+                "cogsMmk": 100800,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 165900,
+                "netRevenueMmk": 165900,
+                "grossProfitMmk": 65100
+            },
+            {
+                "date": "2026-05-11",
+                "cogsMmk": 50400,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 82950,
+                "netRevenueMmk": 82950,
+                "grossProfitMmk": 32550
+            },
+            {
+                "date": "2026-05-12",
+                "cogsMmk": 10800,
+                "voidMmk": 0,
+                "refundMmk": 6650,
+                "saleCount": 25,
+                "voidCount": 0,
+                "refundCount": 7,
+                "cogsComplete": true,
+                "grossSalesMmk": 24650,
+                "netRevenueMmk": 18000,
+                "grossProfitMmk": 7200
+            },
+            {
+                "date": "2026-05-13",
+                "cogsMmk": 100800,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 165900,
+                "netRevenueMmk": 165900,
+                "grossProfitMmk": 65100
+            },
+            {
+                "date": "2026-05-14",
+                "cogsMmk": 50400,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": false,
+                "grossSalesMmk": 84425,
+                "netRevenueMmk": 84425,
+                "grossProfitMmk": null
+            },
+            {
+                "date": "2026-05-15",
+                "cogsMmk": 13200,
+                "voidMmk": 0,
+                "refundMmk": 5700,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 6,
+                "cogsComplete": true,
+                "grossSalesMmk": 27650,
+                "netRevenueMmk": 21950,
+                "grossProfitMmk": 8750
+            },
+            {
+                "date": "2026-05-16",
+                "cogsMmk": 100800,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 165900,
+                "netRevenueMmk": 165900,
+                "grossProfitMmk": 65100
+            },
+            {
+                "date": "2026-05-17",
+                "cogsMmk": 45000,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 25,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 73950,
+                "netRevenueMmk": 73950,
+                "grossProfitMmk": 28950
+            },
+            {
+                "date": "2026-05-18",
+                "cogsMmk": 12600,
+                "voidMmk": 0,
+                "refundMmk": 6650,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 7,
+                "cogsComplete": true,
+                "grossSalesMmk": 27650,
+                "netRevenueMmk": 21000,
+                "grossProfitMmk": 8400
+            },
+            {
+                "date": "2026-05-19",
+                "cogsMmk": 100800,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": false,
+                "grossSalesMmk": 167375,
+                "netRevenueMmk": 167375,
+                "grossProfitMmk": null
+            },
+            {
                 "date": "2026-05-20",
+                "cogsMmk": 50400,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 82950,
+                "netRevenueMmk": 82950,
+                "grossProfitMmk": 32550
+            },
+            {
+                "date": "2026-05-21",
+                "cogsMmk": 12600,
+                "voidMmk": 0,
+                "refundMmk": 6650,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 7,
+                "cogsComplete": true,
+                "grossSalesMmk": 27650,
+                "netRevenueMmk": 21000,
+                "grossProfitMmk": 8400
+            },
+            {
+                "date": "2026-05-22",
                 "cogsMmk": 93600,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2795,7 +2795,7 @@
                 "grossProfitMmk": 60300
             },
             {
-                "date": "2026-05-21",
+                "date": "2026-05-23",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2808,7 +2808,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-05-22",
+                "date": "2026-05-24",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -2821,7 +2821,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-05-23",
+                "date": "2026-05-25",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2834,7 +2834,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-05-24",
+                "date": "2026-05-26",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2847,7 +2847,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-05-25",
+                "date": "2026-05-27",
                 "cogsMmk": 12000,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -2860,7 +2860,7 @@
                 "grossProfitMmk": 7950
             },
             {
-                "date": "2026-05-26",
+                "date": "2026-05-28",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2873,7 +2873,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-05-27",
+                "date": "2026-05-29",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2886,7 +2886,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-05-28",
+                "date": "2026-05-30",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -2899,7 +2899,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-05-29",
+                "date": "2026-05-31",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2912,7 +2912,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-05-30",
+                "date": "2026-06-01",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2925,7 +2925,7 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2026-05-31",
+                "date": "2026-06-02",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -2938,7 +2938,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-06-01",
+                "date": "2026-06-03",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2951,7 +2951,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-06-02",
+                "date": "2026-06-04",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2964,7 +2964,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-06-03",
+                "date": "2026-06-05",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -2977,7 +2977,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-06-04",
+                "date": "2026-06-06",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -2990,7 +2990,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2026-06-05",
+                "date": "2026-06-07",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3003,7 +3003,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-06-06",
+                "date": "2026-06-08",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -3016,7 +3016,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-06-07",
+                "date": "2026-06-09",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3027,217 +3027,22 @@
                 "grossSalesMmk": 165900,
                 "netRevenueMmk": 165900,
                 "grossProfitMmk": 65100
-            },
-            {
-                "date": "2026-06-08",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 82950,
-                "netRevenueMmk": 82950,
-                "grossProfitMmk": 32550
-            },
-            {
-                "date": "2026-06-09",
-                "cogsMmk": 10800,
-                "voidMmk": 0,
-                "refundMmk": 6650,
-                "saleCount": 25,
-                "voidCount": 0,
-                "refundCount": 7,
-                "cogsComplete": true,
-                "grossSalesMmk": 24650,
-                "netRevenueMmk": 18000,
-                "grossProfitMmk": 7200
             },
             {
                 "date": "2026-06-10",
-                "cogsMmk": 100800,
+                "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
                 "saleCount": 28,
                 "voidCount": 0,
                 "refundCount": 0,
                 "cogsComplete": true,
-                "grossSalesMmk": 165900,
-                "netRevenueMmk": 165900,
-                "grossProfitMmk": 65100
+                "grossSalesMmk": 82950,
+                "netRevenueMmk": 82950,
+                "grossProfitMmk": 32550
             },
             {
                 "date": "2026-06-11",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": false,
-                "grossSalesMmk": 84400,
-                "netRevenueMmk": 84400,
-                "grossProfitMmk": null
-            },
-            {
-                "date": "2026-06-12",
-                "cogsMmk": 12600,
-                "voidMmk": 0,
-                "refundMmk": 6650,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 7,
-                "cogsComplete": true,
-                "grossSalesMmk": 27650,
-                "netRevenueMmk": 21000,
-                "grossProfitMmk": 8400
-            },
-            {
-                "date": "2026-06-13",
-                "cogsMmk": 100800,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 165900,
-                "netRevenueMmk": 165900,
-                "grossProfitMmk": 65100
-            },
-            {
-                "date": "2026-06-14",
-                "cogsMmk": 45000,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 25,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 73950,
-                "netRevenueMmk": 73950,
-                "grossProfitMmk": 28950
-            },
-            {
-                "date": "2026-06-15",
-                "cogsMmk": 12600,
-                "voidMmk": 0,
-                "refundMmk": 6650,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 7,
-                "cogsComplete": true,
-                "grossSalesMmk": 27650,
-                "netRevenueMmk": 21000,
-                "grossProfitMmk": 8400
-            },
-            {
-                "date": "2026-06-16",
-                "cogsMmk": 100800,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": false,
-                "grossSalesMmk": 167350,
-                "netRevenueMmk": 167350,
-                "grossProfitMmk": null
-            },
-            {
-                "date": "2026-06-17",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 82950,
-                "netRevenueMmk": 82950,
-                "grossProfitMmk": 32550
-            },
-            {
-                "date": "2026-06-18",
-                "cogsMmk": 13200,
-                "voidMmk": 0,
-                "refundMmk": 5700,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 6,
-                "cogsComplete": true,
-                "grossSalesMmk": 27650,
-                "netRevenueMmk": 21950,
-                "grossProfitMmk": 8750
-            },
-            {
-                "date": "2026-06-19",
-                "cogsMmk": 90000,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 25,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 147900,
-                "netRevenueMmk": 147900,
-                "grossProfitMmk": 57900
-            },
-            {
-                "date": "2026-06-20",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 82950,
-                "netRevenueMmk": 82950,
-                "grossProfitMmk": 32550
-            },
-            {
-                "date": "2026-06-21",
-                "cogsMmk": 12600,
-                "voidMmk": 0,
-                "refundMmk": 6650,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 7,
-                "cogsComplete": false,
-                "grossSalesMmk": 29100,
-                "netRevenueMmk": 22450,
-                "grossProfitMmk": null
-            },
-            {
-                "date": "2026-06-22",
-                "cogsMmk": 100800,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 165900,
-                "netRevenueMmk": 165900,
-                "grossProfitMmk": 65100
-            },
-            {
-                "date": "2026-06-23",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 82950,
-                "netRevenueMmk": 82950,
-                "grossProfitMmk": 32550
-            },
-            {
-                "date": "2026-06-24",
                 "cogsMmk": 10800,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3250,7 +3055,7 @@
                 "grossProfitMmk": 7200
             },
             {
-                "date": "2026-06-25",
+                "date": "2026-06-12",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3263,7 +3068,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-06-26",
+                "date": "2026-06-13",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3276,7 +3081,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-06-27",
+                "date": "2026-06-14",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3289,7 +3094,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-06-28",
+                "date": "2026-06-15",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3302,7 +3107,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-06-29",
+                "date": "2026-06-16",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3315,46 +3120,7 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2026-06-30",
-                "cogsMmk": 13200,
-                "voidMmk": 0,
-                "refundMmk": 5700,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 6,
-                "cogsComplete": true,
-                "grossSalesMmk": 27650,
-                "netRevenueMmk": 21950,
-                "grossProfitMmk": 8750
-            },
-            {
-                "date": "2026-07-01",
-                "cogsMmk": 100800,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": false,
-                "grossSalesMmk": 167350,
-                "netRevenueMmk": 167350,
-                "grossProfitMmk": null
-            },
-            {
-                "date": "2026-07-02",
-                "cogsMmk": 50400,
-                "voidMmk": 0,
-                "refundMmk": 0,
-                "saleCount": 28,
-                "voidCount": 0,
-                "refundCount": 0,
-                "cogsComplete": true,
-                "grossSalesMmk": 82950,
-                "netRevenueMmk": 82950,
-                "grossProfitMmk": 32550
-            },
-            {
-                "date": "2026-07-03",
+                "date": "2026-06-17",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3367,7 +3133,46 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-07-04",
+                "date": "2026-06-18",
+                "cogsMmk": 100800,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": false,
+                "grossSalesMmk": 167350,
+                "netRevenueMmk": 167350,
+                "grossProfitMmk": null
+            },
+            {
+                "date": "2026-06-19",
+                "cogsMmk": 50400,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 82950,
+                "netRevenueMmk": 82950,
+                "grossProfitMmk": 32550
+            },
+            {
+                "date": "2026-06-20",
+                "cogsMmk": 13200,
+                "voidMmk": 0,
+                "refundMmk": 5700,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 6,
+                "cogsComplete": true,
+                "grossSalesMmk": 27650,
+                "netRevenueMmk": 21950,
+                "grossProfitMmk": 8750
+            },
+            {
+                "date": "2026-06-21",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3380,7 +3185,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2026-07-05",
+                "date": "2026-06-22",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3393,7 +3198,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-07-06",
+                "date": "2026-06-23",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3406,7 +3211,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-07-07",
+                "date": "2026-06-24",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3419,7 +3224,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-07-08",
+                "date": "2026-06-25",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3432,7 +3237,202 @@
                 "grossProfitMmk": 32550
             },
             {
+                "date": "2026-06-26",
+                "cogsMmk": 10800,
+                "voidMmk": 0,
+                "refundMmk": 6650,
+                "saleCount": 25,
+                "voidCount": 0,
+                "refundCount": 7,
+                "cogsComplete": true,
+                "grossSalesMmk": 24650,
+                "netRevenueMmk": 18000,
+                "grossProfitMmk": 7200
+            },
+            {
+                "date": "2026-06-27",
+                "cogsMmk": 100800,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 165900,
+                "netRevenueMmk": 165900,
+                "grossProfitMmk": 65100
+            },
+            {
+                "date": "2026-06-28",
+                "cogsMmk": 50400,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": false,
+                "grossSalesMmk": 84400,
+                "netRevenueMmk": 84400,
+                "grossProfitMmk": null
+            },
+            {
+                "date": "2026-06-29",
+                "cogsMmk": 12600,
+                "voidMmk": 0,
+                "refundMmk": 6650,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 7,
+                "cogsComplete": true,
+                "grossSalesMmk": 27650,
+                "netRevenueMmk": 21000,
+                "grossProfitMmk": 8400
+            },
+            {
+                "date": "2026-06-30",
+                "cogsMmk": 100800,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 165900,
+                "netRevenueMmk": 165900,
+                "grossProfitMmk": 65100
+            },
+            {
+                "date": "2026-07-01",
+                "cogsMmk": 45000,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 25,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 73950,
+                "netRevenueMmk": 73950,
+                "grossProfitMmk": 28950
+            },
+            {
+                "date": "2026-07-02",
+                "cogsMmk": 13200,
+                "voidMmk": 0,
+                "refundMmk": 5700,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 6,
+                "cogsComplete": true,
+                "grossSalesMmk": 27650,
+                "netRevenueMmk": 21950,
+                "grossProfitMmk": 8750
+            },
+            {
+                "date": "2026-07-03",
+                "cogsMmk": 100800,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": false,
+                "grossSalesMmk": 167350,
+                "netRevenueMmk": 167350,
+                "grossProfitMmk": null
+            },
+            {
+                "date": "2026-07-04",
+                "cogsMmk": 50400,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 82950,
+                "netRevenueMmk": 82950,
+                "grossProfitMmk": 32550
+            },
+            {
+                "date": "2026-07-05",
+                "cogsMmk": 12600,
+                "voidMmk": 0,
+                "refundMmk": 6650,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 7,
+                "cogsComplete": true,
+                "grossSalesMmk": 27650,
+                "netRevenueMmk": 21000,
+                "grossProfitMmk": 8400
+            },
+            {
+                "date": "2026-07-06",
+                "cogsMmk": 90000,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 25,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 147900,
+                "netRevenueMmk": 147900,
+                "grossProfitMmk": 57900
+            },
+            {
+                "date": "2026-07-07",
+                "cogsMmk": 50400,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 82950,
+                "netRevenueMmk": 82950,
+                "grossProfitMmk": 32550
+            },
+            {
+                "date": "2026-07-08",
+                "cogsMmk": 12600,
+                "voidMmk": 0,
+                "refundMmk": 6650,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 7,
+                "cogsComplete": false,
+                "grossSalesMmk": 29100,
+                "netRevenueMmk": 22450,
+                "grossProfitMmk": null
+            },
+            {
                 "date": "2026-07-09",
+                "cogsMmk": 100800,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 165900,
+                "netRevenueMmk": 165900,
+                "grossProfitMmk": 65100
+            },
+            {
+                "date": "2026-07-10",
+                "cogsMmk": 50400,
+                "voidMmk": 0,
+                "refundMmk": 0,
+                "saleCount": 28,
+                "voidCount": 0,
+                "refundCount": 0,
+                "cogsComplete": true,
+                "grossSalesMmk": 82950,
+                "netRevenueMmk": 82950,
+                "grossProfitMmk": 32550
+            },
+            {
+                "date": "2026-07-11",
                 "cogsMmk": 11400,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3445,7 +3445,7 @@
                 "grossProfitMmk": 7600
             },
             {
-                "date": "2026-07-10",
+                "date": "2026-07-12",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3458,7 +3458,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-07-11",
+                "date": "2026-07-13",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3471,7 +3471,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-07-12",
+                "date": "2026-07-14",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -3484,7 +3484,7 @@
                 "grossProfitMmk": 8750
             },
             {
-                "date": "2026-07-13",
+                "date": "2026-07-15",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3497,7 +3497,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-07-14",
+                "date": "2026-07-16",
                 "cogsMmk": 46800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3510,7 +3510,7 @@
                 "grossProfitMmk": 30150
             },
             {
-                "date": "2026-07-15",
+                "date": "2026-07-17",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3523,7 +3523,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-07-16",
+                "date": "2026-07-18",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3536,7 +3536,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-07-17",
+                "date": "2026-07-19",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3549,7 +3549,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-07-18",
+                "date": "2026-07-20",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3562,7 +3562,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-07-19",
+                "date": "2026-07-21",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3575,7 +3575,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2026-07-20",
+                "date": "2026-07-22",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3588,7 +3588,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-07-21",
+                "date": "2026-07-23",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3601,7 +3601,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-07-22",
+                "date": "2026-07-24",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3614,7 +3614,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-07-23",
+                "date": "2026-07-25",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3627,7 +3627,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-07-24",
+                "date": "2026-07-26",
                 "cogsMmk": 11400,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -3640,7 +3640,7 @@
                 "grossProfitMmk": 7550
             },
             {
-                "date": "2026-07-25",
+                "date": "2026-07-27",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3653,7 +3653,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-07-26",
+                "date": "2026-07-28",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3666,7 +3666,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-07-27",
+                "date": "2026-07-29",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3679,7 +3679,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-07-28",
+                "date": "2026-07-30",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3692,7 +3692,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-07-29",
+                "date": "2026-07-31",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3705,7 +3705,7 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2026-07-30",
+                "date": "2026-08-01",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3718,7 +3718,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-07-31",
+                "date": "2026-08-02",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3731,7 +3731,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-08-01",
+                "date": "2026-08-03",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3744,7 +3744,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-08-02",
+                "date": "2026-08-04",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3757,7 +3757,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-08-03",
+                "date": "2026-08-05",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3770,7 +3770,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2026-08-04",
+                "date": "2026-08-06",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3783,7 +3783,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-08-05",
+                "date": "2026-08-07",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -3796,7 +3796,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-08-06",
+                "date": "2026-08-08",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3809,7 +3809,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-08-07",
+                "date": "2026-08-09",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3822,7 +3822,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-08-08",
+                "date": "2026-08-10",
                 "cogsMmk": 10800,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3835,7 +3835,7 @@
                 "grossProfitMmk": 7200
             },
             {
-                "date": "2026-08-09",
+                "date": "2026-08-11",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3848,7 +3848,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-08-10",
+                "date": "2026-08-12",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3861,7 +3861,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-08-11",
+                "date": "2026-08-13",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3874,7 +3874,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-08-12",
+                "date": "2026-08-14",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3887,7 +3887,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-08-13",
+                "date": "2026-08-15",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3900,7 +3900,7 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2026-08-14",
+                "date": "2026-08-16",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3913,7 +3913,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-08-15",
+                "date": "2026-08-17",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3926,7 +3926,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-08-16",
+                "date": "2026-08-18",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3939,7 +3939,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-08-17",
+                "date": "2026-08-19",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -3952,7 +3952,7 @@
                 "grossProfitMmk": 8750
             },
             {
-                "date": "2026-08-18",
+                "date": "2026-08-20",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3965,7 +3965,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2026-08-19",
+                "date": "2026-08-21",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -3978,7 +3978,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-08-20",
+                "date": "2026-08-22",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -3991,7 +3991,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-08-21",
+                "date": "2026-08-23",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4004,7 +4004,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-08-22",
+                "date": "2026-08-24",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4017,7 +4017,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-08-23",
+                "date": "2026-08-25",
                 "cogsMmk": 10800,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -4030,7 +4030,7 @@
                 "grossProfitMmk": 7200
             },
             {
-                "date": "2026-08-24",
+                "date": "2026-08-26",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4043,7 +4043,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-08-25",
+                "date": "2026-08-27",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4056,7 +4056,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-08-26",
+                "date": "2026-08-28",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -4069,7 +4069,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-08-27",
+                "date": "2026-08-29",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4082,7 +4082,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-08-28",
+                "date": "2026-08-30",
                 "cogsMmk": 46800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4095,7 +4095,7 @@
                 "grossProfitMmk": 30150
             },
             {
-                "date": "2026-08-29",
+                "date": "2026-08-31",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -4108,7 +4108,7 @@
                 "grossProfitMmk": 8750
             },
             {
-                "date": "2026-08-30",
+                "date": "2026-09-01",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4121,7 +4121,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-08-31",
+                "date": "2026-09-02",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4134,7 +4134,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-09-01",
+                "date": "2026-09-03",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -4147,7 +4147,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-09-02",
+                "date": "2026-09-04",
                 "cogsMmk": 93600,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4160,7 +4160,7 @@
                 "grossProfitMmk": 60300
             },
             {
-                "date": "2026-09-03",
+                "date": "2026-09-05",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4173,7 +4173,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-09-04",
+                "date": "2026-09-06",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -4186,7 +4186,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-09-05",
+                "date": "2026-09-07",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4199,7 +4199,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-09-06",
+                "date": "2026-09-08",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4212,7 +4212,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-09-07",
+                "date": "2026-09-09",
                 "cogsMmk": 10800,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -4225,7 +4225,7 @@
                 "grossProfitMmk": 7200
             },
             {
-                "date": "2026-09-08",
+                "date": "2026-09-10",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4238,7 +4238,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-09-09",
+                "date": "2026-09-11",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4251,7 +4251,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-09-10",
+                "date": "2026-09-12",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -4264,7 +4264,7 @@
                 "grossProfitMmk": 8750
             },
             {
-                "date": "2026-09-11",
+                "date": "2026-09-13",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4277,7 +4277,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-09-12",
+                "date": "2026-09-14",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4290,7 +4290,7 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2026-09-13",
+                "date": "2026-09-15",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -4303,7 +4303,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-09-14",
+                "date": "2026-09-16",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4316,7 +4316,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-09-15",
+                "date": "2026-09-17",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4329,7 +4329,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-09-16",
+                "date": "2026-09-18",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -4342,7 +4342,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-09-17",
+                "date": "2026-09-19",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4355,7 +4355,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2026-09-18",
+                "date": "2026-09-20",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4368,7 +4368,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-09-19",
+                "date": "2026-09-21",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -4381,7 +4381,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-09-20",
+                "date": "2026-09-22",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4394,7 +4394,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-09-21",
+                "date": "2026-09-23",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4407,7 +4407,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-09-22",
+                "date": "2026-09-24",
                 "cogsMmk": 11400,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -4420,7 +4420,7 @@
                 "grossProfitMmk": 7550
             },
             {
-                "date": "2026-09-23",
+                "date": "2026-09-25",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4433,7 +4433,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-09-24",
+                "date": "2026-09-26",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4446,7 +4446,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-09-25",
+                "date": "2026-09-27",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -4459,7 +4459,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-09-26",
+                "date": "2026-09-28",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4472,7 +4472,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-09-27",
+                "date": "2026-09-29",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4485,7 +4485,7 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2026-09-28",
+                "date": "2026-09-30",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -4498,7 +4498,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-09-29",
+                "date": "2026-10-01",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4511,7 +4511,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-09-30",
+                "date": "2026-10-02",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4524,7 +4524,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-10-01",
+                "date": "2026-10-03",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -4537,7 +4537,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-10-02",
+                "date": "2026-10-04",
                 "cogsMmk": 90000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4550,7 +4550,7 @@
                 "grossProfitMmk": 57900
             },
             {
-                "date": "2026-10-03",
+                "date": "2026-10-05",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4563,7 +4563,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-10-04",
+                "date": "2026-10-06",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -4576,7 +4576,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-10-05",
+                "date": "2026-10-07",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4589,7 +4589,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-10-06",
+                "date": "2026-10-08",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4602,7 +4602,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-10-07",
+                "date": "2026-10-09",
                 "cogsMmk": 10800,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -4615,7 +4615,7 @@
                 "grossProfitMmk": 7200
             },
             {
-                "date": "2026-10-08",
+                "date": "2026-10-10",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4628,7 +4628,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-10-09",
+                "date": "2026-10-11",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4641,7 +4641,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-10-10",
+                "date": "2026-10-12",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -4654,7 +4654,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-10-11",
+                "date": "2026-10-13",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4667,7 +4667,7 @@
                 "grossProfitMmk": 65100
             },
             {
-                "date": "2026-10-12",
+                "date": "2026-10-14",
                 "cogsMmk": 45000,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4680,7 +4680,7 @@
                 "grossProfitMmk": 28950
             },
             {
-                "date": "2026-10-13",
+                "date": "2026-10-15",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 6650,
@@ -4693,7 +4693,7 @@
                 "grossProfitMmk": 8400
             },
             {
-                "date": "2026-10-14",
+                "date": "2026-10-16",
                 "cogsMmk": 100800,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4706,7 +4706,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-10-15",
+                "date": "2026-10-17",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4719,7 +4719,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-10-16",
+                "date": "2026-10-18",
                 "cogsMmk": 13200,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -4732,7 +4732,7 @@
                 "grossProfitMmk": 8750
             },
             {
-                "date": "2026-10-17",
+                "date": "2026-10-19",
                 "cogsMmk": 93600,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4745,7 +4745,7 @@
                 "grossProfitMmk": 60300
             },
             {
-                "date": "2026-10-18",
+                "date": "2026-10-20",
                 "cogsMmk": 50400,
                 "voidMmk": 0,
                 "refundMmk": 0,
@@ -4758,7 +4758,7 @@
                 "grossProfitMmk": 32550
             },
             {
-                "date": "2026-10-19",
+                "date": "2026-10-21",
                 "cogsMmk": 12600,
                 "voidMmk": 0,
                 "refundMmk": 5700,
@@ -4771,7 +4771,7 @@
                 "grossProfitMmk": null
             },
             {
-                "date": "2026-10-20",
+                "date": "2026-10-22",
                 "cogsMmk": 0,
                 "voidMmk": 0,
                 "refundMmk": 0,

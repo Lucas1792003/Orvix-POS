@@ -13,6 +13,8 @@ def main():
     ap.add_argument('--with-pfin-c',action='store_true',help='With --financial: also apply the HELD PFIN-C refund cap (migrations-provisional/held) before recovery v1')
     ap.add_argument('--m087-runner',choices=['supabase_admin','postgres'],default='supabase_admin',help='With --with-087: the superuser session that runs 087 (the pinned fingerprint must not depend on it)')
     ap.add_argument('--hold-084',action='store_true',help='Leave 084 unapplied, as on the real server (schema 085 with 084 held)')
+    ap.add_argument('--script2-pre',action='append',default=[],type=pathlib.Path,help='Script 2: extra .sql/.py test module run after the financial smoke, BEFORE Recovery V1 (repeatable)')
+    ap.add_argument('--script2-post',action='append',default=[],type=pathlib.Path,help='Script 2: extra .sql/.py test module run AFTER Recovery V1 and the Step 4 suite (repeatable)')
     ap.add_argument('--phase-d-regression',choices=['guarded','unguarded'],help='Run the single-session phase-d suites t05-t19 with every organization ACTIVE (guarded) or without V1 (unguarded) and stop; compare the two runs')
     args=ap.parse_args()
     if args.with_087 and args.stage!=86: raise SystemExit('--with-087 needs --stage 86')
@@ -36,6 +38,19 @@ def main():
     def sql(text, log='query.log'): return command(['psql',*dbargs],log,text)
     def file(path,log,transaction=False): return command(['psql',*dbargs,*(['--single-transaction'] if transaction else []),'-f',str(path)],log)
     started=False
+    def script2(paths, phase):
+        # Script 2 adversarial modules: .sql files run like the other smokes; a .py module exposes run(ctx)
+        import importlib.util
+        for p in paths:
+            p=p if p.is_absolute() else ROOT/p
+            if p.suffix=='.sql':
+                file(p,f'script2-{phase}-{p.stem}.log'); continue
+            spec=importlib.util.spec_from_file_location('script2_'+p.stem,p); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+            def check(name,ok,detail=''):
+                sql("SELECT test.check(%s, %s, %s);" % ("'"+name.replace("'","''")+"'", 'true' if ok else 'false', "'"+str(detail)[-300:].replace("'","''")+"'"),'script2-record.log')
+            ctx=dict(ROOT=ROOT,run=run,dbargs=dbargs,env=env,sql=sql,file=file,command=command,sock=sock,data=data,check=check,args=args,phase=phase,
+                     sim=ROOT/'tools/recovery-v1/owner/owner-sim.mjs',keydir=run/'owner-keys')
+            mod.run(ctx)
     verifier=ROOT/'tools/migration-sequence/verify.py'
     def facts_and_plan(label,expect_violation=None,facts_text=None):
         # READ-ONLY facts (the verifier's own query) and the sequence verifier's evaluation of them
@@ -110,6 +125,7 @@ def main():
         if args.financial:
             # Step 4 financial completion: business behaviour before any recovery guard
             file(ROOT/'tools/recovery-v1/db/fin-completion-smoke.sql','fin-completion-smoke.log')
+        script2(args.script2_pre,'pre')
         guards=ROOT/'supabase/migrations-provisional/RECOVERY_V1_guards.sql'
         adapter={'applicable':args.with_087}
         if args.with_087:
@@ -245,6 +261,7 @@ def main():
             adapter['rollback_087_refused']=r.returncode!=0 and ('RECOVERY_V1_087_CHANGE_BLOCKED' in r.stdout or 'RECOVERY_V1_GUARD_CHANGE_BLOCKED' in r.stdout)
             adapter['rollback_left_everything']=sql("SELECT to_regnamespace('recovery') IS NOT NULL AND to_regnamespace('supabase_migrations') IS NULL AND recovery_v1.integrity_problem() IS NULL AND recovery_v1.m087_fingerprint()=(SELECT fingerprint FROM recovery_v1.adapter_087) AND (SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'zz\\_recovery\\_v1\\_%' AND tgenabled='A')>=60;",'adapter-087-rollback-check.log').strip()=='t'
             step4()
+            script2(args.script2_post,'post')
             file(ROOT/'tools/recovery-v1/db/adapter-087-final.sql','adapter-087-final.log')
             if not (adapter['second_install_refused'] and adapter['rollback_087_refused'] and adapter['rollback_left_everything']): raise RuntimeError(f'087 adapter failure: {adapter}')
         else:
@@ -254,6 +271,7 @@ def main():
             if args.financial:file(ROOT/'tools/recovery-v1/db/cross-org-cost-smoke.sql','cross-org-cost-smoke.log')
             file(ROOT/'tools/recovery-v1/db/retention-smoke.sql','retention-smoke.log')
             step4()
+            script2(args.script2_post,'post')
         counts=json.loads(sql("SELECT json_build_object('passed',count(*) FILTER(WHERE ok),'failed',count(*) FILTER(WHERE NOT ok)) FROM test.results;",'counts.log'))
         race_ok=None
         if not args.with_087:

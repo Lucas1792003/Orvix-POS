@@ -36,6 +36,22 @@ export function expectedWalFiles({ timeline, startLsn, endLsnExclusive, segmentB
   });
 }
 
+/** Script 2 (r18b): a segment must START with a real long page header for exactly this segment: a PostgreSQL WAL magic
+ *  (0xD1xx), the long-header flag, this timeline, the page address of this segment, this segment size and (when the
+ *  requirement names it) this cluster's system identifier. A zero-filled or misplaced file of the right size is damaged.
+ *  Only the FIRST page is checked: damage later in a segment is found only by replaying it (pg_waldump / a restore). */
+function walHeaderMatches(bytes, name, requirement) {
+  if (bytes.length < 40) return false;
+  const magic = bytes.readUInt16LE(0), info = bytes.readUInt16LE(2), tli = bytes.readUInt32LE(4);
+  const pageaddr = bytes.readBigUInt64LE(8), sysid = bytes.readBigUInt64LE(24), segSize = bytes.readUInt32LE(32);
+  // bound to the base backup's cluster when the backup records it (a same-position segment of another cluster is not this WAL)
+  if (requirement.systemIdentifier !== undefined && sysid !== BigInt(requirement.systemIdentifier)) return false;
+  const perLog = 0x100000000n / BigInt(requirement.segmentBytes);
+  const segno = BigInt(`0x${name.slice(8, 16)}`) * perLog + BigInt(`0x${name.slice(16, 24)}`);
+  return (magic & 0xff00) === 0xd100 && (info & 0x0002) !== 0 && tli === Number.parseInt(name.slice(0, 8), 16)
+    && pageaddr === segno * BigInt(requirement.segmentBytes) && segSize === requirement.segmentBytes;
+}
+
 export function verifyWalCoverage(files, requirement) {
   try {
     // An explicitly chosen single timeline is required. Cross-timeline PITR needs history verification, unsupported here.
@@ -45,21 +61,40 @@ export function verifyWalCoverage(files, requirement) {
     for (const name of required) {
       const bytes = files.get(`wal/${name}`);
       if (!bytes) missing.push(name);
-      else if (bytes.length !== requirement.segmentBytes) damaged.push(name);
+      else if (bytes.length !== requirement.segmentBytes || !walHeaderMatches(bytes, name, requirement)) damaged.push(name);
     }
     return { status: missing.length || damaged.length ? 'incomplete' : 'verified', required, missing, damaged,
-      findings: [...(missing.length ? [finding('REQUIRED_WAL_MISSING')] : []), ...(damaged.length ? [finding('WAL_SEGMENT_SIZE_INVALID', 'quarantine')] : [])] };
+      findings: [...(missing.length ? [finding('REQUIRED_WAL_MISSING')] : []), ...(damaged.length ? [finding('WAL_SEGMENT_SIZE_INVALID', 'quarantine'), finding('WAL_SEGMENT_INVALID', 'quarantine')] : [])] };
   } catch { return { status: 'unknown', findings: [finding('WAL_REQUIREMENT_INVALID')] }; }
 }
 
-/** pg_restore reads every dump block and writes SQL to /dev/null. It never connects to a DB. */
-export function validateLogicalDump(dumpPath, pgRestorePath) {
+/** pg_restore reads every dump block and writes SQL to /dev/null. It never connects to a DB.
+ *  Script 2 (r78): with `expectedTables` ("schema.table" names, e.g. the keys of counts.json `rows`), every one of them
+ *  must have a TABLE DATA entry in the dump's table of contents; a dump that lost a table is damaged, not verified.
+ *  (Row counts can only be compared after an isolated restore: restore-test.sh does that.) */
+export function validateLogicalDump(dumpPath, pgRestorePath, expectedTables) {
   if (!isAbsolute(pgRestorePath) || !existsSync(pgRestorePath)) return { status: 'blocked', code: 'PG_RESTORE_UNAVAILABLE' };
-  const result = spawnSync(pgRestorePath, ['--file=/dev/null', '--', resolve(dumpPath)], {
-    encoding: 'utf8', timeout: 30000, maxBuffer: 65536,
-    env: { PATH: dirname(pgRestorePath), LANG: 'C', LC_ALL: 'C' },
-  });
-  return result.status === 0 ? { status: 'verified', code: 'DUMP_BLOCKS_READABLE' } : { status: 'damaged', code: 'DUMP_UNREADABLE' };
+  const env = { PATH: dirname(pgRestorePath), LANG: 'C', LC_ALL: 'C' };
+  const result = spawnSync(pgRestorePath, ['--file=/dev/null', '--', resolve(dumpPath)], { encoding: 'utf8', timeout: 30000, maxBuffer: 65536, env });
+  if (result.status !== 0) return { status: 'damaged', code: 'DUMP_UNREADABLE' };
+  if (!expectedTables) return { status: 'verified', code: 'DUMP_BLOCKS_READABLE' };
+  const toc = spawnSync(pgRestorePath, ['-l', '--', resolve(dumpPath)], { encoding: 'utf8', timeout: 30000, maxBuffer: 64 * 1024 * 1024, env });
+  if (toc.status !== 0) return { status: 'damaged', code: 'DUMP_TOC_UNREADABLE' };
+  const present = new Set();
+  for (const line of toc.stdout.split('\n')) {
+    const m = /^\d+; \d+ \d+ TABLE DATA (\S+) (\S+) /.exec(line);
+    if (m) present.add(`${m[1]}.${m[2]}`);
+  }
+  const missing = [...expectedTables].filter((t) => !present.has(t)).sort();
+  return missing.length ? { status: 'damaged', code: 'DUMP_TABLE_MISSING', missing } : { status: 'verified', code: 'DUMP_TABLES_PRESENT' };
+}
+
+/** The tables counts.json says existed at backup time (its `rows` keys), or null when it cannot say. */
+function countedTables(bytes) {
+  try {
+    const counts = JSON.parse(Buffer.from(bytes).toString('utf8'));
+    return counts && typeof counts.rows === 'object' && counts.rows !== null && !Array.isArray(counts.rows) ? Object.keys(counts.rows) : null;
+  } catch { return null; }
 }
 
 function inspectContents(opened, options) {
@@ -84,13 +119,17 @@ function inspectContents(opened, options) {
     if (!options.pgRestorePath) findings.push(finding('LOGICAL_DUMP_READ_ALL_REQUIRED'));
     else {
       const scratch = mkdtempSync(join(tmpdir(), 'orvix-dump-readonly-'));
+      const counted = files.get(`${prefix}counts.json`) ? countedTables(files.get(`${prefix}counts.json`)) : null;
+      if (files.get(`${prefix}counts.json`) && !counted) findings.push(finding('COUNTS_TABLE_LIST_UNAVAILABLE'));
       try {
         for (const database of ['postgres', '_supabase']) {
           const bytes = files.get(`${prefix}${database}.dump`);
           if (!bytes) continue;
           const path = join(scratch, `${database}.dump`);
           writeFileSync(path, bytes, { flag: 'wx', mode: 0o600 });
-          dumpReadability[database] = validateLogicalDump(path, options.pgRestorePath);
+          // the postgres database holds every counted schema (public, auth, storage, supabase_migrations)
+          dumpReadability[database] = validateLogicalDump(path, options.pgRestorePath, database === 'postgres' && counted ? counted : undefined);
+          if (dumpReadability[database].code === 'DUMP_TABLE_MISSING') coverage = 'incomplete';
           if (dumpReadability[database].status !== 'verified') findings.push(finding(`${dumpReadability[database].code}:${database}`, dumpReadability[database].status === 'damaged' ? 'quarantine' : 'blocked'));
         }
       } finally { rmSync(scratch, { recursive: true, force: true }); }

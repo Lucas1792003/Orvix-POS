@@ -233,9 +233,12 @@ END IF;
 CREATE TABLE recovery_v1.install (
  one boolean PRIMARY KEY DEFAULT true CHECK(one), database_name text NOT NULL, database_oid oid NOT NULL,
  system_identifier text NOT NULL, idem_body_md5 text NOT NULL, stage int NOT NULL CHECK(stage IN(85,86)), installed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ -- Script 2: the WAL timeline at install. A point-in-time restore or a promotion always continues on a NEW timeline.
+ timeline_id int NOT NULL,
  install_ack text NOT NULL DEFAULT current_setting('orvix.recovery_v1_install_ack', true) CHECK(install_ack='restrict-every-organization'));
-INSERT INTO recovery_v1.install SELECT true,current_database(),(SELECT oid FROM pg_database WHERE datname=current_database()),
- (SELECT system_identifier::text FROM pg_control_system()),md5(prosrc),CASE md5(prosrc) WHEN 'afca065fea226a0c7a5b9bb56b540a9d' THEN 85 ELSE 86 END FROM pg_proc WHERE oid='public.idem_begin(uuid,text,text)'::regprocedure;
+INSERT INTO recovery_v1.install(one,database_name,database_oid,system_identifier,idem_body_md5,stage,timeline_id) SELECT true,current_database(),(SELECT oid FROM pg_database WHERE datname=current_database()),
+ (SELECT system_identifier::text FROM pg_control_system()),md5(prosrc),CASE md5(prosrc) WHEN 'afca065fea226a0c7a5b9bb56b540a9d' THEN 85 ELSE 86 END,
+ (SELECT c.timeline_id FROM pg_control_checkpoint() c) FROM pg_proc WHERE oid='public.idem_begin(uuid,text,text)'::regprocedure;
 CREATE TABLE recovery_v1.org_state (
  org_id text PRIMARY KEY, state text NOT NULL DEFAULT 'RESTRICTED' CHECK(state IN('ACTIVE','RESTRICTED','RECONCILING','QUARANTINED')),
  recovered_as_of timestamptz, uncertainties jsonb NOT NULL DEFAULT '["Independent recovery authorization and completeness evidence are unavailable"]'::jsonb CHECK(jsonb_typeof(uncertainties)='array'),
@@ -312,11 +315,14 @@ CREATE TABLE recovery_v1.fences (
 CREATE TABLE recovery_v1.untrusted_evidence (
  org_id text NOT NULL, shop_id text NOT NULL, device_id text NOT NULL, key_id text NOT NULL, sequence bigint NOT NULL CHECK(sequence>0),
  hash text NOT NULL CHECK(hash ~ '^[a-f0-9]{64}$'), operation_id uuid NOT NULL, envelope jsonb NOT NULL,
- stored_at timestamptz NOT NULL DEFAULT clock_timestamp(), PRIMARY KEY(org_id,hash), UNIQUE(org_id,device_id,key_id,sequence));
+ stored_at timestamptz NOT NULL DEFAULT clock_timestamp(), PRIMARY KEY(org_id,hash));
+-- Script 2 (r51): a slot is not unique: the first writer of a (device, key, sequence) never blocks the genuine envelope
+CREATE INDEX untrusted_evidence_slot_idx ON recovery_v1.untrusted_evidence(org_id,device_id,key_id,sequence);
 CREATE TABLE recovery_v1.untrusted_checkpoints (
  org_id text NOT NULL, shop_id text NOT NULL, witness_id text NOT NULL, stream_id text NOT NULL, sequence bigint NOT NULL CHECK(sequence>0),
  hash text NOT NULL CHECK(hash ~ '^[a-f0-9]{64}$'), receipt jsonb NOT NULL,
- stored_at timestamptz NOT NULL DEFAULT clock_timestamp(), PRIMARY KEY(org_id,hash), UNIQUE(org_id,witness_id,stream_id,sequence));
+ stored_at timestamptz NOT NULL DEFAULT clock_timestamp(), PRIMARY KEY(org_id,hash));
+CREATE INDEX untrusted_checkpoints_slot_idx ON recovery_v1.untrusted_checkpoints(org_id,witness_id,stream_id,sequence);
 COMMENT ON TABLE recovery_v1.untrusted_evidence IS 'Opaque original signed evidence; storage is NOT signature verification, enrollment, completeness or owner authority. Never log raw payloads.';
 COMMENT ON TABLE recovery_v1.untrusted_checkpoints IS 'Opaque witness receipts; trust, independent verification and latest-boundary checks happen outside infrastructure. Storage never authorizes reopen.';
 
@@ -386,6 +392,17 @@ CREATE FUNCTION recovery_v1.integrity_problem() RETURNS text LANGUAGE sql STABLE
  SELECT CASE
   WHEN NOT EXISTS(SELECT 1 FROM pg_event_trigger WHERE evtname='zz_recovery_v1_ddl' AND evtenabled='A') THEN 'ddl_guard_not_enabled'
   WHEN NOT EXISTS(SELECT 1 FROM recovery_v1.install) THEN 'install_record_missing'
+  -- Script 2 (r22): a copy of this database (CREATE DATABASE ... TEMPLATE, a restore into another database or cluster)
+  -- is not the database V1 was installed in: it may hold a ledger from before committed operations, so a resend could
+  -- execute twice. Fail closed until reviewed. (A physical copy of the whole cluster keeps all three: limitation CLONE-1.)
+  WHEN EXISTS(SELECT 1 FROM recovery_v1.install i
+               WHERE i.database_name IS DISTINCT FROM current_database()
+                  OR i.database_oid IS DISTINCT FROM (SELECT d.oid FROM pg_database d WHERE d.datname = current_database())
+                  OR i.system_identifier IS DISTINCT FROM (SELECT c.system_identifier::text FROM pg_control_system() c)) THEN 'database_identity_changed'
+  -- Script 2 (review 4): a point-in-time restore of THIS cluster (also one that promoted at a WAL gap) keeps the name,
+  -- oid and system identifier but ends on a new timeline: the ledger may be missing committed operations. Fail closed
+  -- until reviewed. (A standby promotion is the same event and is treated the same way.)
+  WHEN EXISTS(SELECT 1 FROM recovery_v1.install i WHERE i.timeline_id IS DISTINCT FROM (SELECT c.timeline_id FROM pg_control_checkpoint() c)) THEN 'database_timeline_changed'
   WHEN NOT EXISTS(SELECT 1 FROM recovery_v1.pins) THEN 'install_pins_missing'
   -- every pinned event trigger row is still exactly the row the install recorded (same oid, function,
   -- no tags, enabled ALWAYS, same row version): any disable/enable/replace window leaves a new xmin
@@ -651,7 +668,7 @@ BEGIN
 END $$;
 -- sync-time check of an operation that a till recorded OFFLINE (request header x-orvix-offline:
 -- {"capabilityId":"<uuid>","deviceSeq":n}); NULL = accepted, else the reason the operation is held for review
-CREATE FUNCTION recovery_v1.offline_problem(p_org text, p_key uuid, p_amount bigint, p_rpc text) RETURNS text LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+CREATE FUNCTION recovery_v1.offline_problem(p_org text, p_key uuid, p_amount bigint, p_rpc text, p_shop text DEFAULT NULL) RETURNS text LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
 DECLARE h jsonb; d jsonb; c recovery_v1.offline_capabilities; u public.users; v_seq bigint; v_n int; v_sum bigint; v_cap uuid;
 BEGIN
  BEGIN h := nullif(current_setting('request.headers', true), '')::jsonb -> 'x-orvix-offline';
@@ -675,6 +692,9 @@ BEGIN
  END IF;
  u := recovery_v1.caller();
  IF c.org_id IS DISTINCT FROM p_org OR c.user_id IS DISTINCT FROM u.id THEN RETURN 'offline_capability_binding'; END IF;
+ -- Script 2 (D1): the sale's shop must be the capability's shop (a user who may sell in several shops, e.g. an admin,
+ -- must not spend one shop's offline authorization in another)
+ IF p_shop IS NOT NULL AND c.shop_id IS DISTINCT FROM p_shop THEN RETURN 'offline_capability_binding'; END IF;
  IF EXISTS(SELECT 1 FROM recovery_v1.device_revocations WHERE org_id = c.org_id AND device_id = c.device_id) THEN RETURN 'offline_device_revoked'; END IF;
  IF c.offline_epoch IS DISTINCT FROM (SELECT offline_epoch FROM recovery_v1.org_state WHERE org_id = c.org_id) THEN RETURN 'offline_capability_stale_epoch'; END IF;
  IF clock_timestamp() > c.sync_deadline THEN RETURN 'offline_capability_sync_deadline'; END IF;
@@ -1052,7 +1072,7 @@ BEGIN
   IF st IS DISTINCT FROM 'ACTIVE' THEN PERFORM recovery_v1.deny(o,TG_TABLE_NAME||':'||TG_OP); END IF;
  END LOOP;
  IF TG_TABLE_NAME='sales' AND TG_OP='INSERT' AND nullif(current_setting('recovery_v1.offline_op', true), '') IS NOT NULL THEN
-  v_off := recovery_v1.offline_problem(orgs[1], current_setting('recovery_v1.offline_op')::uuid, NEW.total_mmk::bigint, 'complete_sale');
+  v_off := recovery_v1.offline_problem(orgs[1], current_setting('recovery_v1.offline_op')::uuid, NEW.total_mmk::bigint, 'complete_sale', NEW.shop_id);
   IF v_off IS NOT NULL THEN PERFORM recovery_v1.deny(orgs[1], v_off); END IF;
  END IF;
  IF TG_OP='DELETE' THEN RETURN OLD; END IF; RETURN NEW;
@@ -1170,12 +1190,32 @@ BEGIN
  OR b->>'operationId' IS NULL OR b->>'rpc' IS NULL OR b->>'payloadHash' IS NULL OR b->>'payloadHash' !~ '^[a-f0-9]{64}$' OR p_envelope->>'signature' IS NULL THEN RAISE EXCEPTION 'RECOVERY_V1_INVALID_EVIDENCE' USING ERRCODE='22023'; END IF;
  seq:=(b->>'sequence')::bigint;
  PERFORM pg_advisory_xact_lock(hashtext('recovery-evidence:'||u.org_id));
- SELECT envelope INTO old FROM recovery_v1.untrusted_evidence WHERE org_id=u.org_id AND (hash=p_envelope->>'hash' OR (device_id=b->>'deviceId' AND key_id=b->>'keyId' AND sequence=seq));
+ SELECT envelope INTO old FROM recovery_v1.untrusted_evidence WHERE org_id=u.org_id AND hash=p_envelope->>'hash';
  IF FOUND THEN
   IF old IS DISTINCT FROM p_envelope THEN RAISE EXCEPTION 'RECOVERY_V1_IMMUTABLE_EVIDENCE_CONFLICT' USING ERRCODE='23505'; END IF;
   RETURN jsonb_build_object('outcome','already_stored','verified',false);
  END IF;
- IF coalesce((SELECT sum(octet_length(envelope::text)) FROM recovery_v1.untrusted_evidence WHERE org_id=u.org_id),0)+octet_length(p_envelope::text)>52428800 THEN RETURN jsonb_build_object('outcome','quota_exceeded','stored',false,'verified',false); END IF;
+ -- Script 2 (r51): another envelope already claims this (device, key, sequence): BOTH are kept and the fork is recorded;
+ -- storage verifies nothing, so the first writer (e.g. an admin) must never be able to block the till's genuine evidence
+ IF EXISTS(SELECT 1 FROM recovery_v1.untrusted_evidence WHERE org_id=u.org_id AND device_id=b->>'deviceId' AND key_id=b->>'keyId' AND sequence=seq) THEN
+  -- review 3 (M2): at most 4 stored copies per slot; further ones are audited (with their hash) but not stored, so one
+  -- writer cannot fill the organization's quota through a single slot
+  IF (SELECT count(*) FROM recovery_v1.untrusted_evidence WHERE org_id=u.org_id AND device_id=b->>'deviceId' AND key_id=b->>'keyId' AND sequence=seq) >= 4 THEN
+   INSERT INTO recovery_v1.audit(org_id,kind,detail) VALUES(u.org_id,'evidence_slot_conflict_not_stored',jsonb_build_object('deviceId',b->>'deviceId','keyId',b->>'keyId','sequence',seq,'hash',p_envelope->>'hash','by',u.id));
+   RETURN jsonb_build_object('outcome','slot_conflict_limit','stored',false,'verified',false);
+  END IF;
+  IF coalesce((SELECT sum(octet_length(envelope::text)) FROM recovery_v1.untrusted_evidence WHERE org_id=u.org_id),0)+octet_length(p_envelope::text)>52428800 THEN
+   INSERT INTO recovery_v1.audit(org_id,kind,detail) VALUES(u.org_id,'evidence_quota_exceeded',jsonb_build_object('deviceId',b->>'deviceId','sequence',seq,'hash',p_envelope->>'hash','by',u.id));
+   RETURN jsonb_build_object('outcome','quota_exceeded','stored',false,'verified',false);
+  END IF;
+  INSERT INTO recovery_v1.untrusted_evidence(org_id,shop_id,device_id,key_id,sequence,hash,operation_id,envelope) VALUES(u.org_id,b->>'shopId',b->>'deviceId',b->>'keyId',seq,p_envelope->>'hash',(b->>'operationId')::uuid,p_envelope);
+  INSERT INTO recovery_v1.audit(org_id,kind,detail) VALUES(u.org_id,'evidence_slot_conflict',jsonb_build_object('deviceId',b->>'deviceId','keyId',b->>'keyId','sequence',seq,'hash',p_envelope->>'hash','by',u.id));
+  RETURN jsonb_build_object('outcome','stored_conflicting','verified',false);
+ END IF;
+ IF coalesce((SELECT sum(octet_length(envelope::text)) FROM recovery_v1.untrusted_evidence WHERE org_id=u.org_id),0)+octet_length(p_envelope::text)>52428800 THEN
+  INSERT INTO recovery_v1.audit(org_id,kind,detail) VALUES(u.org_id,'evidence_quota_exceeded',jsonb_build_object('deviceId',b->>'deviceId','sequence',seq,'hash',p_envelope->>'hash','by',u.id));
+  RETURN jsonb_build_object('outcome','quota_exceeded','stored',false,'verified',false);
+ END IF;
  INSERT INTO recovery_v1.untrusted_evidence(org_id,shop_id,device_id,key_id,sequence,hash,operation_id,envelope) VALUES(u.org_id,b->>'shopId',b->>'deviceId',b->>'keyId',seq,p_envelope->>'hash',(b->>'operationId')::uuid,p_envelope);
  RETURN jsonb_build_object('outcome','stored','verified',false);
 END $$;
@@ -1189,12 +1229,22 @@ BEGIN
  OR c->>'digest' IS NULL OR c->>'digest' !~ '^[a-f0-9]{64}$' OR p_receipt->>'hash' IS NULL OR p_receipt->>'hash' !~ '^[a-f0-9]{64}$' OR p_receipt->>'signature' IS NULL THEN RAISE EXCEPTION 'RECOVERY_V1_INVALID_CHECKPOINT' USING ERRCODE='22023'; END IF;
  seq:=(c->>'sequence')::bigint;
  PERFORM pg_advisory_xact_lock(hashtext('recovery-checkpoint:'||u.org_id));
- SELECT receipt INTO old FROM recovery_v1.untrusted_checkpoints WHERE org_id=u.org_id AND (hash=p_receipt->>'hash' OR(witness_id=b->>'witnessId' AND stream_id=c->>'streamId' AND sequence=seq));
+ SELECT receipt INTO old FROM recovery_v1.untrusted_checkpoints WHERE org_id=u.org_id AND hash=p_receipt->>'hash';
  IF FOUND THEN
   IF old IS DISTINCT FROM p_receipt THEN RAISE EXCEPTION 'RECOVERY_V1_IMMUTABLE_CHECKPOINT_CONFLICT' USING ERRCODE='23505'; END IF;
   RETURN jsonb_build_object('outcome','already_stored','verified',false);
  END IF;
  IF coalesce((SELECT sum(octet_length(receipt::text)) FROM recovery_v1.untrusted_checkpoints WHERE org_id=u.org_id),0)+octet_length(p_receipt::text)>52428800 THEN RETURN jsonb_build_object('outcome','quota_exceeded','stored',false,'verified',false); END IF;
+ -- Script 2 (r51): a second receipt for the same (witness, stream, sequence) is kept too and recorded as a fork
+ IF EXISTS(SELECT 1 FROM recovery_v1.untrusted_checkpoints WHERE org_id=u.org_id AND witness_id=b->>'witnessId' AND stream_id=c->>'streamId' AND sequence=seq) THEN
+  IF (SELECT count(*) FROM recovery_v1.untrusted_checkpoints WHERE org_id=u.org_id AND witness_id=b->>'witnessId' AND stream_id=c->>'streamId' AND sequence=seq) >= 4 THEN
+   INSERT INTO recovery_v1.audit(org_id,kind,detail) VALUES(u.org_id,'checkpoint_slot_conflict_not_stored',jsonb_build_object('witnessId',b->>'witnessId','streamId',c->>'streamId','sequence',seq,'hash',p_receipt->>'hash','by',u.id));
+   RETURN jsonb_build_object('outcome','slot_conflict_limit','stored',false,'verified',false);
+  END IF;
+  INSERT INTO recovery_v1.untrusted_checkpoints(org_id,shop_id,witness_id,stream_id,sequence,hash,receipt) VALUES(u.org_id,c->>'shopId',b->>'witnessId',c->>'streamId',seq,p_receipt->>'hash',p_receipt);
+  INSERT INTO recovery_v1.audit(org_id,kind,detail) VALUES(u.org_id,'checkpoint_slot_conflict',jsonb_build_object('witnessId',b->>'witnessId','streamId',c->>'streamId','sequence',seq,'hash',p_receipt->>'hash','by',u.id));
+  RETURN jsonb_build_object('outcome','stored_conflicting','verified',false);
+ END IF;
  INSERT INTO recovery_v1.untrusted_checkpoints(org_id,shop_id,witness_id,stream_id,sequence,hash,receipt) VALUES(u.org_id,c->>'shopId',b->>'witnessId',c->>'streamId',seq,p_receipt->>'hash',p_receipt);
  RETURN jsonb_build_object('outcome','stored','verified',false);
 END $$;

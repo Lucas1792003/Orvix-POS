@@ -1,19 +1,19 @@
 {
     "data": {
         "basis": {
-            "to": "2026-10-19",
-            "asOf": "2026-10-20T14:11:06.029537+00:00",
-            "from": "2026-10-19",
-            "fromUtc": "2026-10-18T17:30:00+00:00",
+            "to": "2026-10-21",
+            "asOf": "2026-10-22T01:02:29.104015+00:00",
+            "from": "2026-10-21",
+            "fromUtc": "2026-10-20T17:30:00+00:00",
             "timezone": "Asia/Yangon",
             "refundBasis": "SALE_DATE",
-            "toUtcExclusive": "2026-10-19T17:30:00+00:00",
+            "toUtcExclusive": "2026-10-21T17:30:00+00:00",
             "pendingRequestsBasis": "SALES_RUNG_UP_IN_RANGE",
             "refundMethodAssumption": "ORIGINAL_SALE_METHOD"
         },
         "byDay": [
             {
-                "date": "2026-10-19",
+                "date": "2026-10-21",
                 "cogsMmk": 1200,
                 "voidMmk": 0,
                 "refundMmk": 2800,

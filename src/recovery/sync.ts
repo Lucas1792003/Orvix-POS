@@ -16,7 +16,7 @@ export async function uploadRecoveryEvidence(orgId: string, shopId?: string): Pr
   for (const record of records) {
     const reply = await supabase.rpc("recovery_v1_store_evidence", { p_envelope: record.envelope });
     const body = reply.data as { outcome?: unknown; verified?: unknown } | null;
-    if (reply.error || !body || !["stored", "already_stored"].includes(String(body.outcome)) || body.verified !== false) throw new Error("EVIDENCE_UPLOAD_NOT_ACKNOWLEDGED;LOCAL_ORIGINALS_RETAINED");
+    if (reply.error || !body || !["stored", "already_stored", "stored_conflicting"].includes(String(body.outcome)) || body.verified !== false) throw new Error("EVIDENCE_UPLOAD_NOT_ACKNOWLEDGED;LOCAL_ORIGINALS_RETAINED");
     stored++;
   }
   const rows = await localDb.syncState.where("key").startsWith(WITNESS_RECEIPT_PREFIX).toArray();
@@ -26,7 +26,7 @@ export async function uploadRecoveryEvidence(orgId: string, shopId?: string): Pr
     if (receipt.body.checkpoint.orgId !== orgId || (shopId && receipt.body.checkpoint.shopId !== shopId)) continue;
     const reply = await supabase.rpc("recovery_v1_store_checkpoint", { p_receipt: receipt });
     const body = reply.data as { outcome?: unknown; verified?: unknown } | null;
-    if (reply.error || !body || !["stored", "already_stored"].includes(String(body.outcome)) || body.verified !== false) throw new Error("CHECKPOINT_UPLOAD_NOT_ACKNOWLEDGED;LOCAL_ORIGINALS_RETAINED");
+    if (reply.error || !body || !["stored", "already_stored", "stored_conflicting"].includes(String(body.outcome)) || body.verified !== false) throw new Error("CHECKPOINT_UPLOAD_NOT_ACKNOWLEDGED;LOCAL_ORIGINALS_RETAINED");
     checkpoints++;
   }
   return { stored, checkpoints, verifiedByServer: false };

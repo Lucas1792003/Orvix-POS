@@ -111,6 +111,7 @@ triggers, and new RPC names. No pinned body, signature, request hash or reply ch
    the operation's ledger row and refuses with PT503 when any of these hold:
    - the stored document no longer matches its MAC or its row (`offline_capability_integrity`);
    - the capability is unknown, or bound to another organization or cashier;
+   - the sale's shop is not the capability's shop (Script 2, D1);
    - the device is revoked;
    - the organization's offline epoch changed (it left ACTIVE while the till was offline, `offline_capability_stale_epoch`);
    - the sync deadline has passed;
@@ -122,6 +123,15 @@ triggers, and new RPC names. No pinned body, signature, request hash or reply ch
    (`RECOVERY_V1_OFFLINE_HELD`): pending with its key and capability reference, never deleted, never re-keyed, never
    resent automatically. A capability row is locked while one of its operations is checked, so concurrent syncs
    cannot exceed its limits.
+
+### 2.1a Prerequisite in the real app (Script 2 finding)
+
+A V1 server accepts financial writes from a till only with **independent device authorization**
+(`requireRecoveryV1Write` → `enrolledDevice`), which needs an independent trust source injected from outside the
+recovering server (`configureIndependentTrust`). The shipped app configures none (deliberately: no trust on first use),
+so against a V1 server a real till refuses every financial write, online or offline, and never requests an offline
+capability. Everything in this section therefore applies only once independent device-trust custody exists
+(infrastructure-blocked; Script 2 Electron test S2-E4/E5).
 
 ### 2.2 Till rules (`offlineCapability.ts`)
 
@@ -215,7 +225,9 @@ The steps run in order, in one transaction:
   `recovery_v1`). Outside a migration any change is refused by the DDL guard; with event triggers switched off
   (PostgreSQL 17) it quarantines every organization at the next guarded write. No table may inherit from a guarded table.
 - **Interruption** (connection loss, crash, statement timeout) rolls back the whole migration. The server log records the
-  last step reached (`RAISE LOG 'RECOVERY_V1_MIGRATION <id> step …'`). Repair is forward only, with a new authorization.
+  last step reached (`RAISE LOG 'RECOVERY_V1_MIGRATION <id> step …'`). The authorization's nonce is consumed only when
+  the migration commits, so the SAME authorization can be retried after an interruption (Script 2, a17); repair is
+  forward only.
 - A compromised server can run SQL as a superuser anyway; what it cannot do is produce an authorization that verifies, so
   an applied-migration chain entry without a valid signed authorization is detectable.
 - Rollback attacks: an old authorization fails three checks: the nonce, the predecessor (the chain has moved on), and the target (restore to another cluster).

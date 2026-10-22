@@ -163,11 +163,11 @@ su_psql -Atc "DROP INDEX public.sales_shift_idx" >/dev/null
 chk "the refused PFIN-A runs left nothing behind" "$N_IDX = 0"
 
 apply_one "$PROV/PFIN-B_financial_reports.sql" b-alone
-chk "independence: PFIN-B alone (no PFIN-A indexes) installs its 8 functions, no trigger" "$N_IDX = 0 AND $N_FN = 8 AND $N_TRG = 0"
+chk "independence: PFIN-B alone (no PFIN-A indexes) installs its 10 functions (Script 2: + 2 payment-method helpers), no trigger" "$N_IDX = 0 AND $N_FN = 10 AND $N_TRG = 0"
 chk "independence: PFIN-B alone answers a report (ADMIN, shop A, today)" \
   "(SELECT jsonb_typeof(public.fin_report_summary('shop-a', current_date, current_date, 'SALE_DATE')->'totals') = 'object' FROM (SELECT test.login('a0000000-0000-4000-8000-000000000001')) l)"
 apply_one "$PROV/PFIN-B.rollback.sql" b-alone-rb
-chk "independence: PFIN-B rollback alone removes all 8 functions" "$N_FN = 0 AND $N_IDX = 0"
+chk "independence: PFIN-B rollback alone removes all 10 functions" "$N_FN = 0 AND $N_IDX = 0"
 
 if [ "$PCOST" = "1" ]; then
   log "PCOST-A alone: costs moved to the gated tables, rolled back (copied back), re-applied"
@@ -199,7 +199,7 @@ apply_one "$PROV/PFIN-A.rollback.sql" rb
 chk "rollback: B then A leave no fin_ function and no PFIN-A index" "$N_FN = 0 AND $N_IDX = 0"
 apply_pfin reapply
 chk "checkpoint state: PFIN-A + PFIN-B installed, PFIN-C absent (no fin_ trigger, no fin_guard function)" \
-  "$N_IDX = 5 AND $N_FN = 8 AND $N_TRG = 0 AND to_regproc('public.fin_guard_refund_net_paid') IS NULL"
+  "$N_IDX = 5 AND $N_FN = 10 AND $N_TRG = 0 AND to_regproc('public.fin_guard_refund_net_paid') IS NULL"
 
 run_sql_test() {
   f="$1"; name="$(basename "$f" .sql)"
@@ -293,7 +293,7 @@ if [ "$HELD" = "1" ]; then
     chk "held: PFIN-B rollback refuses while PFIN-C is installed" "false"
   else
     ok=false; grep -q 'PFIN-B rollback: PFIN-C is still installed' "$WORK/rbB_held.log" && ok=true
-    chk "held: PFIN-B rollback refuses while PFIN-C is installed" "$ok AND $N_FN = 9"
+    chk "held: PFIN-B rollback refuses while PFIN-C is installed" "$ok AND $N_FN = 11"
   fi
 fi
 

@@ -323,6 +323,15 @@ AS $$
            sum(si.qty_units::numeric * si.unit_cost_mmk) AS qc, sum(si.qty_units)::numeric AS q
       FROM fin_line_costs(CAST((SELECT ids FROM sale_ids) AS text[])) si GROUP BY 1, 2
   ),
+  -- Script 2 (f72): quantities refunded WITHOUT restock (PFIN-E lines, restock=false) did not come back to stock, so
+  -- their cost is not reversed. Only when PFIN-E is installed: without it the pinned approval restocked everything.
+  norestock AS (
+    SELECT p.id, coalesce(item->>'productId', item->>'product_id') AS product_id, sum((ln->>'qtyUnits')::numeric) AS q
+      FROM peers p CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(p.items) = 'array' THEN p.items ELSE '[]'::jsonb END) item
+     CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(item->'lines') = 'array' THEN item->'lines' ELSE '[]'::jsonb END) ln
+     WHERE to_regclass('public.refund_lines') IS NOT NULL AND ln->>'restock' = 'false'
+     GROUP BY 1, 2
+  ),
   cum AS (
     SELECT it.*,
            sum(it.amount) OVER w AS cum_amount,
@@ -333,8 +342,9 @@ AS $$
   )
   SELECT req.id, req.sale_id,
          COALESCE((SELECT sum(c.amount) FROM cum c WHERE c.id = req.id), 0)::bigint,
-         COALESCE((SELECT sum(round(c.qty * co.qc / co.q)) FROM cum c JOIN cost co
+         COALESCE((SELECT sum(round(greatest(c.qty - COALESCE(nr.q, 0), 0) * co.qc / co.q)) FROM cum c JOIN cost co
                      ON co.sale_id = c.sale_id AND co.product_id = c.product_id AND co.costed
+                     LEFT JOIN norestock nr ON nr.id = c.id AND nr.product_id = c.product_id
                     WHERE c.id = req.id), 0)::bigint,
          EXISTS (SELECT 1 FROM cum c LEFT JOIN cost co ON co.sale_id = c.sale_id AND co.product_id = c.product_id
                   WHERE c.id = req.id AND COALESCE(co.costed, false) = false),
@@ -343,6 +353,31 @@ AS $$
          EXISTS (SELECT 1 FROM it WHERE it.id = req.id AND NOT it.ok)
     FROM req;
 $$;
+
+-- ------------------------------------------------------------
+-- Script 2 (f124): money per payment method from the records PFIN-D / PFIN-E keep, when they exist:
+--   fin_sale_method_amounts: a sale's payment lines (they add up to its total)
+--   fin_refund_method_amounts: a refund request's recorded payouts
+-- Empty when those tables are absent (the legacy rule, the sale's own method, applies).
+-- ------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.fin_sale_method_amounts(p_sale_ids text[])
+RETURNS TABLE (sale_id text, method text, amount bigint)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF to_regclass('public.sale_payments') IS NULL THEN RETURN; END IF;
+  RETURN QUERY EXECUTE 'SELECT p.sale_id, p.method, sum(p.amount_mmk)::bigint FROM public.sale_payments p WHERE p.sale_id = ANY ($1) GROUP BY 1, 2'
+    USING p_sale_ids;
+END $$;
+CREATE OR REPLACE FUNCTION public.fin_refund_method_amounts(p_request_ids text[])
+RETURNS TABLE (request_id text, method text, amount bigint)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF to_regclass('public.refund_payouts') IS NULL THEN RETURN; END IF;
+  RETURN QUERY EXECUTE 'SELECT p.request_id, p.method, sum(p.amount_mmk)::bigint FROM public.refund_payouts p WHERE p.request_id = ANY ($1) GROUP BY 1, 2'
+    USING p_request_ids;
+END $$;
 
 -- ------------------------------------------------------------
 -- fin_report_summary
@@ -449,11 +484,11 @@ BEGIN
   ),
   vtime AS (SELECT * FROM fin_approval_times('VOID', ARRAY(SELECT id FROM vs))),
   adj AS (
-    SELECT 'REFUND'::text AS kind, q.sale_id, q.method, q.sale_bday, t.approved_at,
+    SELECT 'REFUND'::text AS kind, q.id AS req_id, q.sale_id, q.method, q.sale_bday, t.approved_at,
            f.amount_mmk AS amount, f.cogs_mmk AS cogs, f.cost_missing, f.above_net_paid, f.unparseable
       FROM req q JOIN rfig f ON f.request_id = q.id LEFT JOIN rtime t ON t.id = q.id
     UNION ALL
-    SELECT 'VOID', v.id, v.method, v.sale_bday, t.approved_at, v.total, COALESCE(c.cogs, 0),
+    SELECT 'VOID', NULL::text, v.id, v.method, v.sale_bday, t.approved_at, v.total, COALESCE(c.cogs, 0),
            COALESCE(c.missing, false), false, false
       FROM vs v LEFT JOIN vcost c ON c.sale_id = v.id LEFT JOIN vtime t ON t.id = v.id
   ),
@@ -469,7 +504,7 @@ BEGIN
   ),
   -- one row per money event on a business day
   ev AS (
-    SELECT sr.bday, sr.method,
+    SELECT sr.bday, sr.method, sr.id AS sale_id, NULL::text AS req_id,
            sr.total AS gross, 0::bigint AS refund, 0::bigint AS void,
            COALESCE(c.cogs, 0) AS cogs_in, 0::bigint AS cogs_out,
            COALESCE(c.missing, 0) AS missing_lines, 0 AS missing_adj, 0 AS undated_n,
@@ -479,10 +514,10 @@ BEGIN
     UNION ALL
     -- an approved adjustment with no approval time: no money placed, but the
     -- profit of the day its sale was rung up (and of the totals) is incomplete
-    SELECT a.sale_bday, a.method, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0
+    SELECT a.sale_bday, a.method, a.sale_id, a.req_id, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0
       FROM adj_placed a WHERE a.undated
     UNION ALL
-    SELECT a.bday, a.method, 0,
+    SELECT a.bday, a.method, a.sale_id, a.req_id, 0,
            CASE WHEN a.kind = 'REFUND' THEN a.amount ELSE 0 END,
            CASE WHEN a.kind = 'VOID' THEN a.amount ELSE 0 END,
            0, a.cogs, 0, CASE WHEN a.cost_missing THEN 1 ELSE 0 END, 0, 0,
@@ -509,9 +544,21 @@ BEGIN
            COALESCE(sum(ev.missing_lines), 0) + COALESCE(sum(ev.missing_adj), 0) + COALESCE(sum(ev.undated_n), 0) AS missing
       FROM days d LEFT JOIN ev ON ev.bday = d.bday GROUP BY d.bday
   ),
+  -- sales and voids by the sale's payment lines (when recorded), refunds by their recorded payouts; otherwise the
+  -- sale's legacy method (Script 2, f124)
+  pay AS (SELECT * FROM fin_sale_method_amounts(ARRAY(SELECT DISTINCT e.sale_id FROM ev e WHERE e.gross <> 0 OR e.void <> 0))),
+  rpay AS (SELECT * FROM fin_refund_method_amounts(ARRAY(SELECT DISTINCT e.req_id FROM ev e WHERE e.refund <> 0 AND e.req_id IS NOT NULL))),
   by_method AS (
-    SELECT method, sum(gross) AS gross, sum(refund) AS refund, sum(void) AS void
-      FROM ev GROUP BY method
+    SELECT x.method, sum(x.gross) AS gross, sum(x.refund) AS refund, sum(x.void) AS void FROM (
+      SELECT COALESCE(p.method, e.method) AS method,
+             CASE WHEN e.gross <> 0 THEN COALESCE(p.amount, e.gross) ELSE 0 END AS gross, 0::bigint AS refund,
+             CASE WHEN e.void <> 0 THEN COALESCE(p.amount, e.void) ELSE 0 END AS void
+        FROM ev e LEFT JOIN pay p ON p.sale_id = e.sale_id AND (e.gross <> 0 OR e.void <> 0)
+       WHERE e.refund = 0
+      UNION ALL
+      SELECT COALESCE(r.method, e.method), 0, COALESCE(r.amount, e.refund), 0
+        FROM ev e LEFT JOIN rpay r ON r.request_id = e.req_id WHERE e.refund <> 0
+    ) x GROUP BY x.method
   ),
   -- requests not decided yet, on sales rung up in the range (any basis)
   pend AS (
@@ -655,6 +702,7 @@ DECLARE
   v_open_end timestamptz;
   v_window   timestamptz;
   v_out      jsonb;
+  v_cash     jsonb;
 BEGIN
   IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Not authenticated'; END IF;
   v_user := current_app_user();
@@ -814,6 +862,29 @@ BEGIN
     'asOf', now()
   ) INTO v_out;
 
+  -- Script 2 (financial review H1): with PFIN-D the authoritative drawer is fin_shift_cash (split payments' cash part,
+  -- cash movements, recorded refund payouts; every approved refund of the shift's sales deducted, P-3). The evidence
+  -- figures are replaced by it, so no screen shows a pre-PFIN-D "expected cash" as server-verified. Unchanged without PFIN-D.
+  IF to_regprocedure('public.fin_shift_cash(text)') IS NOT NULL THEN
+    EXECUTE 'SELECT public.fin_shift_cash($1)' INTO v_cash USING v_shift.id;
+    v_out := v_out || jsonb_build_object(
+      'model', 'PFIN-D',
+      'cashSales', jsonb_build_object('count', v_out->'cashSales'->'count', 'amountMmk', (v_cash->>'cashSalesMmk')::bigint),
+      'attributedPayouts', jsonb_build_object('count', v_out->'attributedPayouts'->'count', 'amountMmk', (v_cash->>'cashRefundsMmk')::bigint,
+                                              'refundMmk', (v_cash->>'cashRefundsMmk')::bigint, 'voidMmk', 0),
+      -- the payout-timing groups do not apply: fin_shift_cash already deducts every approved refund of this shift's sales
+      'closeWindowPayouts', jsonb_build_object('count', 0, 'amountMmk', 0, 'items', '[]'::jsonb),
+      'afterClosePayouts', jsonb_build_object('count', 0, 'amountMmk', 0, 'items', '[]'::jsonb),
+      'unknownTimePayouts', jsonb_build_object('count', 0, 'amountMmk', 0, 'items', '[]'::jsonb),
+      'cashMovements', jsonb_build_object('recorded', true, 'reason', 'RECORDED',
+                                          'inMmk', (v_cash->>'movementsInMmk')::bigint, 'outMmk', (v_cash->>'movementsOutMmk')::bigint),
+      'evidenceExpectedCashMmk', (v_cash->>'expectedCashMmk')::bigint,
+      'evidenceVarianceMmk', CASE WHEN v_shift.closing_cash_mmk IS NOT NULL THEN v_shift.closing_cash_mmk - (v_cash->>'expectedCashMmk')::bigint END,
+      'storedMatchesEvidence', CASE WHEN v_shift.ended_at IS NOT NULL THEN v_shift.expected_cash_mmk = (v_cash->>'expectedCashMmk')::bigint END,
+      'storedMatchesEvidenceIfCloseWindowDeducted', NULL,
+      'storedMatchesEvidenceIfUnknownTimeDeducted', NULL);
+  END IF;
+
   RETURN v_out;
 END;
 $$;
@@ -830,6 +901,8 @@ ALTER FUNCTION public.fin_sale_line_net(text[]) OWNER TO postgres;
 ALTER FUNCTION public.fin_approval_times(text, text[]) OWNER TO postgres;
 ALTER FUNCTION public.fin_line_costs(text[]) OWNER TO postgres;
 ALTER FUNCTION public.fin_refund_lines(text[]) OWNER TO postgres;
+ALTER FUNCTION public.fin_sale_method_amounts(text[]) OWNER TO postgres;
+ALTER FUNCTION public.fin_refund_method_amounts(text[]) OWNER TO postgres;
 ALTER FUNCTION public.fin_report_summary(text, date, date, text) OWNER TO postgres;
 ALTER FUNCTION public.fin_shift_reconciliation(text) OWNER TO postgres;
 
@@ -839,8 +912,10 @@ REVOKE ALL ON FUNCTION public.fin_sale_line_net(text[]) FROM PUBLIC, anon, authe
 REVOKE ALL ON FUNCTION public.fin_approval_times(text, text[]) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.fin_line_costs(text[]) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.fin_refund_lines(text[]) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.fin_sale_method_amounts(text[]), public.fin_refund_method_amounts(text[]) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.fin_report_scope(text), public.fin_items(jsonb), public.fin_sale_line_net(text[]),
-  public.fin_approval_times(text, text[]), public.fin_refund_lines(text[]), public.fin_line_costs(text[]) TO service_role;
+  public.fin_approval_times(text, text[]), public.fin_refund_lines(text[]), public.fin_line_costs(text[]),
+  public.fin_sale_method_amounts(text[]), public.fin_refund_method_amounts(text[]) TO service_role;
 
 REVOKE ALL ON FUNCTION public.fin_report_summary(text, date, date, text) FROM PUBLIC, anon;
 REVOKE ALL ON FUNCTION public.fin_shift_reconciliation(text) FROM PUBLIC, anon;

@@ -1,17 +1,17 @@
 {
     "data": {
-        "asOf": "2026-10-20T14:11:06.633866+00:00",
+        "asOf": "2026-10-22T01:02:29.667259+00:00",
         "shift": {
-            "id": "shift-85db23a6fb4c411093260a6a834c19f1",
+            "id": "shift-91dbd1e2075f4246ae89742e4c4857b8",
             "shopId": "shop-f",
             "status": "CLOSED",
-            "endedAt": "2026-10-19T17:30:30+00:00",
+            "endedAt": "2026-10-21T17:30:30+00:00",
             "cashierId": "u-cash-f1",
-            "startedAt": "2026-10-19T14:30:00+00:00",
+            "startedAt": "2026-10-21T14:30:00+00:00",
             "closingCashMmk": 59700,
             "openingCashMmk": 50000,
             "varianceReason": null,
-            "closeRecordedAt": "2026-10-20T14:11:05.624842+00:00",
+            "closeRecordedAt": "2026-10-22T01:02:28.788019+00:00",
             "closeTimeSource": "SERVER_LEDGER",
             "storedVarianceMmk": 0,
             "storedExpectedCashMmk": 59700
@@ -35,20 +35,20 @@
             "count": 2,
             "items": [
                 {
-                    "id": "refund-82d31af1b90748c7ac0da5260d334680",
+                    "id": "refund-55c3685ad3724eabbd5c966ab4c61bf9",
                     "kind": "REFUND",
-                    "saleId": "sale-eadb85d73ff6472b907fa14cc92f2f20",
+                    "saleId": "sale-3a0b900515134104b85422fb8795db6c",
                     "amountMmk": 1000,
-                    "receiptNo": "SF-20261019-0001",
-                    "approvedAt": "2026-10-20T14:11:05.632451+00:00"
+                    "receiptNo": "SF-20261021-0001",
+                    "approvedAt": "2026-10-22T01:02:28.795798+00:00"
                 },
                 {
-                    "id": "refund-486c1098807a4ff39231d0b660974866",
+                    "id": "refund-ef46b8c4ed4340878725b1938a9df1d1",
                     "kind": "REFUND",
-                    "saleId": "sale-e68ff8682e1a409f9022509cb2e5286b",
+                    "saleId": "sale-07e6914d084244e29ed84e09658fbc9e",
                     "amountMmk": 1800,
-                    "receiptNo": "SF-20261019-0002",
-                    "approvedAt": "2026-10-20T14:11:05.634276+00:00"
+                    "receiptNo": "SF-20261021-0002",
+                    "approvedAt": "2026-10-22T01:02:28.797803+00:00"
                 }
             ],
             "amountMmk": 2800
