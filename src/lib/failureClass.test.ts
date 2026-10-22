@@ -40,6 +40,17 @@ const cases: [string, Parameters<typeof classifyFailure>[0], FailureClass, boole
   ["400 Not authenticated (no app user)", { status: 400, code: "P0001", message: "Not authenticated" }, "AUTH_REAUTH", false],
   ["OX204 MFA required", { status: 400, code: "OX204", message: "MFA required", hint: "rule=MFA_REQUIRED" }, "AUTH_REAUTH", false],
   ["business refusal P0001", { status: 400, code: "P0001", message: "Insufficient stock for Tea: have 1, need 2" }, "REJECTED", false],
+  // Step 6 (PFIN-F / PDISC-A): financial refusals are definitive, like any business refusal — also when the pinned
+  // 086 executor did not record them (op_not_recorded:unclassified) or they ride on a 500
+  ["DISCOUNT_APPROVAL_REQUIRED (400 P0001)", { status: 400, code: "P0001", message: "DISCOUNT_APPROVAL_REQUIRED: this discount (600 MMK, 6.00% of 10000) needs a separate approval by a Shop Admin" }, "REJECTED", false],
+  ["DISCOUNT_APPROVAL_INVALID via op_execute (not recorded)", { status: 400, code: "P0001", message: "DISCOUNT_APPROVAL_INVALID: the approval expired; request it again", hint: "op_not_recorded:unclassified" }, "REJECTED", false],
+  ["DISCOUNT_APPROVAL_OFFLINE (500 P0001)", { status: 500, code: "P0001", message: "DISCOUNT_APPROVAL_OFFLINE: a discount that needs approval (500 MMK, 5.00%) cannot be given offline; nothing was saved" }, "REJECTED", false],
+  ["FIN_NON_CASH_CHANGE", { status: 400, code: "P0001", message: "FIN_NON_CASH_CHANGE: change is given only from cash; a non-cash payment is recorded for exactly the amount due" }, "REJECTED", false],
+  ["FIN_REFUND_OFFLINE", { status: 400, code: "P0001", message: "FIN_REFUND_OFFLINE: refund and void requests are recorded online only (nothing was saved)", hint: "op_not_recorded:unclassified" }, "REJECTED", false],
+  ["FIN_REFUND_EXCEPTION_PENDING", { status: 400, code: "P0001", message: "FIN_REFUND_EXCEPTION_PENDING: a Shop Admin decision is outstanding or refused (REFUND_ALT_PAYOUT REQUESTED)" }, "REJECTED", false],
+  ["FIN_APPROVAL_SELF", { status: 400, code: "P0001", message: "FIN_APPROVAL_SELF: you cannot decide your own request; another approver must" }, "REJECTED", false],
+  ["FIN_DRAWER_INSUFFICIENT", { status: 400, code: "P0001", message: "FIN_DRAWER_INSUFFICIENT: a cash refund of 5000 MMK would take the drawer below zero (100 MMK expected)" }, "REJECTED", false],
+  ["a financial code inside a gateway timeout is still unknown", { status: 0, code: "TIMEOUT", message: "complete_sale timed out after 30s", timedOut: true }, "UNKNOWN_OUTCOME", true],
   ["OX101 refusal with hint", { status: 400, code: "OX101", message: "Discount not permitted", hint: "rule=DISCOUNT_NOT_PERMITTED" }, "REJECTED", false],
   ["RLS 42501", { status: 403, code: "42501", message: "permission denied for table sales" }, "REJECTED", false],
   ["unique violation 23505", { status: 409, code: "23505", message: "duplicate key value violates unique constraint \"shops_org_name_key\"" }, "REJECTED", false],

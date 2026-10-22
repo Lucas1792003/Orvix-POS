@@ -45,3 +45,13 @@ SELECT 'visible cron.job ' || count(*) FROM cron.job;
 SELECT 'visible cron.job_run_details ' || count(*) FROM cron.job_run_details;
 SELECT 'visible net._http_response ' || count(*) FROM net._http_response;
 SELECT 'visible net.http_request_queue ' || count(*) FROM net.http_request_queue;
+-- outgoing HTTP (PNET-A): may this login queue a request?
+-- (looked up by oid: resolving net.http_post by name needs USAGE on schema net, which this login must not have)
+SELECT 'exec net.http_post ' || coalesce((SELECT bool_or(has_function_privilege(p.oid, 'EXECUTE'))::text FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'net' AND p.proname = 'http_post'), 'absent');
+-- Step 6 finalization: the new financial RPCs and tables (PFIN-F / PDISC-A) are for signed-in POS users only
+SELECT 'exec fin_rpcs ' || coalesce((SELECT bool_or(has_function_privilege(p.oid, 'EXECUTE'))::text FROM pg_proc p
+  WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('fin_decide_approval', 'fin_request_discount_approval', 'fin_confirm_refund_payout',
+    'fin_refund_plan', 'fin_refund_payout_state')), 'absent');
+SELECT 'read fin_tables ' || coalesce((SELECT bool_or(has_table_privilege(c.oid, 'SELECT'))::text FROM pg_class c
+  WHERE c.oid IN (to_regclass('public.fin_approvals'), to_regclass('public.refund_payout_confirmations'))), 'absent');

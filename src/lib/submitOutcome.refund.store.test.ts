@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Financial submissions × v87.x store (integration): refund APPROVAL (online
-// only) and refund REQUEST (queued when offline). The REAL sale slice,
+// only) and refund REQUEST (online only since Step 6 / PFIN-F). The REAL sale slice,
 // write-ahead / online-only layers and recovery state run against the fake
 // server's 086/087 emulation. For every outcome: the right submit class
 // (lib/submitOutcome.ts), no automatic resend after the call returns, a
@@ -157,7 +157,7 @@ describe("approveRefund (refund approval, online only)", () => {
   });
 });
 
-describe("requestRefund (refund request, queued offline)", () => {
+describe("requestRefund (refund request, online only — Step 6 / PFIN-F)", () => {
   it("confirmed success online: one request, one key", async () => {
     const { get } = makeStore();
     await request(get);
@@ -171,7 +171,21 @@ describe("requestRefund (refund request, queued offline)", () => {
     const err = await request(get).catch((e) => e);
     expect(err).toBeTruthy();
     expect(classifySubmitFailure(err)).toBe("failed");
+    expect(String((err as Error).message)).toMatch(/Refunds are recorded online only/);
     expect(keysSent("create_refund_void_request").size).toBe(0);
+    expect(await localDb.syncOutbox.count()).toBe(0);
+    expect(get().refundVoidRequests).toHaveLength(1);     // only the seeded request: nothing staged
+  });
+
+  it("a server refusal (e.g. FIN_REFUND_EXCEPTION_NOT_PERMITTED) is a confirmed failure shown verbatim; nothing staged or queued", async () => {
+    fake.setRejectionMessage("FIN_REFUND_EXCEPTION_NOT_PERMITTED: only a manager may propose a refund price other than the paid price or a payout by another method");
+    fake.setDefaultMode("permanent-error");
+    const { get } = makeStore();
+    const err = await request(get).catch((e) => e);
+    expect(classifySubmitFailure(err)).toBe("failed");
+    expect(String((err as Error).message)).toMatch(/FIN_REFUND_EXCEPTION_NOT_PERMITTED/);
+    expect(await localDb.syncOutbox.count()).toBe(0);
+    expect(get().refundVoidRequests).toHaveLength(1);
   });
 
   it("reply lost after commit: kept unresolved under its ORIGINAL key; a replay never executes it twice", async () => {
@@ -182,11 +196,14 @@ describe("requestRefund (refund request, queued offline)", () => {
     expect(fake.server.executions.create_refund_void_request).toBe(1);
     const keys = keysSent("create_refund_void_request");
     expect(keys.size).toBe(1);
-    // whatever the till kept for it carries the same key (never a new operation)
-    const kept = (await localDb.syncOutbox.toArray()).filter((e) => e.name === "create_refund_void_request");
+    // online only: never in the outbox; an unresolved one is an online operation kept under its ORIGINAL key
+    expect((await localDb.syncOutbox.toArray()).filter((e) => e.name === "create_refund_void_request")).toHaveLength(0);
+    const kept = (await localDb.syncState.where("key").startsWith("online-op:").toArray())
+      .map((r) => JSON.parse(r.value) as { name: string; args: Record<string, unknown> })
+      .filter((o) => o.name === "create_refund_void_request");
     expect(kept.length).toBeLessThanOrEqual(1);
-    for (const e of kept) expect(keys.has(e.idempotencyKey as string)).toBe(true);
-    await drainOutbox().catch(() => undefined);   // replay of whatever is still unresolved
+    for (const o of kept) expect(keys.has(o.args.p_idempotency_key as string)).toBe(true);
+    await drainOutbox().catch(() => undefined);   // the queue never replays it
     expect(fake.server.executions.create_refund_void_request).toBe(1);
     expect(keysSent("create_refund_void_request")).toEqual(keys);
   });

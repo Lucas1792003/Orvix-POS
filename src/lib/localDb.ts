@@ -147,6 +147,9 @@ export interface SyncOutboxEntry {
   /** Recovery V1 Step 4: recorded while disconnected under this server-issued offline capability (sent as the
    *  x-orvix-offline header on every attempt; never replaced). Absent: created while connected. */
   offlineAuth?: { capabilityId: string; deviceSeq: number } | null;
+  /** Step 6 (PDISC-A): the discount approval this sale uses (sent as x-orvix-discount-approval on every attempt of
+   *  this entry; complete_sale only; never part of its hashed arguments, never replaced). */
+  discountApprovalId?: string | null;
   /** The path of the latest attempt. */
   protocol?: "executor" | "direct" | "lookup";
   /** A conflict the server has NOT decided (it could still run if retried):

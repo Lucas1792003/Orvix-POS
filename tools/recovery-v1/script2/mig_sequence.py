@@ -49,6 +49,11 @@ def run(ctx):
     rc, out = apply_file_rolledback('supabase/migrations-provisional/PFIN-E_refund_lines.sql', 'pfin-e')
     check('s04 PFIN-E after V1 is refused by its own recovery_v1 preflight',
           rc != 0 and 'PFIN-E: Recovery V1 is installed' in out, out[-160:])
+    # Step 6 finalization provisionals carry the same preflight
+    for sid, f in (('PFIN-F', 'PFIN-F_split_refunds.sql'), ('PDISC-A', 'PDISC-A_discount_authorization.sql'), ('PNET-A', 'PNET-A_pg_net_lockdown.sql')):
+        rc, out = apply_file_rolledback('supabase/migrations-provisional/' + f, sid.lower())
+        check(f's04{sid[-1].lower()} {sid} after V1 is refused by its own recovery_v1 preflight',
+              rc != 0 and f'{sid}: Recovery V1 is installed' in out, out[-160:])
     # held PFIN-C: creates a function + trigger on an existing table, NO new public table, and NO
     # recovery_v1 preflight -> the in-database guards do NOT refuse it. Record the actual outcome.
     rc, out = apply_file_rolledback('supabase/migrations-provisional/held/PFIN-C_refund_net_paid_cap.sql', 'pfin-c')
@@ -68,12 +73,12 @@ def run(ctx):
 
     base = {'schema': 'orvix-migration-facts-v1', 'ledger': '062,063,064,065,066,067,068,069,070,071,072,073,074,075,076,077,078,079,080,081,082,083,085',
             'has_086': False, 'has_087': False, 'PSAFE-A': False, 'PFIN-A': False, 'PFIN-B': False, 'PCOST-A': False,
-            'PFIN-C': False, 'PFIN-D': False, 'PFIN-E': False, 'RECOVERY_V1': True, 'adapter_087': None,
+            'PFIN-C': False, 'PFIN-D': False, 'PFIN-E': False, 'PFIN-F': False, 'PDISC-A': False, 'PNET-A': False, 'RECOVERY_V1': True, 'adapter_087': None,
             'v1_integrity': 'none', 'm087_state': None, 'm087_fingerprint': None}
     rc, out = plan(dict(base), 'v1')
-    refused = {sid for sid in ('PCOST-A', 'PFIN-C', 'PFIN-D', 'PFIN-E', '087') if re.search(rf'^\s*{re.escape(sid)}\s+REFUSED', out, re.M)}
-    check('s05 verify.py plan with V1 installed refuses PCOST-A, PFIN-C, PFIN-D, PFIN-E and 087',
-          refused == {'PCOST-A', 'PFIN-C', 'PFIN-D', 'PFIN-E', '087'}, 'refused=' + ','.join(sorted(refused)))
+    refused = {sid for sid in ('PCOST-A', 'PFIN-C', 'PFIN-D', 'PFIN-E', 'PFIN-F', 'PDISC-A', 'PNET-A', '087') if re.search(rf'^\s*{re.escape(sid)}\s+REFUSED', out, re.M)}
+    check('s05 verify.py plan with V1 installed refuses PCOST-A, PFIN-C, PFIN-D, PFIN-E, PFIN-F, PDISC-A, PNET-A and 087',
+          refused == {'PCOST-A', 'PFIN-C', 'PFIN-D', 'PFIN-E', 'PFIN-F', 'PDISC-A', 'PNET-A', '087'}, 'refused=' + ','.join(sorted(refused)))
     # PFIN-C conclusion: no in-db guard, but verify.py plan + owner review refuse it
     check('s06 (LIMITATION) PFIN-C after V1 has no in-database guard; it relies on verify.py plan + owner review',
           (not pfin_c_refused_in_db) and 'PFIN-C' in refused, f'in_db_refused={pfin_c_refused_in_db}')

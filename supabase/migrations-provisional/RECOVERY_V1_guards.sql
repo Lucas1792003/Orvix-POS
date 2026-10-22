@@ -2064,6 +2064,16 @@ BEGIN
  WHEN p_table IN('refund_lines','refund_payouts') THEN ARRAY[r->>'org_id',recovery_v1.org_of_shop(r->>'shop_id'),recovery_v1.org_of_sale(r->>'sale_id'),
    (SELECT s.org_id FROM public.refund_void_requests x JOIN public.shops s ON s.id=x.shop_id WHERE x.id=r->>'request_id'),
    (SELECT recovery_v1.org_of_sale(i.sale_id) FROM public.sale_items i WHERE i.id=r->>'sale_item_id')]
+ -- Step 6 finalization (PFIN-F / PDISC-A): exception approvals and non-cash payout confirmations: their own org_id plus every
+ -- parent they name. Not in the device-signed list below: a decision or a confirmation is a back-office act that moves no
+ -- money (the refund approval and the discounted sale that use them are device-signed operations); org state still applies.
+ WHEN p_table='fin_approvals' THEN ARRAY[r->>'org_id',recovery_v1.org_of_shop(r->>'shop_id'),recovery_v1.org_of_sale(r->>'consumed_sale_id'),
+   (SELECT s.org_id FROM public.refund_void_requests x JOIN public.shops s ON s.id=x.shop_id WHERE x.id=r->>'subject_id')]
+ -- (no subquery on refund_payouts: this function must plan on systems without the financial provisionals; the payout is
+ --  bound by its foreign key and the confirmation's own org_id / shop_id are resolved)
+ WHEN p_table='refund_payout_confirmations' THEN ARRAY[r->>'org_id',recovery_v1.org_of_shop(r->>'shop_id')]
+ WHEN p_table='refund_cash_drawer' THEN ARRAY[r->>'org_id',recovery_v1.org_of_shop(r->>'shop_id'),recovery_v1.org_of_shift(r->>'sale_shift_id'),
+   recovery_v1.org_of_shift(r->>'drawer_shift_id'),(SELECT s.org_id FROM public.refund_void_requests q JOIN public.shops s ON s.id=q.shop_id WHERE q.id=r->>'request_id')]
  END;
  -- a table added by an owner-authorized migration after V1: resolved by its mandatory org_id column
  IF v IS NULL AND EXISTS(SELECT 1 FROM recovery_v1.guarded_tables WHERE relname=p_table AND resolver='org_id') THEN v := ARRAY[r->>'org_id']; END IF;
@@ -2121,7 +2131,7 @@ BEGIN
  -- Step 5: money moves only through an operation signed by an owner-approved, ACTIVE device of the row's shop (guard_ledger
  -- verified it in THIS transaction). A keyless or old-client write, or a device of another shop, is refused. Inside an
  -- owner-authorized migration the migration itself is the authority.
- IF TG_TABLE_NAME IN ('sales','sale_items','sale_payments','cash_movements','refund_lines','refund_payouts','refund_void_requests','shifts')
+ IF TG_TABLE_NAME IN ('sales','sale_items','sale_payments','cash_movements','refund_lines','refund_payouts','refund_void_requests','shifts','refund_cash_drawer')
     AND NOT EXISTS (SELECT 1 FROM recovery_v1.authorized_txn a WHERE a.txid = txid_current() AND a.purpose = 'migration') THEN
   v_shop := CASE WHEN TG_OP = 'DELETE' THEN to_jsonb(OLD)->>'shop_id' ELSE to_jsonb(NEW)->>'shop_id' END;
   IF NOT EXISTS (SELECT 1 FROM recovery_v1.device_counters c JOIN recovery_v1.device_enrollments e ON e.enrollment_id = c.enrollment_id
@@ -2331,7 +2341,7 @@ CREATE FUNCTION public.recovery_v1_call(p_action text, p_args jsonb) RETURNS jso
 DO $triggers$
 DECLARE t text;
 BEGIN
- FOREACH t IN ARRAY ARRAY['brands','business_profile','categories','price_levels','product_barcodes','products','shops','suppliers','unit_types','users','organizations','audit_logs','inventory','inventory_movements','price_tiers','product_image_upload_sessions','product_unit_prices','purchase_orders','refund_void_requests','sales','shifts','supplier_payments','stock_transfers','stock_transfer_items','product_units','purchase_order_items','sale_items','reprint_logs','supplier_products','app_config','platform_admins','product_costs','product_unit_costs','sale_item_costs','sale_payments','cash_movements','refund_lines','refund_payouts'] LOOP
+ FOREACH t IN ARRAY ARRAY['brands','business_profile','categories','price_levels','product_barcodes','products','shops','suppliers','unit_types','users','organizations','audit_logs','inventory','inventory_movements','price_tiers','product_image_upload_sessions','product_unit_prices','purchase_orders','refund_void_requests','sales','shifts','supplier_payments','stock_transfers','stock_transfer_items','product_units','purchase_order_items','sale_items','reprint_logs','supplier_products','app_config','platform_admins','product_costs','product_unit_costs','sale_item_costs','sale_payments','cash_movements','refund_lines','refund_payouts','fin_approvals','refund_payout_confirmations','refund_cash_drawer'] LOOP
   IF to_regclass('public.'||t) IS NOT NULL THEN
    INSERT INTO recovery_v1.guarded_tables(relid, relname, resolver) VALUES (to_regclass('public.'||t), t, 'builtin');
    EXECUTE format('CREATE TRIGGER zz_recovery_v1_write BEFORE INSERT OR UPDATE OR DELETE ON public.%I FOR EACH ROW EXECUTE FUNCTION recovery_v1.guard_write()',t);

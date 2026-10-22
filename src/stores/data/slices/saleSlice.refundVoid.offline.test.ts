@@ -82,18 +82,33 @@ describe("requestVoid offline", () => {
   });
 });
 
-describe("requestRefund offline", () => {
-  it("stages a provisional partial-refund request with its line items", async () => {
+describe("requestRefund offline (Step 6, PFIN-F: refunds are recorded online only)", () => {
+  it("is refused before anything is staged, queued or sent", async () => {
     const { get } = makeStore();
 
-    await get().requestRefund({
+    await expect(get().requestRefund({
       saleId: "sale-1", reason: "Damaged", actorId: "user-1",
       items: [{ productId: "p1", qtyUnits: 1, amountMmk: 1000 }],
-    });
+    })).rejects.toThrow(/Refunds are recorded online only/);
 
-    const request = get().refundVoidRequests[0];
-    expect(request).toMatchObject({ type: "PARTIAL", status: "REQUESTED", pendingSync: true });
-    expect(request.items).toEqual([{ productId: "p1", qtyUnits: 1, amountMmk: 1000 }]);
+    expect(rpc).not.toHaveBeenCalled();
+    expect(get().refundVoidRequests).toHaveLength(0);
+    expect(get().refunds).toHaveLength(0);
+    expect(await localDb.syncOutbox.count()).toBe(0);
+    expect(await localDb.refunds.count()).toBe(0);
+  });
+
+  it("online, a sale that has not reached the server yet is refused too (no provisional refs for refunds)", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    const { get } = makeStore({ sales: [{ id: "sale-local", shopId: "shop-1", status: "NORMAL", pendingSync: true }] });
+
+    await expect(get().requestRefund({
+      saleId: "sale-local", reason: "Damaged", actorId: "user-1",
+      items: [{ productId: "p1", qtyUnits: 1, amountMmk: 1000 }],
+    })).rejects.toThrow(/has not reached the server yet/);
+
+    expect(rpc).not.toHaveBeenCalled();
+    expect(await localDb.syncOutbox.count()).toBe(0);
   });
 });
 

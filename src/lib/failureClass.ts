@@ -160,6 +160,9 @@ const ROLLED_BACK_RETRYABLE = new Set([
 // The server does not know what the client calls: an older/newer server.
 const VERSION_SKEW = new Set(["42703", "42883", "PGRST202", "PGRST204", "PGRST200"]);
 
+// Step 6: definitive financial refusals raised by PFIN-F / PDISC-A (message prefix "CODE:").
+const FINANCIAL_REFUSAL = /^(DISCOUNT_APPROVAL_(REQUIRED|INVALID|OFFLINE|KEY_REUSED)|FIN_NON_CASH_CHANGE|FIN_REFUND_(OFFLINE|DETAIL_REQUIRED|LINES_REQUIRED|EXCEPTION_NOT_PERMITTED|EXCEPTION_PENDING|EXCEPTION_UNAPPROVED)|FIN_DRAWER_INSUFFICIENT|FIN_APPROVAL_(SELF|DECIDED|OFFLINE|INVALID|EXPIRED|NOT_FOUND)|FIN_APPROVER_NOT_ELIGIBLE|FIN_PAYOUT_(OFFLINE|INVALID|CONFIRMED|NOT_FOUND|KEY_REUSED)):/;
+
 const EXPIRED_PHRASES = ["jwt expired", "token is expired", "token has expired", "session has expired"];
 const REAUTH_PHRASES = [
   "invalid jwt", "jwserror", "invalid signature", "jwt signature", "no suitable key", "not authenticated",
@@ -200,6 +203,13 @@ export function classifyFailure(signal: FailureSignal): FailureInfo {
   if (code === "OX204" || message.startsWith("MFA_REQUIRED") || text.includes("rule=mfa_required")) {
     return info("AUTH_REAUTH", retryAfterMs);
   }
+  // Step 6 (PFIN-F / PDISC-A): the server's financial business refusals (message prefix "CODE: …"). They come only
+  // from the server's own checks (a gateway body never starts with them): a definitive refusal of this exact request,
+  // whatever status it rides on — shown to the person, never retried automatically (a missing, invalid or offline
+  // discount approval does not appear by resending the same sale). Tested BEFORE the 086 executor markers: the
+  // pinned 086 allow-list (op_classify_refusal) does not know these messages, so op_execute raises them with
+  // "op_not_recorded:unclassified" — nothing ran, and resending the same request can only be refused again.
+  if (FINANCIAL_REFUSAL.test(message)) return info("REJECTED");
   // 086 executor markers (op_execute / op_status / idem_begin). Nothing was
   // executed or recorded for any of them.
   if (message.startsWith("OP_NOT_AUTHENTICATED") || text.includes("op_not_recorded:auth")) return info("AUTH_REAUTH", retryAfterMs);

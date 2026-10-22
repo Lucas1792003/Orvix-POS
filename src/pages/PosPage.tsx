@@ -29,7 +29,15 @@ import {
   getRequestedUnitsByProduct,
   validatePosCart,
 } from "../features/pos/cartStock";
-import { hasShopPermission } from "../lib/permissions";
+import { hasPermission, hasShopPermission } from "../lib/permissions";
+import { ReasonDialog } from "../components/ui/ReasonDialog";
+import type { DiscountApprovalNotice } from "../components/pos/CartPanel";
+import { approvalCovers, cartDiscountPolicy, requestDescribesCart, tierReferencePrice, type DiscountApprovalView } from "../features/pos/discountPolicy";
+import {
+  discountDetails, fetchFinApproval, finStep6Capabilities, knownFinStep6Capabilities, requestDiscountApproval, type FinApproval,
+} from "../features/finance/finCompletion";
+import { useConnectivityStore } from "../stores/connectivityStore";
+import { formatMmk } from "../lib/utils";
 import { getErrorMessage, reportError } from "../lib/errors";
 import { isPendingConfirmation, isUnresolvedOperation } from "../stores/data/operationPrompt";
 import { isRecoveryBlocked } from "../stores/data/recoveryState";
@@ -41,6 +49,15 @@ import { printReceipt as triggerPrint } from "../lib/print";
 import { getEffectiveShopId } from "../lib/utils";
 import { useTranslation } from "../hooks/useTranslation";
 import { useSaleActivityStore } from "../stores/saleActivityStore";
+
+/** The till's view of a discount approval row. */
+const approvalView = (a: FinApproval): DiscountApprovalView & { decisionReason: string | null } => {
+  const d = discountDetails(a);
+  return {
+    id: a.id, status: a.status, referenceSubtotalMmk: d.referenceSubtotalMmk, discountMmk: d.discountMmk,
+    expiresAt: a.expiresAt, consumedSaleId: a.consumedSaleId, decisionReason: a.decisionReason,
+  };
+};
 
 export const PosPage = () => {
   const toast = useToast();
@@ -89,6 +106,7 @@ export const PosPage = () => {
   const users = useDataStore((state) => state.users);
   const priceLevels = useDataStore((state) => state.priceLevels);
   const productUnitPrices = useDataStore((state) => state.productUnitPrices);
+  const priceTiers = useDataStore((state) => state.priceTiers);
   const categories = useDataStore((state) => state.categories);
   const brands = useDataStore((state) => state.brands);
   // Subscribe to the inventory array directly so the stock badges recompute
@@ -132,6 +150,19 @@ export const PosPage = () => {
   }, [cartItems.length, paymentOpen, submitting, setSaleInProgress]);
   useEffect(() => () => setSaleInProgress(false), [setSaleInProgress]);
   const openShift = shifts.find((shift) => shift.shopId === shopId && shift.cashierId === currentUserId && !shift.endedAt);
+
+  // ---- Step 6 (PDISC-A): a discount above the seller's own limit needs a separate approval (decided by another
+  // person) before checkout; the sale then names it in the x-orvix-discount-approval header. Never offline.
+  const isOnline = useConnectivityStore((state) => state.isOnline);
+  const [discountApprovalsEnforced, setDiscountApprovalsEnforced] = useState(() => knownFinStep6Capabilities().discountApprovals);
+  useEffect(() => {
+    let live = true;
+    void finStep6Capabilities().then((c) => { if (live) setDiscountApprovalsEnforced(c.discountApprovals); }).catch(() => undefined);
+    return () => { live = false; };
+  }, [shopId, isOnline]);
+  const [discountApproval, setDiscountApproval] = useState<(DiscountApprovalView & { decisionReason: string | null }) | null>(null);
+  const [askingDiscountReason, setAskingDiscountReason] = useState(false);
+  useEffect(() => { setDiscountApproval(null); }, [shopId, currentUserId]);
   const canOverridePrice = hasShopPermission(currentUser, "pos:override_price", shopId);
   const canOverrideStock = hasShopPermission(currentUser, "pos:override_stock", shopId);
 
@@ -185,6 +216,64 @@ export const PosPage = () => {
   );
 
   const { subtotal, itemDiscount, cartDiscount, total } = calculateCartTotals(cartItems, cartDiscountPct);
+  // an overridden line's reference: the price complete_sale would resolve for it (level AND quantity tier, live qty)
+  const referencePriceOf = useMemo(
+    () => tierReferencePrice({ shopId, productUnits, priceLevels, priceTiers }), [shopId, productUnits, priceLevels, priceTiers],
+  );
+  const discount = cartDiscountPolicy(cartItems, cartDiscountPct, {
+    role: currentUser?.role, canApplyDiscount: hasPermission(currentUser, "pos:apply_discount"),
+  }, referencePriceOf);
+  // Offline the rule applies whatever the server-capability probe last said (it cannot be asked, and an approval-
+  // requiring discount is never recorded offline); online, only once the server enforces discount approvals.
+  const discountNeedsApproval = (discountApprovalsEnforced || !isOnline) && discount.needsApproval;
+  const discountCovered = approvalCovers(discountApproval, discount.referenceSubtotalMmk, discount.discountMmk);
+  const discountBlocked = discountNeedsApproval && (!isOnline || !discountCovered);
+  const requestPending = discountApproval?.status === "REQUESTED"
+    && requestDescribesCart(discountApproval, discount.referenceSubtotalMmk, discount.discountMmk);
+  // Poll the request (~3 s) while it is undecided and the cart is unchanged
+  useEffect(() => {
+    if (!requestPending || !isOnline || !discountApproval) return;
+    const id = discountApproval.id;
+    let live = true;
+    const timer = window.setInterval(() => {
+      void fetchFinApproval(id).then((res) => {
+        if (live && res.status === "ok" && res.data) setDiscountApproval(approvalView(res.data));
+      });
+    }, 3_000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [requestPending, isOnline, discountApproval]);
+  const discountText = { amount: formatMmk(discount.discountMmk), pct: discount.pct.toFixed(2) };
+  const discountBlockedMessage = !isOnline ? t("fin6", "discountOffline") : t("fin6", "discountBlocked");
+  const discountNotice: DiscountApprovalNotice | undefined = !discountNeedsApproval ? undefined : (() => {
+    const needs = t("fin6", discount.needsShopAdmin ? "discountNeedsShopAdmin" : "discountNeedsManager", discountText);
+    const request = { label: t("fin6", "requestApproval"), disabled: !isOnline || submitting, onClick: () => setAskingDiscountReason(true) };
+    if (!isOnline) return { tone: "warning", message: `${needs} ${t("fin6", "discountOffline")}` };
+    if (discountCovered) return { tone: "success", message: t("fin6", "discountApproved") };
+    if (requestPending) return { tone: "info", message: t("fin6", "discountRequested") };
+    if (discountApproval && requestDescribesCart(discountApproval, discount.referenceSubtotalMmk, discount.discountMmk)) {
+      if (discountApproval.status === "REJECTED") {
+        return { tone: "error", message: t("fin6", "discountRejected", { reason: discountApproval.decisionReason ?? "—" }), action: request };
+      }
+      return { tone: "warning", message: t("fin6", "discountExpired"), action: request };
+    }
+    if (discountApproval) return { tone: "warning", message: `${needs} ${t("fin6", "discountCartChanged")}`, action: request };
+    return { tone: "warning", message: needs, action: request };
+  })();
+  const handleRequestDiscountApproval = async (why: string) => {
+    const reason = why.trim();
+    if (reason.length < 3 || reason.length > 300) {        // the server's rule (3–300); the dialog itself allows 500
+      toast({ title: t("fin6", "requestFailed"), description: t("fin6", "reasonLength"), variant: "error" });
+      throw new Error("reason length");                    // keeps the dialog open with the typed reason
+    }
+    try {
+      const approval = await requestDiscountApproval(shopId, discount.referenceSubtotalMmk, discount.discountMmk, reason);
+      setDiscountApproval(approvalView(approval));
+      toast({ title: t("fin6", "requestSent"), variant: "success" });
+    } catch (error) {
+      toast({ title: t("fin6", "requestFailed"), description: error instanceof Error ? error.message : String(error), variant: "error" });
+      throw error;
+    }
+  };
   const stockOverrideUnavailableMessage = `${STOCK_OVERRIDE_REQUIRED_MESSAGE} ${STOCK_OVERRIDE_UI_REQUIRED_MESSAGE}`;
   const translateCartMessage = useCallback(
     (message?: string) => {
@@ -208,7 +297,7 @@ export const PosPage = () => {
     [stockOverrideUnavailableMessage, t]
   );
   const firstCartError = translateCartMessage(cartValidation.errors[0]);
-  const checkoutHelper = !openShift ? t("pos", "openShiftFirst") : firstCartError;
+  const checkoutHelper = !openShift ? t("pos", "openShiftFirst") : firstCartError ?? (discountBlocked ? discountBlockedMessage : undefined);
   const paymentValidationError = paymentOpen && !cartValidation.canCheckout ? firstCartError : undefined;
   const localizedCartItemStatuses = useMemo(
     () =>
@@ -449,9 +538,13 @@ export const PosPage = () => {
       showCartValidationToast();
       return;
     }
+    if (discountBlocked) {
+      toast({ title: t("pos", "checkoutBlocked"), description: discountBlockedMessage, variant: "error" });
+      return;
+    }
     setPrintAfterSave(printOnSuccess);
     setPaymentOpen(true);
-  }, [cartValidation.canCheckout, currentUser, showCartValidationToast, submitting, toast, t]);
+  }, [cartValidation.canCheckout, currentUser, discountBlocked, discountBlockedMessage, showCartValidationToast, submitting, toast, t]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -485,6 +578,12 @@ export const PosPage = () => {
       showCartValidationToast(t("pos", "paymentBlocked"));
       return;
     }
+    if (discountBlocked) {
+      toast({ title: t("pos", "paymentBlocked"), description: discountBlockedMessage, variant: "error" });
+      return;
+    }
+    // the approval this sale uses (only when its discount needs one): sent as x-orvix-discount-approval
+    const discountApprovalId = discountNeedsApproval && discountCovered && discountApproval ? discountApproval.id : undefined;
     setSubmitting(true);
     try {
       const saleId = await createSale({
@@ -496,7 +595,9 @@ export const PosPage = () => {
         paymentMethod,
         paidMmk,
         ...(payments ? { payments } : {}),
+        ...(discountApprovalId ? { discountApprovalId } : {}),
       });
+      if (discountApprovalId) setDiscountApproval(null);   // single use: consumed by this sale
       // Clear the cart and stay on POS so the cashier can ring up the
       // next sale immediately. When "Print (F3)" was picked we render a
       // hidden ReceiptPreview below and trigger window.print() in an
@@ -540,6 +641,10 @@ export const PosPage = () => {
         toast({ title: "Sale not recorded — server recovery", description: error.message, variant: "error" });
       } else if (isUnresolvedOperation(error)) {
         toast({ title: t("unresolved", "cancelledTitle"), description: getErrorMessage(error, t("pos", "couldNotComplete")), variant: "info" });
+      } else if (error instanceof Error && /^(DISCOUNT_APPROVAL_[A-Z_]+|FIN_NON_CASH_CHANGE):/.test(error.message)) {
+        // Step 6: the server's refusal, verbatim (nothing was recorded); an approval it refused must be requested again
+        if (error.message.startsWith("DISCOUNT_APPROVAL_INVALID")) setDiscountApproval(null);
+        toast({ title: t("pos", "checkoutFailed"), description: error.message, variant: "error" });
       } else {
         toast({
           title: t("pos", "checkoutFailed"),
@@ -695,6 +800,7 @@ export const PosPage = () => {
                   priceLevelId: overrideResolved.priceLevelId,
                   priceLevelName: overrideResolved.priceLevelName,
                   priceOverriddenBy: undefined,
+                  priceBeforeOverrideMmk: undefined,
                 }
               : item,
           );
@@ -708,6 +814,9 @@ export const PosPage = () => {
               priceLevelId: overrideResolved.priceLevelId,
               priceLevelName: overrideResolved.priceLevelName,
               priceOverriddenBy: overrideBy,
+              // Step 6 (PDISC-A): the level price before a manual override (a reduction below the reference is a
+              // discount). The quantity tier complete_sale would apply is added live (tierReferencePrice, current qty).
+              priceBeforeOverrideMmk: isManualOverride ? overrideResolved.priceMmk : undefined,
             }
           : item,
       );
@@ -851,11 +960,24 @@ export const PosPage = () => {
                 : undefined
             }
             stockStatuses={localizedCartItemStatuses}
-            checkoutDisabled={!cartValidation.canCheckout || submitting}
+            checkoutDisabled={!cartValidation.canCheckout || submitting || discountBlocked}
             checkoutHelper={checkoutHelper}
+            discountApproval={discountNotice}
           />
         </Card>
       </div>
+
+      <ReasonDialog
+        open={askingDiscountReason}
+        title={t("fin6", "requestApprovalTitle")}
+        description={`${t("fin6", discount.needsShopAdmin ? "discountNeedsShopAdmin" : "discountNeedsManager", discountText)} ${t("fin6", "requestApprovalDesc")}`}
+        label={t("fin6", "reasonLabel")}
+        confirmLabel={t("fin6", "send")}
+        cancelLabel={t("fin6", "cancel")}
+        requiredMessage={t("fin6", "reasonRequired")}
+        onConfirm={handleRequestDiscountApproval}
+        onClose={() => setAskingDiscountReason(false)}
+      />
 
       <PaymentModal
         open={paymentOpen}

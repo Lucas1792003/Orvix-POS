@@ -3,6 +3,38 @@ import { Modal } from "../ui/Modal";
 import { Input } from "../ui/Input";
 import { Button } from "../ui/Button";
 import { formatMmk, toNumber } from "../../lib/utils";
+import { useTranslation } from "../../hooks/useTranslation";
+
+/**
+ * Step 6 (PFIN-F): the refund as the SERVER plans it (fin_refund_plan): the default amount of each line and the
+ * default payout by the original payment methods. A manager (the server's canProposeExceptions) may propose a payout by
+ * other methods and / or other line amounts; each needs a separate Shop Admin approval before the refund is approved.
+ */
+export interface SplitRefundView {
+  status: "loading" | "ok" | "error";
+  message?: string;
+  /** Line key (sale_items id) → the server's default refund amount. */
+  defaults: Record<string, number>;
+  /** Line key → the most this line can still give back (whole MMK). */
+  lineMax: Record<string, number>;
+  /** How the money goes back by default (null: as the sale was paid — a single-method sale). */
+  defaultPayouts: { method: string; amountMmk: number }[] | null;
+  methodLabel: (method: string) => string;
+  canPropose: boolean;
+  altOn: boolean;
+  onToggleAlt: (on: boolean) => void;
+  altMethods: string[];
+  altAmounts: Record<string, string>;
+  onChangeAlt: (method: string, value: string) => void;
+  adjustOn: boolean;
+  onToggleAdjust: (on: boolean) => void;
+  adjusted: Record<string, string>;
+  onChangeAdjusted: (lineKey: string, value: string) => void;
+  /** The refund total as it would be requested. */
+  totalMmk: number;
+  /** Why it cannot be submitted as it stands (shown), or null. */
+  problem: string | null;
+}
 
 interface RefundModalProps {
   open: boolean;
@@ -26,14 +58,20 @@ interface RefundModalProps {
     payoutMethod: string | null;
     onChangePayout: (method: string) => void;
   };
+  /** Step 6 (PFIN-F): when the server plans the refund, it replaces the client's amounts and the payout choice. */
+  splitRefund?: SplitRefundView;
 }
 
 export const RefundModal = ({
   open, lines, selection, plan, reason, productNames, submitting,
-  onChangeSelection, onChangeReason, onClose, onSubmit, lineDetail,
+  onChangeSelection, onChangeReason, onClose, onSubmit, lineDetail, splitRefund,
 }: RefundModalProps) => {
-  const needsPayout = !!lineDetail && lineDetail.payoutMethods.length > 1 && !lineDetail.payoutMethod;
-  const canSubmit = !submitting && plan.items.length > 0 && plan.errors.length === 0 && !needsPayout;
+  const { t } = useTranslation();
+  const split = splitRefund;
+  const needsPayout = !split && !!lineDetail && lineDetail.payoutMethods.length > 1 && !lineDetail.payoutMethod;
+  const splitReady = !split || (split.status === "ok" && !split.problem);
+  const canSubmit = !submitting && plan.items.length > 0 && plan.errors.length === 0 && !needsPayout && splitReady;
+  const shownTotal = split ? (split.status === "ok" ? split.totalMmk : 0) : plan.totalMmk;
   return (
     <Modal
       open={open}
@@ -46,7 +84,7 @@ export const RefundModal = ({
             Cancel
           </Button>
           <Button onClick={onSubmit} disabled={!canSubmit}>
-            Submit {plan.totalMmk > 0 ? formatMmk(plan.totalMmk) : ""}
+            Submit {shownTotal > 0 ? formatMmk(shownTotal) : ""}
           </Button>
         </>
       }
@@ -70,7 +108,22 @@ export const RefundModal = ({
                 )}
               </div>
               <div className="flex items-center gap-2">
-                {plan.amounts[line.key] !== undefined && (
+                {split ? (
+                  split.status === "ok" && split.defaults[line.key] !== undefined ? (
+                    split.adjustOn && split.canPropose ? (
+                      <Input
+                        inputMode="numeric"
+                        aria-label={`${t("fin6", "adjustAmount")} — ${productNames?.[line.productId] ?? line.productId}`}
+                        value={split.adjusted[line.key] ?? String(split.defaults[line.key])}
+                        onChange={(event) => split.onChangeAdjusted(line.key, event.target.value.replace(/[^\d]/g, ""))}
+                        title={t("fin6", "lineLeft", { max: formatMmk(split.lineMax[line.key] ?? 0) })}
+                        className="w-28"
+                      />
+                    ) : (
+                      <span className="text-xs text-slate-600" data-testid={`refund-default-${line.key}`}>{formatMmk(split.defaults[line.key])}</span>
+                    )
+                  ) : null
+                ) : plan.amounts[line.key] !== undefined && (
                   <span className="text-xs text-slate-600">{formatMmk(plan.amounts[line.key])}</span>
                 )}
                 <Input
@@ -107,7 +160,59 @@ export const RefundModal = ({
           {plan.errors.map((error) => <li key={error}>{error}</li>)}
         </ul>
       )}
-      {lineDetail && lineDetail.payoutMethods.length > 1 ? (
+      {split && plan.items.length > 0 && plan.errors.length === 0 ? (
+        <div className="mt-3 space-y-2 rounded-xl border border-slate-200 p-3 text-sm" data-testid="split-refund">
+          {split.status === "loading" ? (
+            <div className="text-xs text-slate-500">{t("fin6", "planLoading")}</div>
+          ) : split.status === "error" ? (
+            <div className="text-xs text-red-700" role="alert">{t("fin6", "planUnavailable", { message: split.message ?? "" })}</div>
+          ) : (
+            <>
+              <div className="flex items-center justify-between font-medium text-slate-700">
+                <span>{t("fin6", "refundTotal")}</span>
+                <span>{formatMmk(split.totalMmk)}</span>
+              </div>
+              {!split.altOn ? (
+                <div className="text-xs text-slate-600" data-testid="refund-default-payouts">
+                  {split.defaultPayouts && split.defaultPayouts.length > 0
+                    ? t("fin6", "payoutDefault", { list: split.defaultPayouts.map((p) => `${split.methodLabel(p.method)} ${formatMmk(p.amountMmk)}`).join(" · ") })
+                    : t("fin6", "payoutLegacy")}
+                </div>
+              ) : null}
+              {split.canPropose ? (
+                <div className="space-y-2 border-t border-slate-100 pt-2">
+                  <label className="flex items-start gap-2 text-xs text-slate-700">
+                    <input type="checkbox" checked={split.altOn} onChange={(event) => split.onToggleAlt(event.target.checked)} />
+                    <span><span className="font-medium">{t("fin6", "altPayout")}</span> — {t("fin6", "exceptionNote")}</span>
+                  </label>
+                  {split.altOn ? (
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {split.altMethods.map((m) => (
+                        <label key={m} className="block text-xs text-slate-600">
+                          <span className="mb-1 block">{split.methodLabel(m)}</span>
+                          <Input
+                            inputMode="numeric"
+                            aria-label={`${t("fin6", "altPayout")} — ${split.methodLabel(m)}`}
+                            value={split.altAmounts[m] ?? ""}
+                            onChange={(event) => split.onChangeAlt(m, event.target.value.replace(/[^\d]/g, ""))}
+                            placeholder="0"
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  ) : null}
+                  <label className="flex items-start gap-2 text-xs text-slate-700">
+                    <input type="checkbox" checked={split.adjustOn} onChange={(event) => split.onToggleAdjust(event.target.checked)} />
+                    <span><span className="font-medium">{t("fin6", "adjustAmount")}</span> — {t("fin6", "exceptionNote")}</span>
+                  </label>
+                </div>
+              ) : null}
+              {split.problem ? <div className="text-xs text-amber-700" role="alert">{split.problem}</div> : null}
+            </>
+          )}
+        </div>
+      ) : null}
+      {!split && lineDetail && lineDetail.payoutMethods.length > 1 ? (
         <label className="mt-2 block text-sm">
           <span className="mb-1 block text-xs font-medium text-slate-600">Paid back as</span>
           <select

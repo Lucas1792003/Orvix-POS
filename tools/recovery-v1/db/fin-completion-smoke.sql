@@ -120,12 +120,27 @@ SELECT test.check('r04 no-restock: the approval''s RETURN_IN is taken back by a 
   AND EXISTS (SELECT 1 FROM inventory_movements WHERE type = 'RETURN_NO_RESTOCK' AND reference_id = :'r1'::jsonb->'request'->>'id' AND qty_change = -1));
 SELECT test.login('a0000000-0000-4000-8000-000000000004');
 SET ROLE authenticated;
+RESET ROLE;
+SELECT to_regclass('public.fin_approvals') IS NOT NULL AS has_pfin_f \gset
+SELECT test.login('a0000000-0000-4000-8000-000000000004');
+SET ROLE authenticated;
+\if :has_pfin_f
+-- PFIN-F: a payout beyond what was paid that way is an ALTERNATIVE payout; a cashier may not propose one (a manager's
+-- proposal becomes a Shop Admin approval request instead: tools/recovery-v1/step6f/fin_policy.py)
+SELECT test.expect_error('r05 a cashier''s payout beyond what was paid that way (an alternative payout) is refused when the request is CREATED (bank 500 already + 2000 > 1000)',
+  format($q$SELECT public.create_refund_void_request(%L, 'PARTIAL', 'Second unit too',
+    jsonb_build_array(jsonb_build_object('productId','prod-2','qtyUnits',1,'amountMmk',2000,
+      'lines', jsonb_build_array(jsonb_build_object('saleItemId', %L, 'qtyUnits',1,'amountMmk',2000)),
+      'payouts', '[{"method":"BANK_TRANSFER","amountMmk":2000}]'::jsonb)), NULL, NULL, '77777777-0000-4000-8000-000000000035')$q$, :'s2_id', :'s2_line'),
+  'FIN_REFUND_EXCEPTION_NOT_PERMITTED');
+\else
 SELECT test.expect_error('r05 a payout beyond what was paid that way is refused when the request is CREATED (bank 500 already + 2000 > 1000)',
   format($q$SELECT public.create_refund_void_request(%L, 'PARTIAL', 'Second unit too',
     jsonb_build_array(jsonb_build_object('productId','prod-2','qtyUnits',1,'amountMmk',2000,
       'lines', jsonb_build_array(jsonb_build_object('saleItemId', %L, 'qtyUnits',1,'amountMmk',2000)),
       'payouts', '[{"method":"BANK_TRANSFER","amountMmk":2000}]'::jsonb)), NULL, NULL, '77777777-0000-4000-8000-000000000035')$q$, :'s2_id', :'s2_line'),
   'exceeds what the customer paid that way');
+\endif
 RESET ROLE;
 SELECT test.check('r06 the refused request left nothing behind (no pending request blocking the sale, no lines)',
   NOT EXISTS (SELECT 1 FROM refund_void_requests WHERE sale_id = :'s2_id' AND status = 'REQUESTED')
@@ -194,6 +209,13 @@ SELECT test.check('r10 payouts of several items by the same method are added up 
   (SELECT amount_mmk FROM refund_payouts WHERE request_id = :'r10' AND method = 'CARD') = 2000
   AND (SELECT amount_mmk FROM refund_payouts WHERE request_id = :'r10' AND method = 'CASH') = 1000
   AND (public.fin_shift_cash(:'shift_a3')->>'cashRefundsMmk')::int = 1000);
+-- HISTORY BEFORE PFIN-F: refunds of split sales approved from released tills (no lines, no payouts) were possible before
+-- PFIN-F; their accounting rules (r11, r12) still apply to that history, so the fixture writes it with PFIN-F's three
+-- triggers disabled (superuser fixture only), then re-enables them and checks the same request is refused now (r13).
+RESET ROLE;
+\if :has_pfin_f
+ALTER TABLE refund_void_requests DISABLE TRIGGER zzg_refund_policy_ins, DISABLE TRIGGER zzg_refund_policy_upd, DISABLE TRIGGER zzg_refund_exceptions;
+\endif
 -- a refund approved from a released till (no lines, no payouts) counts against later caps
 SELECT test.login('a0000000-0000-4000-8000-000000000004');
 SET ROLE authenticated;
@@ -209,6 +231,22 @@ SET ROLE authenticated;
 SELECT public.approve_refund_request(:'r11a', '77777777-0000-4000-8000-000000000056') AS a11 \gset
 RESET ROLE;
 SELECT id AS s4_line FROM sale_items WHERE sale_id = :'s4' \gset
+\if :has_pfin_f
+ALTER TABLE refund_void_requests ENABLE TRIGGER zzg_refund_policy_ins, ENABLE TRIGGER zzg_refund_policy_upd, ENABLE TRIGGER zzg_refund_exceptions;
+SELECT test.check('r11b the legacy refund is attributed to CASH, so the default payout of the second unit is the card part',
+  public.fin_refund_default_payouts(:'s4', NULL, 1000) = '[{"method":"CARD","amountMmk":1000}]'::jsonb);
+SELECT test.login('a0000000-0000-4000-8000-000000000004');
+SET ROLE authenticated;
+SELECT test.expect_error('r11 a legacy refund (paid back by the sale''s legacy method, CASH) counts: a further CASH payout beyond the cash taken is not the default (an alternative payout a cashier may not propose)',
+  format($q$SELECT public.create_refund_void_request(%L,'PARTIAL','Second unit',
+    jsonb_build_array(jsonb_build_object('productId','prod-1','qtyUnits',1,'amountMmk',1000,'lines',jsonb_build_array(jsonb_build_object('saleItemId',%L,'qtyUnits',1,'amountMmk',1000)),
+      'payouts','[{"method":"CASH","amountMmk":1000}]'::jsonb)), NULL, NULL, '77777777-0000-4000-8000-000000000057')$q$, :'s4', :'s4_line'),
+  'FIN_REFUND_EXCEPTION_NOT_PERMITTED');
+RESET ROLE;
+ALTER TABLE refund_void_requests DISABLE TRIGGER zzg_refund_policy_ins, DISABLE TRIGGER zzg_refund_policy_upd, DISABLE TRIGGER zzg_refund_exceptions;
+SELECT test.login('a0000000-0000-4000-8000-000000000004');
+SET ROLE authenticated;
+\else
 SELECT test.login('a0000000-0000-4000-8000-000000000004');
 SET ROLE authenticated;
 SELECT test.expect_error('r11 a legacy refund (paid back by the sale''s legacy method, CASH) counts: a further CASH payout beyond the cash taken is refused',
@@ -216,6 +254,7 @@ SELECT test.expect_error('r11 a legacy refund (paid back by the sale''s legacy m
     jsonb_build_array(jsonb_build_object('productId','prod-1','qtyUnits',1,'amountMmk',1000,'lines',jsonb_build_array(jsonb_build_object('saleItemId',%L,'qtyUnits',1,'amountMmk',1000)),
       'payouts','[{"method":"CASH","amountMmk":1000}]'::jsonb)), NULL, NULL, '77777777-0000-4000-8000-000000000057')$q$, :'s4', :'s4_line'),
   'exceeds what the customer paid that way');
+\endif
 -- a legacy refund of a split sale is counted as cash only up to the cash that sale took
 SELECT public.fin_complete_sale_split('direct', '77777777-0000-4000-8000-000000000058',
   jsonb_build_object('p_shop_id','shop-a','p_shift_id',:'shift_a3','p_payment_method','CASH','p_paid_mmk',2000,'p_cart_discount_pct',0,
@@ -231,6 +270,16 @@ SELECT public.approve_refund_request(:'r12a', '77777777-0000-4000-8000-000000000
 RESET ROLE;
 SELECT test.check('r12 a legacy refund of a split sale lowers expected cash by at most that sale''s cash part (100, not 1000)',
   (public.fin_shift_cash(:'shift_a3')->>'cashRefundsMmk')::int = :cr_before + 100);
+\if :has_pfin_f
+ALTER TABLE refund_void_requests ENABLE TRIGGER zzg_refund_policy_ins, ENABLE TRIGGER zzg_refund_policy_upd, ENABLE TRIGGER zzg_refund_exceptions;
+SELECT test.login('a0000000-0000-4000-8000-000000000004');
+SET ROLE authenticated;
+SELECT test.expect_error('r13 PFIN-F: a refund of a split sale without sale lines and payouts is refused now (released tills must update)',
+  format($q$SELECT public.create_refund_void_request(%L,'PARTIAL','Released till refund','[{"productId":"prod-1","qtyUnits":1,"amountMmk":500}]'::jsonb,
+    NULL, NULL, '77777777-0000-4000-8000-000000000061')$q$, :'s5'),
+  'FIN_REFUND_DETAIL_REQUIRED');
+RESET ROLE;
+\endif
 -- a key that already committed a single-payment sale never becomes a split sale (checked from the server's rows, not the reply)
 SELECT test.login('a0000000-0000-4000-8000-000000000004');
 SET ROLE authenticated;

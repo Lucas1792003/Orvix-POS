@@ -47,6 +47,9 @@ export interface CreateSaleInput {
   /** Step 4 (PFIN-D): a split / mixed payment. When present, paymentMethod and paidMmk must be the ones
    *  planPayments() derived from it (the server checks); sent through fin_complete_sale_split. */
   payments?: CanonicalPart[];
+  /** Step 6 (PDISC-A): the APPROVED discount approval this sale uses. Travels with the operation (outbox entry), never
+   *  inside complete_sale's hashed arguments; sent as the x-orvix-discount-approval header on every attempt. */
+  discountApprovalId?: string | null;
 }
 
 export interface RefundItemInput {

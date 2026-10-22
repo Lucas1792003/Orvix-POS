@@ -154,6 +154,14 @@ test("I01 setup: Recovery V1 installed (every organization RESTRICTED); the POS 
   const unreachable = ["extensions.pg_stat_statements other_users_query_text", "cron.job", "cron.job_run_details", "net._http_response", "net.http_request_queue"]
     .filter((k) => !(k in visible));
   expect(p.publicDefinerBridgeOnly).toEqual([]);                                 // nothing beyond what anon can already call
+  // Step 6 finalization (PNET-A): the database's outgoing-HTTP facility is out of reach — no net.* table privilege, no schema
+  // usage (both queue and responses unreachable) and no EXECUTE on net.http_post
+  expect((p.tablePrivileges as any[]).filter((t) => t.rel.startsWith("net."))).toEqual([]);
+  expect(unreachable).toEqual(expect.arrayContaining(["net._http_response", "net.http_request_queue"]));
+  expect(probe).toContain("exec net.http_post false");
+  // ... and the new financial RPCs and tables (PFIN-F / PDISC-A) are out of its reach too
+  expect(probe).toContain("exec fin_rpcs false");
+  expect(probe).toContain("read fin_tables false");
   for (const t of ["table sales", "table sale_items", "table products", "table org_state", "schema auth"]) expect(probe).toContain(`permission denied for ${t}`);
   expect(probe).not.toMatch(/ERROR: {2}(?!permission denied|relation .* does not exist)/);
   note("I01.bridge", { role, probe: { ...p, deniedReads: 5, effective, visible, unreachable } });

@@ -10,7 +10,7 @@ say() { echo "$*" | tee -a "$O/summary.txt"; }
 trap 'bash tools/m087-verify/lib/stack.sh down "$O/stack" >> "$O/down.log" 2>&1; say "teardown: $(tail -1 "$O/down.log")"' EXIT
 bash tools/m087-verify/lib/stack.sh up "$O/stack" > "$O/stack-up.log" 2>&1; say "stack: $(tail -1 "$O/stack-up.log")"
 say "server: $(q -c 'show server_version')"
-for f in PSAFE-A_no_086_rerun_after_087 PFIN-A_report_indexes PFIN-B_financial_reports PCOST-A_cost_privacy PFIN-D_payments_cash PFIN-E_refund_lines; do
+for f in PSAFE-A_no_086_rerun_after_087 PFIN-A_report_indexes PFIN-B_financial_reports PCOST-A_cost_privacy PFIN-D_payments_cash PFIN-E_refund_lines PFIN-F_split_refunds PDISC-A_discount_authorization PNET-A_pg_net_lockdown; do
   q --single-transaction -f - < supabase/migrations-provisional/$f.sql > "$O/$f.log" 2>&1; say "$f: exit $?"
 done
 bash tools/m087-verify/lib/reserve-recovery-roles.sh $DB > "$O/reserve.log" 2>&1; say "reserve 087 roles: $(tail -1 "$O/reserve.log")"

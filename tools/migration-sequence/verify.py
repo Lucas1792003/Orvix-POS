@@ -166,6 +166,11 @@ SELECT jsonb_build_object(
  'PFIN-C', to_regprocedure('public.fin_guard_refund_net_paid()') IS NOT NULL,
  'PFIN-D', to_regclass('public.sale_payments') IS NOT NULL AND to_regclass('public.cash_movements') IS NOT NULL,
  'PFIN-E', to_regclass('public.refund_lines') IS NOT NULL AND to_regclass('public.refund_payouts') IS NOT NULL,
+ 'PFIN-F', to_regclass('public.fin_approvals') IS NOT NULL AND to_regclass('public.refund_payout_confirmations') IS NOT NULL,
+ 'PDISC-A', to_regprocedure('public.fin_discount_authorize(public.sales,bigint,boolean)') IS NOT NULL,
+ 'PNET-A', EXISTS (SELECT 1 FROM pg_event_trigger e WHERE e.evtname = 'zz_orvix_net_lockdown' AND e.evtenabled <> 'D'
+                   AND e.evtfoid = to_regprocedure('orvix_netguard.lockdown_event()'))
+            AND coalesce((SELECT r.rolsuper FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner WHERE n.nspname = 'orvix_netguard'), false),
  'RECOVERY_V1', to_regnamespace('recovery_v1') IS NOT NULL,
  'adapter_087', CASE WHEN NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner WHERE c.oid = to_regclass('recovery_v1.adapter_087') AND c.relkind = 'r' AND r.rolsuper) THEN NULL
                      ELSE {dyn("SELECT count(*) AS v FROM recovery_v1.adapter_087")} END,
@@ -182,7 +187,8 @@ SELECT jsonb_build_object(
 
 
 STEP_FACT = {"086": "has_086", "087": "has_087", "PSAFE-A": "PSAFE-A", "PFIN-A": "PFIN-A", "PFIN-B": "PFIN-B",
-             "PCOST-A": "PCOST-A", "PFIN-C": "PFIN-C", "PFIN-D": "PFIN-D", "PFIN-E": "PFIN-E", "RECOVERY_V1": "RECOVERY_V1"}
+             "PCOST-A": "PCOST-A", "PFIN-C": "PFIN-C", "PFIN-D": "PFIN-D", "PFIN-E": "PFIN-E",
+             "PFIN-F": "PFIN-F", "PDISC-A": "PDISC-A", "PNET-A": "PNET-A", "RECOVERY_V1": "RECOVERY_V1"}
 
 
 def plan(a):

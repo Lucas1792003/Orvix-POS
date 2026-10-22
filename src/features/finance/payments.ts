@@ -72,3 +72,13 @@ export function cashPartOf(sale: { paymentMethod: string; totalMmk: number; paym
   if (sale.payments && sale.payments.length > 0) return sale.payments.filter((p) => p.method === "CASH").reduce((s, p) => s + p.amountMmk, 0);
   return sale.paymentMethod === "CASH" ? sale.totalMmk : 0;
 }
+
+/**
+ * Step 6 (PFIN-F, f10): one payment by one method. Cash may be received above the total (the change); a non-cash
+ * payment (OTHER) is recorded for EXACTLY the amount due — no change is ever given from a non-cash payment (the server
+ * refuses it with FIN_NON_CASH_CHANGE).
+ */
+export function singlePayment(method: "CASH" | "OTHER", receivedMmk: number, totalMmk: number): { paidMmk: number; changeMmk: number; ok: boolean } {
+  if (method !== "CASH") return { paidMmk: totalMmk, changeMmk: 0, ok: true };
+  return { paidMmk: receivedMmk, changeMmk: Math.max(0, receivedMmk - totalMmk), ok: receivedMmk >= totalMmk };
+}

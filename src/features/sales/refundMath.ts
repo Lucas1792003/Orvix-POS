@@ -267,3 +267,125 @@ export function refundRequestExcessMmk(
   }
   return Math.max(excess, total - state.remainingTotalMmk, 0);
 }
+
+// ----------------------------------------------------------------------
+// Step 6 (PFIN-F): split-payment refunds. The server's fin_refund_plan gives the default amount of every chosen line
+// and the default payout by the ORIGINAL methods; the request is built from it. Pure: the server checks everything.
+// ----------------------------------------------------------------------
+
+/** What fin_refund_plan reports per original payment method. */
+export interface RefundMethodState { method: string; paidMmk: number; attributedRefundedMmk: number }
+
+/**
+ * The server's default payout of a refund of `amountMmk` by the original methods (PFIN-F fin_refund_default_payouts,
+ * D1): the cumulative refunded amount after this refund is shared in proportion to what each method paid (floor),
+ * minus what that method already got back, within what it has left; the rounding leftover goes to the methods with
+ * the largest remainders (then method name). Sorted by method; null when it cannot be allocated (more than what is
+ * left, or no payment lines). Used for an ADJUSTED refund total (the plan's own defaultPayouts cover the default total).
+ */
+export function defaultRefundPayouts(methods: readonly RefundMethodState[], amountMmk: number): RefundPayout[] | null {
+  if (amountMmk <= 0) return [];
+  const total = methods.reduce((s, m) => s + BigInt(m.paidMmk), 0n);
+  if (total === 0n) return null;
+  const prior = methods.reduce((s, m) => s + BigInt(m.attributedRefundedMmk), 0n);
+  const target = prior + BigInt(amountMmk);
+  if (target > total) return null;
+  const rows = methods.map((m) => {
+    const paid = BigInt(m.paidMmk), pr = BigInt(m.attributedRefundedMmk);
+    const cap = paid - pr > 0n ? paid - pr : 0n;
+    const share = (paid * target) / total - pr;
+    const base = share < 0n ? 0n : share < paid - pr ? share : paid - pr;
+    return { method: m.method, cap, base: base < 0n ? 0n : base, rem: (paid * target) % total };
+  });
+  const byName = (a: { method: string }, b: { method: string }) => (a.method < b.method ? -1 : a.method > b.method ? 1 : 0);
+  let left = BigInt(amountMmk) - rows.reduce((s, r) => s + r.base, 0n);
+  // short (rounding): add to the largest remainders first (then method name), within what each method has left
+  for (const r of [...rows].sort((a, b) => (a.rem === b.rem ? byName(a, b) : a.rem > b.rem ? -1 : 1))) {
+    if (left <= 0n) break;
+    const room = r.cap - r.base;
+    const give = left < room ? left : room;
+    r.base += give;
+    left -= give;
+  }
+  // over (several methods already got back more than their share): take the excess back from the smallest remainders
+  // first (then method name), never below 0 — exactly PFIN-F's fin_refund_default_payouts (review 1, F1)
+  for (const r of [...rows].sort((a, b) => (a.rem === b.rem ? byName(a, b) : a.rem < b.rem ? -1 : 1))) {
+    if (left >= 0n) break;
+    const take = -left < r.base ? -left : r.base;
+    r.base -= take;
+    left += take;
+  }
+  if (left !== 0n) return null;
+  return rows.filter((r) => r.base > 0n).map((r) => ({ method: r.method, amountMmk: Number(r.base) })).sort(byName);
+}
+
+/**
+ * Spread a refund's payouts over its items deterministically: items in order, each filled from the methods in the
+ * given order; every item's payouts add up to its amount. null when the payouts do not add up to the items' total.
+ */
+export function distributePayouts(itemAmounts: readonly number[], payouts: readonly RefundPayout[]): RefundPayout[][] | null {
+  const need = itemAmounts.reduce((s, a) => s + a, 0);
+  const have = payouts.reduce((s, p) => s + p.amountMmk, 0);
+  if (need !== have || payouts.some((p) => !Number.isInteger(p.amountMmk) || p.amountMmk < 0)) return null;
+  const left = payouts.map((p) => ({ method: p.method, amountMmk: p.amountMmk }));
+  let j = 0;
+  return itemAmounts.map((amount) => {
+    const mine: RefundPayout[] = [];
+    let rest = amount;
+    while (rest > 0 && j < left.length) {
+      const take = Math.min(rest, left[j].amountMmk);
+      if (take > 0) {
+        const same = mine.find((p) => p.method === left[j].method);
+        if (same) same.amountMmk += take; else mine.push({ method: left[j].method, amountMmk: take });
+        left[j].amountMmk -= take;
+        rest -= take;
+      }
+      if (left[j].amountMmk === 0) j++;
+    }
+    return mine;
+  });
+}
+
+/** The selected lines, in request order (the order planRefundRequest and attachRefundLines use). */
+export function selectedRefundLines(state: RefundState, selection: Readonly<Record<string, number>>): { line: RefundLine; baseQty: number }[] {
+  const out: { line: RefundLine; baseQty: number }[] = [];
+  for (const line of state.lines) {
+    const units = Math.trunc(Number(selection[line.key] ?? 0));
+    if (!units || units < 0 || line.ambiguous || units > line.remainingSoldUnits) continue;
+    out.push({ line, baseQty: units * line.unitsPerItem });
+  }
+  return out;
+}
+
+/**
+ * PFIN-F: the request items from the server's plan. Every selected line must be a real sale line (sale_items id).
+ * `amounts[lineKey]`: the line's refund amount (the plan's default, or a manager-adjusted one); `payouts`: how the
+ * money goes back (null: none named — a single-method sale keeps the legacy rule). Each item carries its line; its
+ * payouts are distributed with distributePayouts.
+ */
+export function buildPlannedRefundItems(
+  state: RefundState, selection: Readonly<Record<string, number>>,
+  options: { amounts: Readonly<Record<string, number>>; noRestock: Readonly<Record<string, boolean>>; payouts: readonly RefundPayout[] | null },
+): { ok: true; items: DetailedRefundItem[] } | { ok: false; problem: "LINE_UNKNOWN" | "AMOUNT" | "PAYOUTS" } {
+  const chosen = selectedRefundLines(state, selection);
+  const amounts: number[] = [];
+  for (const { line } of chosen) {
+    if (line.key.includes("#")) return { ok: false, problem: "LINE_UNKNOWN" };
+    const a = options.amounts[line.key];
+    if (typeof a !== "number" || !Number.isInteger(a) || a < 0) return { ok: false, problem: "AMOUNT" };
+    amounts.push(a);
+  }
+  const spread = options.payouts ? distributePayouts(amounts, options.payouts) : null;
+  if (options.payouts && !spread) return { ok: false, problem: "PAYOUTS" };
+  return {
+    ok: true,
+    items: chosen.map(({ line, baseQty }, i) => {
+      const item: DetailedRefundItem = {
+        productId: line.productId, qtyUnits: baseQty, amountMmk: amounts[i],
+        lines: [{ saleItemId: line.key, qtyUnits: baseQty, amountMmk: amounts[i], restock: options.noRestock[line.key] !== true }],
+      };
+      if (spread && spread[i].length > 0) item.payouts = spread[i];
+      return item;
+    }),
+  };
+}

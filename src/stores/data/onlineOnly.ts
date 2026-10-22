@@ -132,7 +132,7 @@ const FRIENDLY: Record<string, string> = {
   create_supplier: "New supplier", void_supplier_payment: "Void supplier payment", approve_purchase_order: "Approve purchase order",
   cancel_purchase_order: "Cancel purchase order", approve_stock_transfer: "Approve transfer", reject_stock_transfer: "Reject transfer",
   cancel_stock_transfer: "Cancel transfer", approve_void_request: "Approve void", approve_refund_request: "Approve refund",
-  reject_refund_void_request: "Reject refund/void", create_refund_void_request: "Void request", delete_product: "Delete product",
+  reject_refund_void_request: "Reject refund/void", create_refund_void_request: "Refund/void request", delete_product: "Delete product",
   fin_record_cash_movement: "Cash movement",
   update_supplier: "Update supplier", update_app_user: "Update user", deactivate_app_user: "User status", replace_manager: "Replace manager",
 };

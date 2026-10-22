@@ -9,6 +9,7 @@ import {
   finCapabilities, knownFinCapabilities, MAX_PAYMENTS, planPayments, SPLIT_METHODS,
   type CanonicalPart, type PaymentProblem, type SplitMethod,
 } from "../../features/finance/finCompletion";
+import { singlePayment } from "../../features/finance/payments";
 
 interface PaymentModalProps {
   open: boolean;
@@ -44,9 +45,12 @@ export const PaymentModal = ({
   const [split, setSplit] = useState(false);
   const [rows, setRows] = useState<SplitRow[]>([]);
 
-  const paid = toNumber(paidInput);
-  const change = Math.max(0, paid - totalMmk);
-  const isUnderpaid = paid < totalMmk;
+  // Step 6 (PFIN-F, f10): a non-cash payment is recorded for exactly the amount due — never over-paid, no change
+  const single = singlePayment(method, toNumber(paidInput), totalMmk);
+  const paid = single.paidMmk;
+  const change = single.changeMmk;
+  const isUnderpaid = !single.ok;
+  const nonCash = method !== "CASH";
 
   const splitParts = useMemo(() => rows.map((r) => ({
     method: r.method,
@@ -57,7 +61,7 @@ export const PaymentModal = ({
   const splitPlan = useMemo(() => (split ? planPayments(splitParts, totalMmk) : null), [split, splitParts, totalMmk]);
   const allocated = splitParts.reduce((s, p) => s + p.amountMmk, 0);
 
-  const canConfirm = !loading && !validationError && (split ? splitPlan?.ok === true : paid >= totalMmk);
+  const canConfirm = !loading && !validationError && (split ? splitPlan?.ok === true : single.ok);
 
   const handleClose = () => {
     if (!loading) onClose();
@@ -181,7 +185,10 @@ export const PaymentModal = ({
                 inputMode="numeric"
                 autoComplete="off"
                 autoFocus
-                value={paidInput}
+                // f10: the amount of a non-cash payment is the amount due; it cannot be typed higher
+                value={nonCash ? String(totalMmk) : paidInput}
+                readOnly={nonCash}
+                aria-readonly={nonCash || undefined}
                 onChange={(event) => setPaidInput(normalizeAmountInput(event.target.value))}
                 onKeyDown={(event) => {
                   // Enter on the amount field is the natural "I'm done"
@@ -198,6 +205,7 @@ export const PaymentModal = ({
                 }}
                 className="text-base font-semibold"
               />
+              {nonCash ? <span className="mt-1 block text-xs text-slate-500">{t("fin6", "nonCashExact")}</span> : null}
             </label>
             {splitAvailable ? (
               <Button variant="secondary" onClick={startSplit} disabled={loading}>

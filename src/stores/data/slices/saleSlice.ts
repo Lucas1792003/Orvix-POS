@@ -13,6 +13,8 @@ import { rememberSaleOperation } from "../opJournal";
 import { assertStockKnown, serverStockRows } from "../stockLedger";
 import { assertOfflineWriteEligible, useAuthStore } from "../../authStore";
 import { stripLineCost, userMayViewCost } from "../costPrivacy";
+import { cartDiscountPolicy, tierReferencePrice } from "../../../features/pos/discountPolicy";
+import { hasPermission } from "../../../lib/permissions";
 
 // Shape returned by the complete_sale RPC (keys are already camelCase).
 interface CompleteSaleResult {
@@ -32,6 +34,16 @@ interface ApprovalResult {
   inventory: Inventory[];
   auditLogs: AuditLog[];
 }
+
+/** Step 6 (PDISC-A): a discount that needs an approval (or a sale naming one) is never recorded offline. */
+export const DISCOUNT_APPROVAL_OFFLINE_MESSAGE = "This discount needs approval and cannot be recorded offline; nothing was saved.";
+/** Step 6 (PDISC-A): such a sale is sent at once or not at all — never parked behind earlier queued entries. */
+export const DISCOUNT_APPROVAL_BACKLOG_MESSAGE =
+  "This sale has a discount that needs approval, and earlier entries on this till have not reached the server yet. Nothing was saved. "
+  + "Sync first, then ring it up again (an approval is used once and expires 30 minutes after it was given — ask again if it has expired).";
+
+/** Step 6 (PFIN-F): shown when a refund is attempted while this till is offline. */
+export const REFUND_OFFLINE_MESSAGE = "Refunds are recorded online only. Connect this till to the server and try again. Nothing was saved.";
 
 interface RequestResult {
   request: Refund;
@@ -356,7 +368,8 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
     // writeAhead.ts): a lost reply, a crash or a refused fallback can no
     // longer leave a committed sale without a durable record, and pressing
     // Confirm again while it is unresolved reuses it instead of a new key.
-    const op = beginOperation();
+    // Step 6 (PDISC-A): the approval rides on the OPERATION (every attempt of this key carries it), not in its arguments
+    const op: OperationContext = { ...beginOperation(), ...(input.discountApprovalId ? { discountApprovalId: input.discountApprovalId } : {}) };
     if (input.payments && input.payments.length > 0) {
       // the same rule the server applies (fin_complete_sale_split): refuse here, before anything is recorded
       const total = calculateCartTotals(input.cartItems, input.cartDiscountPct).total;
@@ -366,8 +379,18 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
         throw new Error("Payment split is not valid (method or amount received differs from the split).");
       }
     }
+    // Step 6 (PDISC-A): a sale naming an approval, or whose discount needs one (the seller's own limit, rule (a)), is
+    // SENT NOW or not at all: never staged, queued or recorded offline (refused before anything is saved or sent —
+    // whatever the server-capability probe said; online the server decides as before).
+    const seller = (get().users ?? []).find((u) => u.id === input.cashierId) ?? null;
+    const policy = cartDiscountPolicy(input.cartItems, input.cartDiscountPct, {
+      role: seller?.role ?? useAuthStore.getState().currentRole ?? null,
+      canApplyDiscount: seller ? hasPermission(seller, "pos:apply_discount") : false,
+    }, tierReferencePrice({ shopId: input.shopId, productUnits: get().productUnits, priceLevels: get().priceLevels, priceTiers: get().priceTiers }));
+    const approvalBound = Boolean(input.discountApprovalId) || policy.needsApproval;
     const saleId = await submitOfflineCapable({
       set, name: "complete_sale", shopId: input.shopId, op,
+      ...(approvalBound ? { mustSendNow: { offline: DISCOUNT_APPROVAL_OFFLINE_MESSAGE, backlog: DISCOUNT_APPROVAL_BACKLOG_MESSAGE } } : {}),
       // Step 4 (Part B): the value a sale recorded offline counts against the till's capability
       offlineAmountMmk: calculateCartTotals(input.cartItems, input.cartDiscountPct).total,
       args: buildCompleteSaleArgs(input, get, op),
@@ -442,14 +465,31 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
 
   requestVoid: async ({ saleId, reason, actorId }) => submitRequest(saleId, "VOID", reason, undefined, actorId),
 
-  requestRefund: async ({ saleId, items, reason, actorId }) => {
+  requestRefund: async ({ saleId, items, reason }) => {
     // Step 4 (PFIN-E): the line detail (sale line, restock) and the payouts travel with the item, verbatim
     const payload = items.map((item) => ({
       productId: item.productId, qtyUnits: item.qtyUnits, amountMmk: item.amountMmk,
       ...(item.lines?.length ? { lines: item.lines.map((l) => ({ saleItemId: l.saleItemId, qtyUnits: l.qtyUnits, amountMmk: l.amountMmk, restock: l.restock })) } : {}),
       ...(item.payouts?.length ? { payouts: item.payouts.map((p) => ({ method: p.method, amountMmk: p.amountMmk })) } : {}),
     }));
-    return submitRequest(saleId, "PARTIAL", reason, payload, actorId);
+    // Step 6 (PFIN-F): a refund request is recorded ONLINE ONLY (the server refuses one recorded offline with
+    // FIN_REFUND_OFFLINE). Never queued: refused here before anything is saved or sent.
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      throw new Error(REFUND_OFFLINE_MESSAGE);
+    }
+    const sale = get().sales.find((s) => s.id === saleId);
+    if (sale?.pendingSync) {
+      throw new Error("Refunds are recorded online only, and this sale has not reached the server yet. Let it sync first. Nothing was saved.");
+    }
+    // ONE operation (onlineOnly.ts): its key is minted and saved before the first request; a lost reply is kept
+    // unresolved under that key and only ever retried unchanged.
+    const op = beginOperation();
+    const { data, error } = await callOnlineOnly(
+      "create_refund_void_request", buildRequestArgs(saleId, "PARTIAL", reason, payload, op), { retries: ONLINE_ONLY_RETRIES },
+    );
+    if (error) throw error;
+    if (!data) throw new Error("Refund request returned no data.");
+    await applyRefundVoidRequest(data);
   },
 
   // Called by the outbox once a queued create_refund_void_request actually

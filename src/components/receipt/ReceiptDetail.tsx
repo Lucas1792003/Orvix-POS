@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuthStore } from "../../stores/authStore";
 import { useDataStore } from "../../stores/dataStore";
@@ -8,12 +8,19 @@ import { PageHeader } from "../layout/PageHeader";
 import { useToast } from "../ui/Toast";
 import { ReceiptPreview } from "../pos/ReceiptPreview";
 import { SaleVoucher } from "../sales/SaleVoucher";
-import { RefundModal } from "../sales/RefundModal";
+import { RefundModal, type SplitRefundView } from "../sales/RefundModal";
 import { VoidModal } from "../sales/VoidModal";
+import { ReasonDialog } from "../ui/ReasonDialog";
 import { attachRefundLines, buildRefundState, planRefundRequest } from "../../features/sales/service";
-import { fetchSalePayments, finCapabilities, type CanonicalPart, type FinCapabilities, NO_FIN_CAPABILITIES } from "../../features/finance/finCompletion";
-import { hasPermission } from "../../lib/permissions";
-import { formatDateTime } from "../../lib/utils";
+import { buildPlannedRefundItems, defaultRefundPayouts, selectedRefundLines, type RefundPayout } from "../../features/sales/refundMath";
+import {
+  confirmRefundPayout, fetchRefundPayoutState, fetchRefundPlan, fetchSalePayments, finCapabilities, finStep6Capabilities, SPLIT_METHODS,
+  type CanonicalPart, type FinCapabilities, type FinStep6Capabilities, type RefundPayoutState, type ServerRefundPlan,
+  NO_FIN_CAPABILITIES, NO_STEP6_CAPABILITIES,
+} from "../../features/finance/finCompletion";
+import type { FinResult } from "../../features/reports/finReports";
+import { hasPermission, hasShopPermission } from "../../lib/permissions";
+import { formatDateTime, formatMmk } from "../../lib/utils";
 import { printReceipt } from "../../lib/print";
 import { journalReceiptPrint } from "../../stores/data/opJournal";
 import { useTranslation } from "../../hooks/useTranslation";
@@ -85,6 +92,47 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
     return () => { live = false; };
   }, [saleId, saleKnownToServer]);
 
+  // Step 6 (PFIN-F): the server plans split-payment refunds and reports which payouts were actually paid
+  const [caps6, setCaps6] = useState<FinStep6Capabilities>(NO_STEP6_CAPABILITIES);
+  useEffect(() => {
+    let live = true;
+    void finStep6Capabilities().then((c) => { if (live) setCaps6(c); }).catch(() => undefined);
+    return () => { live = false; };
+  }, []);
+  const [planState, setPlanState] = useState<{ key: string; res: FinResult<ServerRefundPlan> } | null>(null);
+  const [altOn, setAltOn] = useState(false);
+  const [altAmounts, setAltAmounts] = useState<Record<string, string>>({});
+  const [adjustOn, setAdjustOn] = useState(false);
+  const [adjusted, setAdjusted] = useState<Record<string, string>>({});
+  const [payoutState, setPayoutState] = useState<FinResult<RefundPayoutState[]> | null>(null);
+  const [confirmingPayout, setConfirmingPayout] = useState<RefundPayoutState | null>(null);
+  const refundState = useMemo(() => (sale ? buildRefundState(sale, saleItems, refundsForSale) : null), [sale, saleItems, refundsForSale]);
+  const splitRefunds = caps.refundLines && caps6.splitRefunds && saleKnownToServer;
+  const chosenLines = useMemo(() => (refundState ? selectedRefundLines(refundState, refundSelection) : []), [refundState, refundSelection]);
+  const planLines = useMemo(
+    () => (chosenLines.every(({ line }) => !line.key.includes("#")) ? chosenLines.map(({ line, baseQty }) => ({ saleItemId: line.key, qtyUnits: baseQty })) : null),
+    [chosenLines],
+  );
+  const planKey = planLines ? JSON.stringify(planLines) : "";
+  useEffect(() => {
+    if (!refundOpen || !splitRefunds || !planLines || planLines.length === 0) return;
+    let live = true;
+    const timer = setTimeout(() => {
+      void fetchRefundPlan(saleId, planLines).then((res) => { if (live) setPlanState({ key: planKey, res }); });
+    }, 250);
+    return () => { live = false; clearTimeout(timer); };
+    // planKey stands for planLines
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refundOpen, splitRefunds, planKey, saleId]);
+  const refundStatusKey = refundsForSale.map((r) => `${r.id}:${r.status}`).join("|");
+  const loadPayouts = useCallback(() => {
+    if (!caps6.splitRefunds || !saleKnownToServer) { setPayoutState(null); return () => undefined; }
+    let live = true;
+    void fetchRefundPayoutState(saleId).then((res) => { if (live) setPayoutState(res); });
+    return () => { live = false; };
+  }, [caps6.splitRefunds, saleKnownToServer, saleId]);
+  useEffect(() => loadPayouts(), [loadPayouts, refundStatusKey]);
+
   if (!sale) {
     return (
       <div className="space-y-4">
@@ -138,7 +186,7 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
   // Refund state from the net amounts actually paid (refundMath.ts): what is
   // left to refund per line, and whether the sale is only partly refunded
   // (the server marks any refunded sale REFUNDED, ORV-030).
-  const refundState = buildRefundState(sale, saleItems, refundsForSale);
+  if (!refundState) return null;
   const refundPlan = planRefundRequest(refundState, refundSelection);
   const payments = sale.payments ?? serverPayments ?? undefined;
   const shownSale = payments && !sale.payments ? { ...sale, payments } : sale;
@@ -151,6 +199,56 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
     noRestock, onToggleRestock: (key: string, value: boolean) => setNoRestock((m) => ({ ...m, [key]: value })),
     payoutMethods, payoutMethod: effectivePayout, onChangePayout: (m: string) => setPayoutMethod(m),
   } : undefined;
+  // ---- Step 6 (PFIN-F): the refund as the server plans it
+  const methodLabel = (m: string) => PAYOUT_LABEL[m] ?? m;
+  const plan = splitRefunds && planLines && planState?.key === planKey && planState.res.status === "ok" ? planState.res.data : null;
+  const splitActive = !!lineDetail && splitRefunds && !!planLines && planLines.length > 0;
+  const defaultsByKey: Record<string, number> = {};
+  if (plan) for (const l of plan.lines) defaultsByKey[l.saleItemId] = l.defaultMmk;
+  const lineMax: Record<string, number> = Object.fromEntries(refundState.lines.map((l) => [l.key, Math.max(0, l.netMmk - l.claimedMmk)]));
+  const canPropose = plan?.canProposeExceptions === true;
+  const amountsByKey: Record<string, number> = {};
+  let amountProblem = false;
+  for (const { line } of chosenLines) {
+    const raw = canPropose && adjustOn ? adjusted[line.key] : undefined;
+    const typed = raw !== undefined && raw !== "";
+    const value = typed ? Number(raw) : defaultsByKey[line.key];
+    // the server's default is taken as is; a manager's amount is whole MMK, ≥ 0 and at most what is left on the line
+    if (value === undefined || !Number.isInteger(value) || value < 0 || (typed && value > (lineMax[line.key] ?? 0))) amountProblem = true;
+    amountsByKey[line.key] = value ?? 0;
+  }
+  const splitTotal = chosenLines.reduce((sum, { line }) => sum + (amountsByKey[line.key] ?? 0), 0);
+  const multiMethod = (payments?.length ?? 0) > 1 || (plan?.methods.length ?? 0) > 1;
+  const defaultPayoutsNow: RefundPayout[] | null = !plan ? null
+    : splitTotal === plan.totalMmk ? plan.defaultPayouts : defaultRefundPayouts(plan.methods, splitTotal);
+  const altMethods = SPLIT_METHODS.filter((m) => m === "CASH" || (payments ?? []).some((p) => p.method === m) || (plan?.methods ?? []).some((p) => p.method === m));
+  const altPayouts: RefundPayout[] = altMethods.map((m) => ({ method: m, amountMmk: Number(altAmounts[m] || 0) })).filter((p) => p.amountMmk > 0);
+  const altSum = altPayouts.reduce((sum, p) => sum + p.amountMmk, 0);
+  const payoutsToSend: RefundPayout[] | null = canPropose && altOn ? altPayouts : multiMethod ? defaultPayoutsNow : null;
+  const splitProblem = !plan ? null
+    : amountProblem ? t("fin6", "adjustInvalid")
+    : canPropose && altOn && altSum !== splitTotal ? t("fin6", "altPayoutMismatch", { sum: formatMmk(altSum), total: formatMmk(splitTotal) })
+    : multiMethod && !payoutsToSend && splitTotal > 0 ? t("fin6", "planUnavailable", { message: "no default payout" })
+    : null;
+  const splitView: SplitRefundView | undefined = splitActive ? {
+    status: plan ? "ok" : planState?.key === planKey && planState.res.status !== "ok" ? "error" : "loading",
+    message: planState?.key === planKey && planState.res.status !== "ok" ? planState.res.message : undefined,
+    defaults: defaultsByKey, lineMax,
+    defaultPayouts: multiMethod || (defaultPayoutsNow?.length ?? 0) > 0 ? defaultPayoutsNow : null,
+    methodLabel, canPropose,
+    altOn: canPropose && altOn,
+    onToggleAlt: (on) => {
+      setAltOn(on);
+      if (on) setAltAmounts(Object.fromEntries((defaultPayoutsNow ?? []).map((p) => [p.method, String(p.amountMmk)])));
+    },
+    altMethods, altAmounts, onChangeAlt: (m, v) => setAltAmounts((prev) => ({ ...prev, [m]: v })),
+    adjustOn: canPropose && adjustOn,
+    onToggleAdjust: (on) => { setAdjustOn(on); if (!on) setAdjusted({}); },
+    adjusted, onChangeAdjusted: (key, v) => setAdjusted((prev) => ({ ...prev, [key]: v })),
+    totalMmk: splitTotal, problem: splitProblem,
+  } : undefined;
+  const resetSplit = () => { setPlanState(null); setAltOn(false); setAltAmounts({}); setAdjustOn(false); setAdjusted({}); };
+
   const hasRefundableUnits = refundState.lines.some((line) => !line.ambiguous && line.remainingSoldUnits > 0);
   const statusNote = refundState.partiallyRefunded
     ? "PARTIALLY REFUNDED"
@@ -217,9 +315,19 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
   const handleRequestRefund = async () => {
     if (!currentUserId) return;
     if (refundPlan.items.length === 0 || refundPlan.errors.length > 0) return;
-    const items = lineDetail
+    let items = lineDetail
       ? attachRefundLines(refundState, refundSelection, refundPlan, { serverSale: true, noRestock, payoutMethod: effectivePayout })
       : refundPlan.items;
+    if (splitView) {
+      // Step 6 (PFIN-F): built from the server's plan (amounts and payouts the server will compare)
+      if (!plan || splitProblem) return;
+      const built = buildPlannedRefundItems(refundState, refundSelection, { amounts: amountsByKey, noRestock, payouts: payoutsToSend });
+      if (!built.ok) {
+        toast({ title: "Refund request failed", description: t("fin6", "adjustInvalid"), variant: "error" });
+        return;
+      }
+      items = built.items;
+    }
     try {
       await requestRefund({ saleId: sale.id, items, reason: refundReason || "No reason", actorId: currentUserId });
       setRefundOpen(false);
@@ -227,6 +335,7 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
       setRefundSelection({});
       setNoRestock({});
       setPayoutMethod(null);
+      resetSplit();
       toast({ title: "Refund request submitted", variant: "success" });
     } catch (error) {
       toast({
@@ -250,6 +359,30 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
       });
     }
   };
+
+  // Step 6 (PFIN-F): a non-cash payout is paid only once its transfer is confirmed (reference 1–120 characters)
+  const canConfirmPayouts = hasShopPermission(currentUser, "pos:refund", sale.shopId);
+  const handleConfirmPayout = async (reference: string) => {
+    const payout = confirmingPayout;
+    if (!payout) return;
+    const ref = reference.trim();
+    if (ref.length < 1 || ref.length > 120) {
+      toast({ title: t("fin6", "confirmFailed"), description: t("fin6", ref.length ? "referenceTooLong" : "referenceRequired"), variant: "error" });
+      throw new Error("invalid reference");   // keeps the dialog open with the typed reference
+    }
+    try {
+      await confirmRefundPayout(payout.id, ref);
+      toast({ title: t("fin6", "confirmDone"), variant: "success" });
+      loadPayouts();
+    } catch (error) {
+      toast({ title: t("fin6", "confirmFailed"), description: error instanceof Error ? error.message : String(error), variant: "error" });
+      throw error;
+    }
+  };
+  const payoutStatusText = (p: RefundPayoutState): string =>
+    p.status === "PAID" ? t("fin6", "payoutPaidCash")
+      : p.status === "CONFIRMED" ? t("fin6", "payoutConfirmed", { ref: p.reference ?? "" })
+      : t("fin6", "payoutPending");
 
   // Void: only an untouched sale (the server voids NORMAL sales only).
   // Refund: any non-void sale with units left and no refund already waiting.
@@ -374,6 +507,34 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
         </Card>
       )}
 
+      {payoutState && (payoutState.status !== "ok" || payoutState.data.length > 0) ? (
+        <Card>
+          <div className="text-sm font-medium text-slate-700">{t("fin6", "payoutsTitle")}</div>
+          {payoutState.status !== "ok" ? (
+            <div className="mt-2 text-xs text-amber-700">{t("fin6", "payoutsUnavailable")}</div>
+          ) : (
+            <div className="mt-3 space-y-2" data-testid="refund-payouts">
+              {payoutState.data.map((p) => (
+                <div key={p.id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                  <div className="min-w-0">
+                    <div className="font-medium">
+                      {methodLabel(p.method)} {formatMmk(p.amountMmk)}
+                      {p.alternative ? <span className="ml-1 text-xs text-slate-500">({t("fin6", "payoutAlternative")})</span> : null}
+                    </div>
+                    <div className={`text-xs ${p.status === "PENDING_CONFIRMATION" ? "text-amber-700" : "text-slate-500"}`}>
+                      {payoutStatusText(p)}{p.approvedAt ? ` · ${formatDateTime(p.approvedAt)}` : ""}
+                    </div>
+                  </div>
+                  {p.status === "PENDING_CONFIRMATION" && canConfirmPayouts ? (
+                    <Button variant="secondary" onClick={() => setConfirmingPayout(p)}>{t("fin6", "recordConfirmation")}</Button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      ) : null}
+
       {visibleApprovals.length > 0 && (
         <Card>
           <div className="text-sm font-medium text-slate-700">Pending approvals</div>
@@ -410,9 +571,22 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
         productNames={productNames}
         onChangeSelection={(lineKey, units) => setRefundSelection((prev) => ({ ...prev, [lineKey]: units }))}
         onChangeReason={setRefundReason}
-        onClose={() => setRefundOpen(false)}
+        onClose={() => { setRefundOpen(false); resetSplit(); }}
         onSubmit={() => void handleRequestRefund()}
         lineDetail={lineDetail}
+        splitRefund={splitView}
+      />
+
+      <ReasonDialog
+        open={confirmingPayout !== null}
+        title={t("fin6", "recordConfirmation")}
+        description={confirmingPayout ? `${methodLabel(confirmingPayout.method)} ${formatMmk(confirmingPayout.amountMmk)} — ${t("fin6", "confirmDesc")}` : undefined}
+        label={t("fin6", "referenceLabel")}
+        confirmLabel={t("fin6", "recordConfirmation")}
+        cancelLabel={t("fin6", "cancel")}
+        requiredMessage={t("fin6", "referenceRequired")}
+        onConfirm={handleConfirmPayout}
+        onClose={() => setConfirmingPayout(null)}
       />
     </div>
   );

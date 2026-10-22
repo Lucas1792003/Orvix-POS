@@ -35,13 +35,15 @@ test.afterAll(async () => {
   mkdirSync(OUT, { recursive: true });
   writeFileSync(path.join(OUT, "e2e-evidence.json"), JSON.stringify({ at: new Date().toISOString(), evidence }, null, 2));
   await T?.close().catch(() => undefined);
+  await A?.close().catch(() => undefined);
 });
 
+let lastAdminCode: string | undefined;   // a TOTP code is accepted once: never reuse the previous sign-in's code
 const sessionNotes: unknown[] = [];
 async function signInAs(t: Terminal, who: "cashier" | "manager" | "admin"): Promise<void> {
   if (await t.page.locator("aside.sidebar").isVisible().catch(() => false)) await t.logout();
   const at = new Date().toISOString();
-  if (who === "admin") { await t.loginAdminWithTotp(st.emails.admin, pw, qaTotpSecret()); await t.waitForApp(); await t.selectShop(SHOP()); }
+  if (who === "admin") { lastAdminCode = await t.loginAdminWithTotp(st.emails.admin, pw, qaTotpSecret(), lastAdminCode); await t.waitForApp(); await t.selectShop(SHOP()); }
   else { await t.signIn(who === "cashier" ? st.emails.cashA : st.emails.mgr, pw, "/app"); await t.waitForApp(); }
   // a fresh sign-in must not carry a "sign in again" flag; and whatever banner shows, the page keeps its width (layout fix)
   await t.page.waitForTimeout(3_000);
@@ -57,11 +59,56 @@ async function openPayment(t: Terminal): Promise<void> {
   await t.page.keyboard.press("F2");
   await t.page.getByLabel("Amount received").waitFor({ state: "visible" });
 }
+/** fill an in-app ReasonDialog (labelled field) and submit its form */
+async function reasonDialog(t: Terminal, label: RegExp, text: string): Promise<void> {
+  const f = t.page.getByLabel(label);
+  await f.fill(text);
+  const formId = await t.page.locator("form", { has: f }).getAttribute("id");
+  await t.page.locator(`button[type="submit"][form="${formId}"]`).click();
+}
+// Step 6 finalization: the Shop Admin's back office in a SECOND session (Chromium, web). An approval decision is not a
+// device-signed operation (it moves no money); the refund approval and the discounted sale that use it are, on the till.
+let A: Terminal | undefined;
+async function adminDecides(kind: RegExp, decision: "Approve" | "Reject", reason?: string): Promise<string> {
+  if (!A) {
+    rmSync(profile("s6b-admin"), { recursive: true, force: true });
+    A = await Terminal.launchPersistent(profile("s6b-admin"));
+    await A.goto("/app");
+  }
+  // leave and re-enter: navigating to the route the page is already on does not remount it
+  await A.navigate("/app");
+  // the back office may have been signed out meanwhile (the same admin signed in on the till): sign in again, as a person would
+  const signedOut = await Promise.race([
+    A.page.locator("aside.sidebar").waitFor({ state: "visible", timeout: 30_000 }).then(() => false),
+    A.page.locator('input[type="email"]').waitFor({ state: "visible", timeout: 30_000 }).then(() => true),
+  ]).catch(() => true);
+  if (signedOut) {
+    adminNotes.push({ at: new Date().toISOString(), backOfficeSignedOut: true });
+    lastAdminCode = await A.loginAdminWithTotp(st.emails.admin, pw, qaTotpSecret(), lastAdminCode);
+    await A.waitForApp();
+    await A.selectShop(SHOP());
+  }
+  await A.navigate("/app/approvals");
+  const card = A.page.getByTestId("exception-approvals").locator(":scope > div").filter({ hasText: kind }).first();
+  try { await card.waitFor({ timeout: 60_000 }); }
+  catch (e) {
+    note("adminDecides.not-found", { url: A.page.url(), kind: String(kind), signedOut, shot: await A.screenshot(`s6b-admin-${Date.now()}`).catch(() => "none") });
+    throw e;
+  }
+  await A.toastsNow();
+  await card.getByRole("button", { name: decision, exact: true }).click();
+  if (decision === "Reject") await reasonDialog(A, /Reason \(3/, reason ?? "Step 6: not justified");
+  return A.toast(/Decision recorded|Decision not recorded/, 60_000);
+}
+const adminNotes: unknown[] = [];
+const approvalRow = (id: string) => JSON.parse(sqlOne(`SELECT row_to_json(f)::text FROM public.fin_approvals f WHERE id='${id}';`));
 
 // =====================================================================================================================
 test("W00 complete local system: financial provisionals applied BEFORE Recovery V1; V1 installed; a till enrolled by the owner; the organization reopened by an owner-signed authorization", async () => {
   expect(sqlOne("SELECT to_regclass('public.sale_payments') IS NOT NULL AND to_regclass('public.cash_movements') IS NOT NULL AND to_regclass('public.refund_lines') IS NOT NULL AND to_regclass('public.product_costs') IS NOT NULL;")).toBe("t");
   expect(sqlOne("SELECT to_regclass('public.refund_net_paid_cap') IS NULL;")).toBe("t");      // PFIN-C held (P-6)
+  // Step 6 finalization provisionals: split refunds + approvals (PFIN-F), discount authorization (PDISC-A), pg_net lockdown (PNET-A)
+  expect(sqlOne("SELECT to_regclass('public.fin_approvals') IS NOT NULL AND to_regprocedure('public.fin_discount_authorize(public.sales,bigint,boolean)') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtname='zz_orvix_net_lockdown');")).toBe("t");
   // the owner's back office records each product's cost through PCOST-A's permitted path (the QA seed is loaded with triggers
   // off and bypasses it): costs live in product_costs, so every later sale snapshots its cost (sale_item_costs)
   sqlOne(`UPDATE public.products SET cost_mmk = CASE id WHEN '${st.ids.prod1}' THEN 600 WHEN '${st.ids.prod2}' THEN 1200 ELSE 1800 END
@@ -113,7 +160,7 @@ test("W00 complete local system: financial provisionals applied BEFORE Recovery 
   expect(rep.blockers).toEqual([]);
   expect(reopen(owner, ORG(), rep, "verified").outcome).toBe("reopened");
   expect(sqlOne(`SELECT state || '/' || coalesce(recovery_v1.activation_problem('${ORG()}'), 'verified') FROM recovery_v1.org_state WHERE org_id='${ORG()}';`)).toBe("ACTIVE/verified");
-  note("W00", { enrollmentId: r.enrollmentId, provisionals: "PSAFE-A,PFIN-A,PFIN-B,PCOST-A,PFIN-D,PFIN-E", pfinC: "held" });
+  note("W00", { enrollmentId: r.enrollmentId, provisionals: "PSAFE-A,PFIN-A,PFIN-B,PCOST-A,PFIN-D,PFIN-E,PFIN-F,PDISC-A,PNET-A", pfinC: "held" });
 });
 
 test("W01 cashier: (shift opened with a float in W00) product search by name and by barcode; a single CASH payment with change — sale, payment row, stock movement and device signature in the database", async () => {
@@ -167,10 +214,32 @@ test("W02 split payment: cash + mobile wallet for one sale — one sale, two pay
   note("W02", { receipt: s.receipt_no, payments: 2 });
 });
 
-test("W03 cart discount: 10% off is applied by the server and stored (no per-role limit or approval exists — recorded as a product fact)", async () => {
+test("W03 discount authorization (owner decision E): a cashier's 10% is blocked at the till and on the server until a Shop Admin in another session approves it; the approved sale uses the approval once; a manager's own 5% needs none, 5.01% does", async () => {
   await T.gotoPos();
+  await T.posClearCart();
   await T.posAddByCard(P2); await T.posAddByCard(P2);        // 4000
+  const before = n(`SELECT count(*) FROM public.sales WHERE shop_id='${SHOP()}';`);
   await T.page.locator("div", { hasText: /^Discount %/ }).locator("input").last().fill("10");
+  const notice = T.page.getByTestId("discount-approval");
+  await expect(notice).toContainText("needs approval by a Shop Admin");
+  await expect(T.page.getByRole("button", { name: "Place Order (F2)" })).toBeDisabled();
+  await T.toastsNow();
+  await T.page.keyboard.press("F2");                          // the keyboard path is blocked too
+  await T.toast(/Checkout blocked/, 30_000);
+  expect(n(`SELECT count(*) FROM public.sales WHERE shop_id='${SHOP()}';`)).toBe(before);
+  // the cashier asks; the request records amount, %, reference price, reason, requester
+  await T.toastsNow();
+  await notice.getByRole("button", { name: "Request approval" }).click();
+  await reasonDialog(T, /Reason \(3/, "Step 6: regular customer, damaged box");
+  await T.toast(/Approval requested/, 60_000);
+  const aid = sqlOne(`SELECT id FROM public.fin_approvals WHERE kind='DISCOUNT' AND requested_by='${st.ids.cashA}' ORDER BY requested_at DESC LIMIT 1;`);
+  const req = approvalRow(aid);
+  expect([req.status, req.details.referenceSubtotalMmk, req.details.discountMmk, Number(req.details.pct)]).toEqual(["REQUESTED", 4000, 400, 10]);
+  await expect(notice).toContainText("waiting for a decision");
+  await expect(T.page.getByRole("button", { name: "Place Order (F2)" })).toBeDisabled();
+  // the Shop Admin decides in the back office (a second session); the cashier's till sees it and unblocks
+  expect(await adminDecides(/Discount/, "Approve")).toMatch(/Decision recorded/);
+  await expect(notice).toContainText("Discount approved", { timeout: 30_000 });
   await openPayment(T);
   await T.page.getByLabel("Amount received").fill("3600");
   await T.toastsNow();
@@ -179,7 +248,30 @@ test("W03 cart discount: 10% off is applied by the server and stored (no per-rol
   const s = lastSale();
   sales.discount = s.id;
   expect([Number(s.cart_discount_pct), s.discount_mmk, s.total_mmk]).toEqual([10, 400, 3600]);
-  note("W03", { discountMmk: s.discount_mmk, total: s.total_mmk });
+  const used = approvalRow(aid);
+  expect([used.status, used.decided_by, used.consumed_sale_id]).toEqual(["APPROVED", st.ids.admin, s.id]);
+  expect(used.decided_by).not.toBe(used.requested_by);
+  note("W03", { discountMmk: s.discount_mmk, total: s.total_mmk, approval: aid, decidedBy: used.decided_by, decidedAt: used.decided_at });
+});
+
+test("W03b manager discounts at the till: up to and including 5% on their own (no approval notice), 5.01% needs a Shop Admin; a till that is offline cannot use an approval-needing discount", async () => {
+  await signInAs(T, "manager");
+  await T.gotoPos();
+  await T.posClearCart();
+  // 10,000 MMK: 5.01% is 501 MMK (> 500 = 5%); on a smaller cart 5.01% can round to exactly 5%, which needs no approval
+  for (let k = 0; k < 5; k++) await T.posAddByCard(P2);       // 5 x 2,000
+  const disc = T.page.locator("div", { hasText: /^Discount %/ }).locator("input").last();
+  await disc.fill("5");
+  await expect(T.page.getByTestId("discount-approval")).toHaveCount(0);
+  await disc.fill("5.01");
+  await expect(T.page.getByTestId("discount-approval")).toContainText("needs approval by a Shop Admin");
+  await T.setOffline(true);
+  await expect(T.page.getByTestId("discount-approval")).toContainText("not available offline", { timeout: 30_000 });
+  await expect(T.page.getByRole("button", { name: "Place Order (F2)" })).toBeDisabled();
+  await T.setOffline(false);
+  await T.posClearCart();
+  note("W03b", { manager5: "no approval", manager501: "Shop Admin", offline: "blocked" });
+  await signInAs(T, "cashier");
 });
 
 test("W04 offline sale under the owner-signed offline policy, restart while offline with the sale queued, reconnect: synced exactly once with its original key", async () => {
@@ -247,30 +339,8 @@ test("W05 partial refund (one of two units) requested by the cashier, approved b
   note("W05", { request: req, refundLines: sqlOne(`SELECT count(*) FROM public.refund_lines WHERE request_id='${req}';`) });
 });
 
-test("W05b refunds of a SPLIT-paid sale: a manager cannot approve their own request; the refund asks how the money goes back, and a payout larger than what was paid that way is refused (the UI offers ONE payout method per refund)", async () => {
-  // the manager requests a refund of one unit of the cash sale from W01 ...
+test("W05b self-approval: a manager's own refund request is never theirs to decide (UI and server); another approver rejects it with a reason and nothing is paid", async () => {
   await signInAs(T, "manager");
-  // ... and the split sale (W02: 1,000 cash + 2,000 mobile wallet for one 3,000 item): the payout selector appears
-  await T.navigate(`/app/sales/${sales.split}`);
-  await T.page.getByRole("button", { name: "Request refund" }).click();
-  const line = JSON.parse(sqlOne(`SELECT json_build_object('id', id)::text FROM public.sale_items WHERE sale_id='${sales.split}' LIMIT 1;`));
-  await T.page.getByTestId(`refund-line-${line.id}`).getByRole("spinbutton").fill("1");
-  const payout = T.page.getByLabel("Refund paid back as");
-  await expect(payout).toBeVisible();
-  const methods = await payout.locator("option").allInnerTexts();
-  await payout.selectOption({ index: 2 });                      // one method for the whole 3,000 (first option is the placeholder)
-  await T.page.getByPlaceholder("Reason").fill("Step 6: split sale refund");
-  await T.toastsNow();
-  await T.page.getByRole("button", { name: /^Submit MMK/ }).click();
-  const answer = await T.toast(/Refund request submitted|Refund request failed/, 60_000);
-  await T.page.keyboard.press("Escape").catch(() => undefined);
-  const lines = n(`SELECT count(*) FROM public.refund_lines WHERE sale_id='${sales.split}';`);
-  const payouts = n(`SELECT count(*) FROM public.refund_payouts WHERE sale_id='${sales.split}';`);
-  const splitRequests = n(`SELECT count(*) FROM public.refund_void_requests WHERE sale_id='${sales.split}';`);
-  // fail closed: the single-method payout of the whole 3,000 is refused (each method took less) — and the UI cannot split it
-  expect(answer).toMatch(/failed/i); expect(answer).toMatch(/exceeds what the customer paid/);
-  expect([lines, payouts, splitRequests]).toEqual([0, 0, 0]);
-
   // self-approval: a manager's own refund request is never theirs to decide (UI and server); another approver decides it
   await T.navigate(`/app/sales/${sales.offline}`);
   await T.page.getByRole("button", { name: "Request refund" }).click();
@@ -292,7 +362,7 @@ test("W05b refunds of a SPLIT-paid sale: a manager cannot approve their own requ
   await T.toast(/Request rejected/, 60_000);
   expect(sqlOne(`SELECT status FROM public.refund_void_requests WHERE id='${own}';`)).toBe("REJECTED");
   expect(n(`SELECT count(*) FROM public.refund_lines WHERE request_id='${own}';`)).toBe(0);
-  note("W05b", { splitRefund: answer.slice(0, 200), payoutChoices: methods, ownRequest: own, ownRequestDecidedBy: "admin (rejected)" });
+  note("W05b", { ownRequest: own, ownRequestDecidedBy: "admin (rejected)" });
   await signInAs(T, "cashier");
 });
 
@@ -435,4 +505,167 @@ test("W11 close shift with a cash discrepancy: refused without a reason, closed 
   const s = JSON.parse(sqlOne(`SELECT row_to_json(x)::text FROM (SELECT expected_cash_mmk, closing_cash_mmk, variance_mmk, variance_reason, ended_at IS NOT NULL AS closed FROM public.shifts WHERE id='${shiftId}') x;`));
   expect(s).toMatchObject({ expected_cash_mmk: expected, closing_cash_mmk: counted, variance_mmk: -700, variance_reason: "Step 6: 700 short, under review", closed: true });
   note("W11", s);
+});
+
+// =====================================================================================================================
+// Step 6 FINALIZATION (owner decisions D1-D3, E): split-payment refunds, alternative payouts, adjusted refund prices,
+// online-only refunds. A fresh shift after W11, so the reconciliation figures above stay as they were.
+let shift2 = "";
+const expectedCash = (shift: string) => n(`SELECT (public.fin_shift_cash('${shift}')->>'expectedCashMmk')::int;`);
+const payoutsOf = (req: string) => sqlOne(`SELECT coalesce(string_agg(method || ':' || amount_mmk, ',' ORDER BY method), '') FROM public.refund_payouts WHERE request_id='${req}';`);
+const lastRequest = (sale: string) => sqlOne(`SELECT id FROM public.refund_void_requests WHERE sale_id='${sale}' ORDER BY created_at DESC LIMIT 1;`);
+async function splitSale(items: string[], pays: { method: string; amount: number }[]): Promise<string> {
+  await T.gotoPos();
+  await T.posClearCart();
+  for (const it of items) await T.posAddByCard(it);
+  await openPayment(T);
+  await T.page.getByRole("button", { name: "Split across payment methods" }).click();
+  const split = T.page.getByTestId("split-payment");
+  await split.getByLabel("Payment method").nth(0).selectOption(pays[0].method);
+  await split.getByLabel("Payment method").nth(1).selectOption(pays[1].method);
+  await split.getByLabel("Amount (MMK)").nth(0).fill(String(pays[0].amount));
+  await split.getByLabel("Amount (MMK)").nth(1).fill(String(pays[1].amount));
+  await T.toastsNow();
+  await T.page.getByRole("button", { name: "Confirm payment" }).click();
+  await T.toast(/Sale recorded/, 60_000);
+  return lastSale().id;
+}
+async function openRefund(saleId: string, qty: number): Promise<string> {
+  await T.navigate(`/app/sales/${saleId}`);
+  await T.page.getByRole("button", { name: "Request refund" }).click();
+  const line = sqlOne(`SELECT id FROM public.sale_items WHERE sale_id='${saleId}' ORDER BY id LIMIT 1;`);
+  await T.page.getByTestId(`refund-line-${line}`).getByRole("spinbutton").fill(String(qty));
+  return line;
+}
+async function submitRefund(reason: string): Promise<string> {
+  await T.page.getByPlaceholder("Reason").fill(reason);
+  await T.toastsNow();
+  await T.page.getByRole("button", { name: /^Submit MMK/ }).click();
+  return T.toast(/Refund request submitted|Refund request failed|online only/, 60_000);
+}
+async function approveOnTill(who: "manager" | "admin", requestId: string): Promise<string> {
+  await signInAs(T, who);
+  await T.navigate("/app/approvals");
+  const reason = sqlOne(`SELECT reason FROM public.refund_void_requests WHERE id='${requestId}';`);
+  const card = T.page.locator("div", { hasText: reason }).filter({ has: T.page.getByRole("button", { name: "Approve" }) }).last();
+  await T.toastsNow();
+  await card.getByRole("button", { name: "Approve" }).first().click();
+  return T.toast(/Approval completed|Approval failed/, 60_000);
+}
+
+test("W12 PARTIAL then FULL refund of a split sale (D1): the default payout follows the original methods (cash 3,600 + bank 2,400), only cash leaves the drawer, and the bank payout is not paid until its transfer is confirmed", async () => {
+  await signInAs(T, "cashier");
+  await T.gotoPos();
+  await T.openShift(20000);
+  shift2 = sqlOne(`SELECT id FROM public.shifts WHERE shop_id='${SHOP()}' AND cashier_id='${st.ids.cashA}' AND ended_at IS NULL;`);
+  const sale = await splitSale([P3, P3], [{ method: "CASH", amount: 3600 }, { method: "BANK_TRANSFER", amount: 2400 }]);   // 6000
+  expect(sqlOne(`SELECT string_agg(method || ':' || amount_mmk, ',' ORDER BY method) FROM public.sale_payments WHERE sale_id='${sale}';`)).toBe("BANK_TRANSFER:2400,CASH:3600");
+  const exp0 = expectedCash(shift2);
+  // partial: one of two units (3,000) -> default 1,800 cash + 1,200 bank, shown before anything is sent
+  await openRefund(sale, 1);
+  await expect(T.page.getByTestId("refund-default-payouts")).toContainText("1,800", { timeout: 30_000 });
+  await expect(T.page.getByTestId("refund-default-payouts")).toContainText("1,200");
+  await expect(T.page.getByRole("checkbox", { name: /Pay back differently/ })).toHaveCount(0);   // a cashier is never offered exceptions
+  expect(await submitRefund("Step 6F: one unit returned")).toMatch(/Refund request submitted/);
+  const r1 = lastRequest(sale);
+  expect(await approveOnTill("manager", r1)).toMatch(/Approval completed/);
+  expect(payoutsOf(r1)).toBe("BANK_TRANSFER:1200,CASH:1800");
+  expect(exp0 - expectedCash(shift2)).toBe(1800);
+  // the receipt shows the bank payout as NOT paid out; the manager records the transfer reference
+  await T.navigate(`/app/sales/${sale}`);
+  const payouts = T.page.getByTestId("refund-payouts");
+  await expect(payouts).toContainText("Transfer not yet confirmed — not paid out", { timeout: 30_000 });
+  await T.toastsNow();
+  await payouts.getByRole("button", { name: "Record transfer confirmation" }).click();
+  await reasonDialog(T, /Transfer reference/, "TRX-W12-1");
+  await T.toast(/Transfer confirmation recorded/, 60_000);
+  await expect(payouts).toContainText("Paid (ref TRX-W12-1)", { timeout: 30_000 });
+  expect(n(`SELECT count(*) FROM public.refund_payout_confirmations c JOIN public.refund_payouts p ON p.id = c.payout_id WHERE p.request_id='${r1}';`)).toBe(1);
+  // full: the remaining unit -> exactly what is left per method
+  await signInAs(T, "cashier");
+  await openRefund(sale, 1);
+  await expect(T.page.getByTestId("refund-default-payouts")).toContainText("1,800", { timeout: 30_000 });
+  expect(await submitRefund("Step 6F: second unit returned")).toMatch(/Refund request submitted/);
+  const r2 = lastRequest(sale);
+  expect(await approveOnTill("manager", r2)).toMatch(/Approval completed/);
+  expect(sqlOne(`SELECT string_agg(method || ':' || s, ',' ORDER BY method) FROM (SELECT method, sum(amount_mmk) s FROM public.refund_payouts WHERE sale_id='${sale}' GROUP BY 1) x;`)).toBe("BANK_TRANSFER:2400,CASH:3600");
+  expect(exp0 - expectedCash(shift2)).toBe(3600);
+  note("W12", { sale, partial: payoutsOf(r1), full: payoutsOf(r2), drawerOut: exp0 - expectedCash(shift2) });
+});
+
+test("W13 alternative payout (D2): a manager proposes paying a cash + wallet sale back all in cash; a Shop Admin in another session approves it; the refund is then approved on the till by someone else; original and approved payouts recorded", async () => {
+  await signInAs(T, "cashier");
+  const sale = await splitSale([P3], [{ method: "CASH", amount: 1000 }, { method: "MOBILE_WALLET", amount: 2000 }]);  // 3000
+  const exp0 = expectedCash(shift2);
+  await signInAs(T, "manager");
+  await openRefund(sale, 1);
+  await T.page.getByRole("checkbox", { name: /Pay back differently/ }).check();
+  // the per-method amount inputs (the checkbox's own label starts with the same words)
+  const alt = T.page.getByRole("textbox", { name: /^Pay back differently — / });
+  for (let i = 0; i < await alt.count(); i++) await alt.nth(i).fill("0");
+  await T.page.getByRole("textbox", { name: /^Pay back differently — Cash$/ }).fill("3000");
+  expect(await submitRefund("Step 6F: customer has no wallet any more")).toMatch(/Refund request submitted/);
+  const r = lastRequest(sale);
+  const a = JSON.parse(sqlOne(`SELECT row_to_json(f)::text FROM public.fin_approvals f WHERE subject_id='${r}' AND kind='REFUND_ALT_PAYOUT';`));
+  expect([a.status, a.details.original, a.details.proposed, a.requested_by]).toEqual(["REQUESTED",
+    [{ method: "CASH", amountMmk: 1000 }, { method: "MOBILE_WALLET", amountMmk: 2000 }], [{ method: "CASH", amountMmk: 3000 }], st.ids.mgr]);
+  await T.navigate("/app/approvals");
+  await expect(T.page.getByText("Waiting for Shop Admin decision: alternative payout").first()).toBeVisible({ timeout: 30_000 });
+  expect(await adminDecides(/Refund paid back differently/, "Approve")).toMatch(/Decision recorded/);
+  expect(await approveOnTill("admin", r)).toMatch(/Approval completed/);
+  expect(payoutsOf(r)).toBe("CASH:3000");
+  expect(exp0 - expectedCash(shift2)).toBe(3000);
+  expect(sqlOne(`SELECT string_agg(method || ':' || a, ',' ORDER BY method) FROM public.fin_refund_prior_methods('${sale}', NULL);`)).toBe("CASH:1000,MOBILE_WALLET:2000");
+  const d = JSON.parse(sqlOne(`SELECT row_to_json(f)::text FROM public.fin_approvals f WHERE id='${a.id}';`));
+  expect([d.status, d.decided_by]).toEqual(["APPROVED", st.ids.admin]);
+  note("W13", { request: r, original: a.details.original, approvedPayout: payoutsOf(r), requester: a.requested_by, approver: d.decided_by, decidedAt: d.decided_at });
+});
+
+test("W14 manager-adjusted refund price (P-2): 800 instead of the paid 1,000 needs a Shop Admin approval before the refund can be approved", async () => {
+  await signInAs(T, "cashier");
+  await T.gotoPos(); await T.posClearCart();
+  await T.posAddByCard(P1);
+  await T.posCheckout(1000);
+  const sale = lastSale().id;
+  await signInAs(T, "manager");
+  await openRefund(sale, 1);
+  await expect(T.page.getByTestId("split-refund")).toBeVisible({ timeout: 30_000 });
+  await T.page.getByRole("checkbox", { name: /Adjust refund amount/ }).check();
+  await T.page.getByRole("textbox", { name: new RegExp(`^Adjust refund amount — ${P1}$`) }).fill("800");
+  expect(await submitRefund("Step 6F: box opened, partial credit")).toMatch(/Refund request submitted/);
+  const r = lastRequest(sale);
+  const a = JSON.parse(sqlOne(`SELECT row_to_json(f)::text FROM public.fin_approvals f WHERE subject_id='${r}' AND kind='REFUND_PRICE_ADJUST';`));
+  expect(a.details.lines.map((l: any) => [l.defaultMmk, l.proposedMmk])).toEqual([[1000, 800]]);
+  expect(await adminDecides(/Refund amount adjusted/, "Approve")).toMatch(/Decision recorded/);
+  expect(await approveOnTill("admin", r)).toMatch(/Approval completed/);
+  expect(sqlOne(`SELECT sum(amount_mmk) FROM public.refund_lines WHERE request_id='${r}';`)).toBe("800");
+  note("W14", { request: r, default: 1000, approved: 800 });
+});
+
+test("W15 refunds are online only (nothing queued offline) and a cashier cannot give a 100% discount on their own", async () => {
+  await signInAs(T, "cashier");
+  const sale = lastSale().id;
+  const before = n(`SELECT count(*) FROM public.refund_void_requests;`);
+  await T.navigate(`/app/sales/${sale}`);
+  await T.setOffline(true);
+  const btn = T.page.getByRole("button", { name: "Request refund" });
+  let offline = "button disabled";
+  if (await btn.isEnabled().catch(() => false)) {
+    await btn.click();
+    const line = sqlOne(`SELECT id FROM public.sale_items WHERE sale_id='${sale}' ORDER BY id LIMIT 1;`);
+    await T.page.getByTestId(`refund-line-${line}`).getByRole("spinbutton").fill("1").catch(() => undefined);
+    offline = await submitRefund("Step 6F: offline attempt");
+    await T.page.keyboard.press("Escape").catch(() => undefined);
+    expect(offline).toMatch(/online only|failed/i);
+  }
+  expect((await T.outbox()).filter((e) => e.name === "create_refund_void_request")).toEqual([]);
+  await T.setOffline(false);
+  expect(n(`SELECT count(*) FROM public.refund_void_requests;`)).toBe(before);
+  await T.gotoPos(); await T.posClearCart();
+  await T.posAddByCard(P1);
+  await T.page.locator("div", { hasText: /^Discount %/ }).locator("input").last().fill("100");
+  await expect(T.page.getByTestId("discount-approval")).toContainText("needs approval by a Shop Admin");
+  await expect(T.page.getByRole("button", { name: "Place Order (F2)" })).toBeDisabled();
+  await T.posClearCart();
+  note("W15", { offlineRefund: offline.slice(0, 120), cashier100: "blocked" });
 });

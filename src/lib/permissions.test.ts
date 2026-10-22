@@ -460,7 +460,8 @@ describe("SQL / TypeScript role-default sync", () => {
   // contract after supplier-debt permissions were added.
   it("each role has the documented number of default permissions", () => {
     expect(getRolePermissions("ADMIN")).toHaveLength(ALL_PERMISSIONS.length);
-    expect(getRolePermissions("ADMIN").length).toBe(56);
+    // 56 + fin:approve_exception (Shop Admin, provisional PFIN-F: role_default_permissions ADMIN gains it there).
+    expect(getRolePermissions("ADMIN").length).toBe(57);
     // 38 + purchase:approve + transfer:cancel (migration 057).
     expect(getRolePermissions("MANAGER")).toHaveLength(40);
     expect(getRolePermissions("CASHIER")).toHaveLength(10);

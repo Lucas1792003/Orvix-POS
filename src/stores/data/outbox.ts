@@ -39,7 +39,7 @@ setRecoveryOrgSource(() => useAuthStore.getState().currentOrgId ?? null);
 
 type EnqueueInput = Pick<
   SyncOutboxEntry,
-  "kind" | "name" | "args" | "shopId" | "provisional" | "refs" | "table" | "op" | "row" | "id" | "idempotencyKey" | "opEpoch" | "offlineAuth"
+  "kind" | "name" | "args" | "shopId" | "provisional" | "refs" | "table" | "op" | "row" | "id" | "idempotencyKey" | "opEpoch" | "offlineAuth" | "discountApprovalId"
 >;
 
 // Queue position, assigned inside the enqueue transaction. `createdAt` has
@@ -934,6 +934,13 @@ async function runDrainPass(): Promise<DrainResult> {
   }
   const legacyHeld = await classifyLegacyQueue();
   if (legacyHeld > 0) console.warn(`[sync] ${legacyHeld} older unconfirmed entr${legacyHeld === 1 ? "y is" : "ies are"} held for confirmation (never resent).`);
+  // Step 6 (PFIN-F): refund requests an older build queued offline are held for an owner at once (wherever they are in
+  // the queue), never sent. One whose outcome is unknown (fenceRequired) is left to the lookup, which never resends it.
+  for (const entry of await localDb.syncOutbox.where("status").anyOf("pending", "failed").toArray()) {
+    if (isLegacyOfflineRefund(entry) && entry.fenceRequired !== true) {
+      await holdForOwnerReview(entry, "REFUND_OFFLINE_LEGACY", LEGACY_OFFLINE_REFUND_TEXT);
+    }
+  }
   await pruneProvisionalIdMap();
   // Never send an entry to a backend other than the one it was queued for
   // (main.tsx does this at startup too; repeated here so the drain does not
@@ -1153,6 +1160,15 @@ async function runDrainPass(): Promise<DrainResult> {
       if (resolved === "next") continue;
       return resolved;
     }
+    // Step 6 (PFIN-F): a refund request is recorded ONLINE ONLY. This build never queues one (requestRefund goes
+    // through onlineOnly.ts), so a queued PARTIAL create_refund_void_request was saved offline by an OLDER build: it
+    // is never sent (it would look like a refund made online now) — held for an owner's review with its key and
+    // arguments. A VOID request stays offline-capable and is sent as before. An attempt whose outcome is unknown was
+    // settled by the lookup above (never resent).
+    if (isLegacyOfflineRefund(entry)) {
+      await holdForOwnerReview(entry, "REFUND_OFFLINE_LEGACY", LEGACY_OFFLINE_REFUND_TEXT);
+      continue;
+    }
     // An operation is sent only in its creator's session (the server
     // enforces it too): drained by someone else, it waits for them.
     if (entry.kind === "rpc") {
@@ -1175,7 +1191,8 @@ async function runDrainPass(): Promise<DrainResult> {
 
     let outcome: RpcOutcome = entry.kind === "table_write"
       ? await runTableWrite(entry.table!, entry.op!, entry.row, entry.id!, entry.opEpoch ?? null)
-      : await callRpc(entry.name, resolvedArgs ?? {}, { actorId: actorOf(entry), opEpoch: entry.opEpoch ?? null, offlineAuth: entry.offlineAuth ?? null });
+      : await callRpc(entry.name, resolvedArgs ?? {}, { actorId: actorOf(entry), opEpoch: entry.opEpoch ?? null, offlineAuth: entry.offlineAuth ?? null,
+          discountApprovalId: entry.discountApprovalId ?? null });
     if (entry.kind === "rpc" && outcome.via) {
       await localDb.syncOutbox.update(entry.localId, { protocol: outcome.via });
     }
@@ -1449,6 +1466,16 @@ const awaitsReconciliation = (e: SyncOutboxEntry): boolean =>
   // 087 owner review: never resent automatically, whatever its time (an owner acts: retry, set aside, reconcile)
   (e.heldReason === OWNER_REVIEW && !e.serverOutcome)
   || (e.heldReason === "reconciliation-required" && !e.serverOutcome && Boolean(e.nextAttemptAt) && Date.parse(e.nextAttemptAt!) > Date.now());
+
+/** Step 6 (PFIN-F): shown on a refund request an older build saved offline (held, never sent). */
+export const LEGACY_OFFLINE_REFUND_TEXT =
+  "Refunds are recorded online only: this request was saved offline by an older version — check it and create it again online. "
+  + "It was not sent; it keeps its original key and waits for an owner's review (Sync).";
+
+/** A queued refund (PARTIAL) request: only an older build queued one (this build records refunds online only). */
+export const isLegacyOfflineRefund = (entry: SyncOutboxEntry): boolean =>
+  entry.kind === "rpc" && entry.name === "create_refund_void_request" && entry.args?.p_type === "PARTIAL"
+  && !entry.serverOutcome && entry.heldReason !== OWNER_REVIEW;
 
 /** 087: an operation the server will not run under its own epoch (created
  *  before the current one, or without one): it waits for an owner — 088 /

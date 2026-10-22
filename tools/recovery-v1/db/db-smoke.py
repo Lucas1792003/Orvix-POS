@@ -10,6 +10,7 @@ def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--schema',type=pathlib.Path,default=ROOT/'tools/recovery-v1/db/fixtures/schema-061.scrubbed.sql'); ap.add_argument('--stage',type=int,choices=[85,86],default=85)
     ap.add_argument('--financial',action='store_true',help='Apply existing PFIN-A/B, PCOST-A and PSAFE-A before recovery v1; never held PFIN-C')
     ap.add_argument('--with-087',action='store_true',help='Stage 86 only: install the real 087 BEFORE recovery v1 and test the 087 adapter (adoption, held/open composition, refusals)')
+    ap.add_argument('--step6f',choices=['full','none'],default='full',help='With --financial: apply the Step 6 finalization provisionals PFIN-F, PDISC-A, PNET-A (full, default) or not (none: the pre-finalization schema the Script 2 suites were written for)')
     ap.add_argument('--with-pfin-c',action='store_true',help='With --financial: also apply the HELD PFIN-C refund cap (migrations-provisional/held) before recovery v1')
     ap.add_argument('--m087-runner',choices=['supabase_admin','postgres'],default='supabase_admin',help='With --with-087: the superuser session that runs 087 (the pinned fingerprint must not depend on it)')
     ap.add_argument('--hold-084',action='store_true',help='Leave 084 unapplied, as on the real server (schema 085 with 084 held)')
@@ -104,6 +105,9 @@ def main():
             file(ROOT/'tools/recovery-v1/db/psafe-regression.sql','psafe-regression.log')
             if args.with_pfin_c:
                 file(ROOT/'supabase/migrations-provisional/held/PFIN-C_refund_net_paid_cap.sql','financial-PFIN-C.log',transaction=True)
+            # Step 6 finalization (owner decisions): split refunds + approvals, discount authorization, pg_net lockdown
+            for name in (['PFIN-F_split_refunds.sql','PDISC-A_discount_authorization.sql','PNET-A_pg_net_lockdown.sql'] if args.step6f=='full' else []):
+                file(ROOT/'supabase/migrations-provisional'/name,'financial-'+name+'.log',transaction=True)
         if args.phase_d_regression:
             # Normal-operation regression: do the existing business suites still pass with V1 installed
             # and every organization ACTIVE (synthetic superuser fixture), compared with no V1 at all?

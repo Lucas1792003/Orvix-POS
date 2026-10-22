@@ -22,7 +22,7 @@ case "$PHF_ISO_URL" in http://127.0.0.1:*) ;; *) echo "REFUSE: not loopback"; ex
 q() { docker exec -i phf-iso-db psql -X -U supabase_admin -d postgres -v ON_ERROR_STOP=1 -At "$@"; }
 q -c "alter table supabase_migrations.schema_migrations add column if not exists statements text[], add column if not exists name text" > /dev/null
 ( cd "$ROOT" && APPLY_MIGRATIONS_TEST_CONTAINER=phf-iso-db bash deploy/lucashome/apply-migrations.sh --from 086 --to 086 ) > "$OUT/stack/apply-086.log" 2>&1 || { echo "086 failed"; exit 1; }
-for f in PSAFE-A_no_086_rerun_after_087 PFIN-A_report_indexes PFIN-B_financial_reports PCOST-A_cost_privacy PFIN-D_payments_cash PFIN-E_refund_lines; do
+for f in PSAFE-A_no_086_rerun_after_087 PFIN-A_report_indexes PFIN-B_financial_reports PCOST-A_cost_privacy PFIN-D_payments_cash PFIN-E_refund_lines PFIN-F_split_refunds PDISC-A_discount_authorization PNET-A_pg_net_lockdown; do
   q --single-transaction -f - < "$ROOT/supabase/migrations-provisional/$f.sql" > "$OUT/stack/$f.log" 2>&1 || { echo "$f failed"; tail -5 "$OUT/stack/$f.log"; exit 1; }
 done
 echo "financial provisionals applied: $(q -c "select string_agg(x, ',') from (values (to_regclass('public.sale_payments')::text), (to_regclass('public.cash_movements')::text), (to_regclass('public.refund_lines')::text), (to_regclass('public.product_costs')::text)) v(x)")" > "$OUT/stack/financial.txt"

@@ -410,7 +410,28 @@ test("M-PO a single purchase-order payment whose reply is lost is never 'failed'
     await T.page.route(RPC("op_status"), (route: Route) => route.abort("failed"));
     await T.page.route(RPC("record_supplier_payment"), (route: Route) => route.abort("failed"));
     await T.page.getByRole("button", { name: "Purchase Orders" }).click();
-    await T.page.getByRole("button", { name: "Record payment" }).first().click();
+    // Step 6 finalization (M-PO flake): the page lists POs in store order, which can change after the lost-reply payment;
+    // always open THIS purchase order's card (by its order number), never "the first" one
+    const orderNo = runSql(`SELECT order_no FROM purchase_orders WHERE id = '${pos[0]}';`).trim();
+    // this PO's own button: climbing from a "Record payment" button, the first ancestor that shows this order number holds
+    // no other "Record payment" button (the order number can also appear outside the cards)
+    const recordPaymentOfThisPo = async () => {
+      const idx = await T.page.evaluate((no) => {
+        const isRp = (b: Element) => (b.textContent ?? "").trim() === "Record payment";
+        const btns = [...document.querySelectorAll("button")].filter(isRp);
+        return btns.findIndex((b) => {
+          for (let el = b.parentElement; el; el = el.parentElement) {
+            const n = [...el.querySelectorAll("button")].filter(isRp).length;
+            if ((el.textContent ?? "").includes(no)) return n === 1;
+            if (n > 1) return false;
+          }
+          return false;
+        });
+      }, orderNo);
+      expect(idx, `the Record payment button of ${orderNo}`).toBeGreaterThanOrEqual(0);
+      await T.page.getByRole("button", { name: "Record payment" }).nth(idx).click();
+    };
+    await recordPaymentOfThisPo();
     const poDlg = T.page.locator(".fixed.inset-0.z-50");
     const amt = poDlg.locator('input[inputmode="numeric"]').first();
     for (let i = 0; i < 5; i++) { await amt.fill("800"); await T.page.waitForTimeout(400); if ((await amt.inputValue()).replace(/[^\d]/g, "") === "800") break; }
@@ -422,7 +443,7 @@ test("M-PO a single purchase-order payment whose reply is lost is never 'failed'
     expect(payments(sup)).toBe("1:800");
     expect(ledger(key)).toBe("committed/");
     // re-opened: this PO's payment is blocked while the earlier one is in doubt
-    await T.page.getByRole("button", { name: "Record payment" }).first().click();
+    await recordPaymentOfThisPo();
     await expect(T.page.getByTestId("po-payment-unknown")).toBeVisible({ timeout: 20_000 });
     await expect(poDlg.getByRole("button", { name: "Record payment" })).toBeDisabled();
     await T.page.keyboard.press("Escape");

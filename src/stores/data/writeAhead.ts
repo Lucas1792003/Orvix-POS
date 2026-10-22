@@ -14,6 +14,7 @@ import { getJournalRecord, journalReplacement } from "./opJournal";
 import { assertOfflineQueueAllowed, gateNewOperation, recoveryRefusalError } from "./recoveryGate";
 import { RecoveryBlockedError, noteAuthorizationLost, offlineFinancialBlockedError, offlineFinancialOpsBlocked } from "./recoveryState";
 import type { LocalRowBatch } from "./localWrites";
+import { useConnectivityStore } from "../connectivityStore";
 import {
   askAboutUnresolved, PendingConfirmationError, SessionEndedError, UnresolvedOperationError, type UnresolvedOperationInfo,
 } from "./operationPrompt";
@@ -24,6 +25,16 @@ class HeldOnRecoveryServer extends Error {
 }
 
 export { PendingConfirmationError } from "./operationPrompt";
+
+/** Step 6 (PDISC-A): an operation that may only be SENT NOW (never staged, queued or recorded offline) and could not be.
+ *  Nothing was saved or sent. */
+export class MustSendNowError extends Error {
+  constructor(message: string) { super(message); this.name = "MustSendNowError"; }
+}
+
+/** The till is offline by any account (the browser, or the connectivity store the UI shows). */
+const tillOffline = (): boolean =>
+  (typeof navigator !== "undefined" && navigator.onLine === false) || useConnectivityStore.getState().isOnline === false;
 
 /** A sync-layer warning shown with the queue status (non-fatal). */
 const syncWarning = (message: string): void => {
@@ -129,6 +140,10 @@ export interface OfflineCapableSpec<T> {
   stage: (stage: Stage) => Promise<T>;
   /** Step 4: the value this operation counts against an offline capability (a sale's total). */
   offlineAmountMmk?: number;
+  /** Step 6 (PDISC-A): the operation is sent NOW or not at all — never staged, queued behind earlier work or recorded
+   *  offline (a discount that needs an approval; a sale naming a single-use, expiring approval). The messages say why
+   *  it was refused; nothing is saved or sent when it is. */
+  mustSendNow?: { offline: string; backlog: string };
 }
 
 /** Operations a person may legitimately repeat with identical arguments. */
@@ -247,7 +262,14 @@ export const describeEntry = (entry: SyncOutboxEntry): UnresolvedOperationInfo =
 export async function submitOfflineCapable<T>(spec: OfflineCapableSpec<T>): Promise<T> {
   // 087: nothing is saved or sent unless the till may create a financial
   // operation now (verified epoch, not in recovery mode) — online or offline.
-  await gateNewOperation(spec.op, { name: spec.name, amountMmk: spec.offlineAmountMmk });
+  const mustSend = spec.mustSendNow;
+  // Step 6 (PDISC-A): refused BEFORE the gate (which could reserve an offline authorization) and before anything is saved
+  if (mustSend && tillOffline()) throw new MustSendNowError(mustSend.offline);
+  await gateNewOperation(spec.op, {
+    name: spec.name, amountMmk: spec.offlineAmountMmk,
+    ...(mustSend ? { refuseOffline: () => new MustSendNowError(mustSend.offline) } : {}),
+  });
+  if (mustSend && spec.op.offlineAuth) throw new MustSendNowError(mustSend.offline);
   const args = deepFreeze(stampOperationArgs(spec.name, spec.args, spec.op.idempotencyKey));
   const intent = intentOf(spec.name, args);
   const running = inFlightByIntent.get(intent);
@@ -358,6 +380,8 @@ async function stageAndCommit<T>(
   // v87.x, at the shared staging layer too: an OFFLINE staging is refused on an 087 server whoever asks for it
   // ("in-doubt" staging stays: an attempt that may have committed, shown as pending confirmation, same key)
   if (mode === "offline") assertOfflineQueueAllowed("This till is offline.", spec.op.offlineAuth);
+  // Step 6 (PDISC-A), the last line of defence: an operation that must be sent now is never staged offline
+  if (mode === "offline" && spec.mustSendNow) throw new MustSendNowError(spec.mustSendNow.offline);
   const stage = new Stage(mode, ownId);
   const result = await spec.stage(stage);
   if (!stage.entry) throw new Error(`${spec.name}: the offline path staged no outbox entry.`);
@@ -381,6 +405,14 @@ async function run<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>
     throw new RecoveryBlockedError("hold", "AWAITING_OWNER_REVIEW",
       `Operation awaiting owner review: ${review.length} earlier ${review.length === 1 ? "operation on this till waits" : "operations on this till wait"} for the owner's review after a server recovery, and this one may depend on ${review.length === 1 ? "it" : "them"}. Nothing was saved or sent. Ask the owner to review the Sync page.`);
   }
+  // Step 6 (PDISC-A): sent now or not at all — refused before anything is staged when it would be recorded offline
+  // or wait behind earlier entries of this till (the approval is single-use and expires; the queue may take longer).
+  if (spec.mustSendNow) {
+    if (offline || spec.op.offlineAuth || tillOffline()) throw new MustSendNowError(spec.mustSendNow.offline);
+    if (spec.needsProvisionalRefs || (await blockingEarlierWork({ kind: "rpc", name: spec.name, args, shopId: spec.shopId, actorId: currentActorId() })).length) {
+      throw new MustSendNowError(spec.mustSendNow.backlog);
+    }
+  }
   // Step 4: authorized under an offline capability = the server could not be reached when it was created: it is
   // recorded LOCALLY (pending, its key and capability reference) and sent by the queue — never presented as accepted.
   if (offline || spec.needsProvisionalRefs || spec.op.offlineAuth) {
@@ -389,7 +421,7 @@ async function run<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>
       ? "It depends on an entry that has not reached the server yet (e.g. a shift opened offline) — let that finish first (Sync)."
       : "This till is offline.", spec.op.offlineAuth);
     return stageAndCommit(spec, "offline", (entry) => ({
-      put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey, opEpoch: spec.op.opEpoch, offlineAuth: spec.op.offlineAuth ?? null }, { staged: true }),
+      put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey, opEpoch: spec.op.opEpoch, offlineAuth: spec.op.offlineAuth ?? null, discountApprovalId: spec.op.discountApprovalId ?? null }, { staged: true }),
     }));
   }
   // An online operation never overtakes an unsent entry of this till that it
@@ -403,7 +435,7 @@ async function run<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>
     let result: T;
     try {
       result = await stageAndCommit(spec, "offline", (entry) => ({
-        put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey, opEpoch: spec.op.opEpoch, offlineAuth: spec.op.offlineAuth ?? null }, { staged: true }),
+        put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey, opEpoch: spec.op.opEpoch, offlineAuth: spec.op.offlineAuth ?? null, discountApprovalId: spec.op.discountApprovalId ?? null }, { staged: true }),
       }));
     } catch (err) {
       throw new Error(`Not sent: earlier entries on this till have not reached the server yet, and this cannot be queued behind them (${
@@ -418,7 +450,7 @@ async function run<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>
   //    window's recovery can pick the row up while it is being sent.
   const sentAt = new Date().toISOString();
   const row = buildOutboxRow(
-    { kind: "rpc", name: spec.name, args, idempotencyKey: spec.op.idempotencyKey, shopId: spec.shopId, opEpoch: spec.op.opEpoch, offlineAuth: spec.op.offlineAuth ?? null },
+    { kind: "rpc", name: spec.name, args, idempotencyKey: spec.op.idempotencyKey, shopId: spec.shopId, opEpoch: spec.op.opEpoch, offlineAuth: spec.op.offlineAuth ?? null, discountApprovalId: spec.op.discountApprovalId ?? null },
     { status: "syncing", writeAhead: true, syncingSince: sentAt, sentAt },
   );
   await markWriteAheadInFlight(row.localId);
@@ -444,7 +476,7 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
   // session's screen or mirror.
   const sentBy = currentActorId();
   // 2. One attempt, bounded; the reply must have the expected shape.
-  const outcome = await callRpc(spec.name, args, { opEpoch: spec.op.opEpoch, offlineAuth: spec.op.offlineAuth ?? null });
+  const outcome = await callRpc(spec.name, args, { opEpoch: spec.op.opEpoch, offlineAuth: spec.op.offlineAuth ?? null, discountApprovalId: spec.op.discountApprovalId ?? null });
   let error: RpcError | null = outcome.error;
   if (!error && outcome.responseUnavailable) {
     // Committed on the server, but this till cannot read the reply (086
@@ -525,6 +557,11 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
     nextAttemptAt: failure.retryAfterMs ? new Date(Date.now() + failure.retryAfterMs).toISOString() : undefined,
   });
 
+  if (!failure.mayHaveCommitted && spec.mustSendNow) {
+    // Step 6 (PDISC-A): definitely not applied, and never turned into an offline operation: the attempt is discarded
+    await discardWriteAhead(localId, "must-send-now", { code: error.code ?? null, message: error.message });
+    throw new MustSendNowError(`The server could not be reached. ${spec.mustSendNow.offline}`);
+  }
   if (!failure.mayHaveCommitted) {
     // v87.x: definitely not applied, and on an 087 server it is NOT turned into an offline operation: the attempt is
     // discarded (nothing ran on the server, nothing stays queued) and the cashier is told it was not recorded.

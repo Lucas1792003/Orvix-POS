@@ -35,7 +35,7 @@ let lastAskAt = 0;
 export function resetRecoveryGateForTests(): void { lastAskAt = 0; }
 
 export async function gateNewOperation(op: { opEpoch: string | null; offlineAuth?: OfflineAuth | null },
-  intent?: { name: string; amountMmk?: number }): Promise<void> {
+  intent?: { name: string; amountMmk?: number; refuseOffline?: () => Error }): Promise<void> {
   // the durable state as it is NOW (another window may have entered a hold; another organisation may be signed in)
   const org = useAuthStore.getState().currentOrgId ?? null;
   const shop = useAppStore.getState().currentShopId ?? null;
@@ -52,6 +52,8 @@ export async function gateNewOperation(op: { opEpoch: string | null; offlineAuth
     // the local capability was not withdrawn yet — e.g. a crash between saving the answer and the withdrawal)
     const last = await recoveryV1View(org).catch(() => null);
     if (last?.status?.state !== "ACTIVE") throw error;
+    // Step 6 (PDISC-A): an operation that must never be recorded offline: refused before any authorization is reserved
+    if (intent.refuseOffline) throw intent.refuseOffline();
     try {
       op.offlineAuth = await authorizeOfflineOperation({ orgId: org, shopId: shop, userId: user, rpc: intent.name, amountMmk: intent.amountMmk ?? 0 });
     } catch (offline) {

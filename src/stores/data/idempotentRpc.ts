@@ -116,7 +116,13 @@ export interface OperationContext {
   /** Recovery V1 Step 4: set ONLY when the operation was recorded while disconnected under a server-issued offline
    *  capability (gateNewOperation). Sent with every attempt as the x-orvix-offline header; never changed afterwards. */
   offlineAuth?: OfflineAuth | null;
+  /** Step 6 (PDISC-A): the APPROVED discount approval this sale uses. Sent as the x-orvix-discount-approval header on
+   *  every attempt of THIS operation (complete_sale only); never inside its hashed arguments, never replaced. */
+  discountApprovalId?: string | null;
 }
+
+/** Step 6 (PDISC-A): names the discount approval a sale uses (complete_sale only; see SendContext). */
+export const DISCOUNT_APPROVAL_HEADER = "x-orvix-discount-approval";
 
 export function beginOperation(name?: string): OperationContext {
   return { idempotencyKey: name ? idempotencyKeyFor(name) : newIdempotencyKey(), createdAt: new Date().toISOString(), opEpoch: currentOpEpoch() };
@@ -407,8 +413,12 @@ export function fromExecutorReply(rpc: string, data: unknown, status?: number): 
 //    list to that one sale; the reply shape is exactly that route's reply;
 //  - an operation recorded offline under a capability carries the x-orvix-offline header on every attempt.
 // ----------------------------------------------------------------------
-export interface SendContext { payments: unknown[] | null; offlineAuth: OfflineAuth | null; /** Step 5: x-orvix-device (signed by this till) */ deviceHeader?: string | null }
-const NO_SEND: SendContext = { payments: null, offlineAuth: null, deviceHeader: null };
+export interface SendContext {
+  payments: unknown[] | null; offlineAuth: OfflineAuth | null; /** Step 5: x-orvix-device (signed by this till) */ deviceHeader?: string | null;
+  /** Step 6 (PDISC-A): x-orvix-discount-approval for this one sale (complete_sale only). */
+  discountApprovalId?: string | null;
+}
+const NO_SEND: SendContext = { payments: null, offlineAuth: null, deviceHeader: null, discountApprovalId: null };
 export const SPLIT_RPC = "fin_complete_sale_split";
 type Builder = PromiseLike<RawResponse> & { setHeader?: (name: string, value: string) => unknown };
 function rpcRequest(fn: string, params: Record<string, unknown>, send: SendContext): PromiseLike<RawResponse> {
@@ -438,6 +448,14 @@ function rpcRequest(fn: string, params: Record<string, unknown>, send: SendConte
         "DEVICE_HEADER_UNSUPPORTED: this client cannot attach its device signature; not sent [device_header_unsupported]" } } as unknown as RawResponse);
     }
     builder = builder.setHeader(DEVICE_HEADER, send.deviceHeader) as Builder;
+  }
+  if (send.discountApprovalId) {
+    // Step 6 (PDISC-A): without the header the server refuses the sale (DISCOUNT_APPROVAL_REQUIRED, nothing saved)
+    if (typeof builder.setHeader !== "function") {
+      return Promise.resolve({ data: null, status: 0, error: { code: "PT503", message:
+        "DISCOUNT_APPROVAL_HEADER_UNSUPPORTED: this client cannot attach the discount approval; not sent" } } as unknown as RawResponse);
+    }
+    builder = builder.setHeader(DISCOUNT_APPROVAL_HEADER, send.discountApprovalId) as Builder;
   }
   return builder;
 }
@@ -645,12 +663,14 @@ interface CallOptions {
   opEpoch?: string | null;
   /** Step 4: the operation was recorded offline under this capability (sent as x-orvix-offline; never replaced). */
   offlineAuth?: OfflineAuth | null;
+  /** Step 6 (PDISC-A): the discount approval of THIS sale (x-orvix-discount-approval; complete_sale only). */
+  discountApprovalId?: string | null;
 }
 
 /** One attempt: through the executor when the server has it, else direct.
  *  Each supabase-js builder is created and awaited exactly once. */
 async function attempt(name: string, args: Record<string, unknown>, timeoutMs: number, actorId: string | null, opEpoch?: string | null,
-  offlineAuth?: OfflineAuth | null): Promise<RpcOutcome> {
+  offlineAuth?: OfflineAuth | null, discountApprovalId?: string | null): Promise<RpcOutcome> {
   // Final common financial boundary, including automatic retries. No signed
   // identity is regenerated and no old operation is given a replacement key.
   let deviceHeader: string | null = null;
@@ -686,7 +706,9 @@ async function attempt(name: string, args: Record<string, unknown>, timeoutMs: n
   // Step 4: a split payment travels beside the sale's own (hashed) arguments, never inside them
   const payments = name === "complete_sale" && Array.isArray(args.p_payments) ? (args.p_payments as unknown[]) : null;
   if (payments) { const { p_payments: _drop, ...rest } = args; void _drop; args = rest; }
-  const send: SendContext = { payments, offlineAuth: offlineAuth ?? null, deviceHeader };
+  // Step 6 (PDISC-A): the discount approval header belongs to a sale only — never attached to any other operation
+  const send: SendContext = { payments, offlineAuth: offlineAuth ?? null, deviceHeader,
+    discountApprovalId: name === "complete_sale" ? discountApprovalId ?? null : null };
   // 087 backend: executor RPCs only through op_execute_v87 (legacy paths are closed there)
   // (an operation that carries an epoch was created against an 087 server: always the v87 path)
   if (EXECUTOR_RPCS.has(name) && (v87Routing() || opEpoch)) return viaExecutor87(name, args, timeoutMs, actorId, opEpoch, send);
@@ -724,7 +746,7 @@ export async function callRpc(
   // Same rule as the queue (stampOperationArgs): every in-scope caller mints
   // the key up front; the actor is stamped exactly as a queued replay is.
   args = stampOperationArgs(name, args);
-  let outcome = await attempt(name, args, timeoutMs, actorId, options.opEpoch, options.offlineAuth);
+  let outcome = await attempt(name, args, timeoutMs, actorId, options.opEpoch, options.offlineAuth, options.discountApprovalId);
   // An attempt whose outcome is unknown (timeout, lost reply) stays unknown
   // until the SERVER answers for this key: a later attempt that never
   // reached the operation (401, edge block, network, another session…) does
@@ -734,7 +756,7 @@ export async function callRpc(
   for (let n = 0; n < retries && outcome.error?.transient && outcome.error.failure.klass !== "RECOVERY"; n++) {
     if (typeof navigator !== "undefined" && navigator.onLine === false) break;
     await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[Math.min(n, RETRY_DELAYS_MS.length - 1)]));
-    outcome = await attempt(name, args, timeoutMs, actorId, options.opEpoch, options.offlineAuth);
+    outcome = await attempt(name, args, timeoutMs, actorId, options.opEpoch, options.offlineAuth, options.discountApprovalId);
     if (outcome.error?.failure.mayHaveCommitted) uncertain = true;
   }
   if (uncertain) outcome = keepUnknown(outcome);

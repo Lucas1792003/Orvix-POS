@@ -161,6 +161,72 @@
       ]
     },
     {
+      "id": "PFIN-F",
+      "kind": "provisional",
+      "file": "supabase/migrations-provisional/PFIN-F_split_refunds.sql",
+      "sha256": "6693ecd10cec464c9d0de668403f55533bc9133a31248be614bd0a6cbb92ae79",
+      "rollback": "supabase/migrations-provisional/PFIN-F.rollback.sql",
+      "status": "provisional; local implementation only (Step 6 finalization, owner decisions D1-D3 of 2026-10-22)",
+      "requires": [
+        "PFIN-E"
+      ],
+      "apply": "psql --single-transaction -f FILE as the superuser runner (re-registers 087 guards when 087 is present)",
+      "never_after": [
+        "RECOVERY_V1"
+      ],
+      "gates": [
+        "coordinator assigns a number",
+        "ROLLOUT (review 4, HIGH-2): every till upgraded to a build of this tree AND its outbox drained to zero BEFORE applying: entries queued by older builds (discounted sales, refund requests without lines/payouts) would be refused permanently after it and block that till's queue until an owner sets them aside",
+        "owner confirms the Shop Admin interpretation: permission fin:approve_exception for the shop, or an organization ADMIN",
+        "every till on a build of this tree before it is applied: a refund of a split sale must carry sale lines and payouts (FIN_REFUND_DETAIL_REQUIRED), refunds are online only (FIN_REFUND_OFFLINE), a legacy refund item of a product on several sale lines is refused (FIN_REFUND_LINES_REQUIRED)",
+        "owner process for confirming non-cash refund payouts (bank transfer reference) — a non-cash payout is not paid out until confirmed",
+        "P-3 unchanged: a cash refund is charged to the sale's shift. f125 checks the drawer the cash leaves: the sale's shift while it is open; once it is closed, a drawer open now in the shop (the approver's own, else the one holding the most cash), less what earlier closed-shift refunds drew from it (refund_cash_drawer). OWNER DECISION: such a drawer's own expected cash does not include those draws (P-3), so its close shows them as a shortfall unless P-3 is revisited"
+      ]
+    },
+    {
+      "id": "PDISC-A",
+      "kind": "provisional",
+      "file": "supabase/migrations-provisional/PDISC-A_discount_authorization.sql",
+      "sha256": "263f4edd48c6461c208522ce7db6451d40f44d61aebc2c58e2dcd3aa7eb23fb5",
+      "rollback": "supabase/migrations-provisional/PDISC-A.rollback.sql",
+      "status": "provisional; local implementation only (Step 6 finalization, owner decision E of 2026-10-22)",
+      "requires": [
+        "PFIN-F"
+      ],
+      "apply": "psql --single-transaction -f FILE as the superuser runner (re-registers 087 guards when 087 is present)",
+      "never_after": [
+        "RECOVERY_V1"
+      ],
+      "gates": [
+        "coordinator assigns a number",
+        "ROLLOUT (review 4, HIGH-2): every till upgraded to a build of this tree AND its outbox drained to zero BEFORE applying: entries queued by older builds (discounted sales, refund requests without lines/payouts) would be refused permanently after it and block that till's queue until an owner sets them aside",
+        "every till on a build of this tree: a cashier's discount and any discount above 5% need an approval named in x-orvix-discount-approval; older tills' discounted sales are refused (DISCOUNT_APPROVAL_REQUIRED, nothing saved)",
+        "staff told: approvals expire 30 minutes after they are given and are used for one sale"
+      ]
+    },
+    {
+      "id": "PNET-A",
+      "kind": "provisional",
+      "file": "supabase/migrations-provisional/PNET-A_pg_net_lockdown.sql",
+      "sha256": "92483bea44f82aa7e0dc30e4cffd5d0d0d7bd8aad41684be2ab24832c2e54970",
+      "rollback": "supabase/migrations-provisional/PNET-A.rollback.sql",
+      "status": "provisional; local implementation only (Step 6 finalization, owner decision F of 2026-10-22)",
+      "requires": [
+        "085|086"
+      ],
+      "apply": "psql --single-transaction -f FILE as the superuser runner (supabase_admin)",
+      "never_after": [
+        "RECOVERY_V1"
+      ],
+      "gates": [
+        "coordinator assigns a number",
+        "inventory the target's outgoing-HTTP users before applying (cron.job rows, supabase_functions.hooks, any role granted on schema net); only postgres and supabase_functions_admin keep request rights",
+        "after V1: supabase/migrations-provisional/PNET-A_post_v1_revoke.sql (GRANT/REVOKE only) through recovery_v1.apply_authorized_migration with an owner-signed authorization (tested: tools/recovery-v1/step6f/pnet_v1_post.py); the event trigger cannot be added after V1, so re-run it after any pg_net extension change",
+        "escape: an error inside the lockdown makes every CREATE/ALTER EXTENSION fail; a superuser may SET event_triggers = off for one session, then re-run orvix_netguard.lockdown_apply()",
+        "production check before applying: supabase_functions.http_request and any members of postgres / supabase_functions_admin (orvix_netguard.exposure_problems() lists them)"
+      ]
+    },
+    {
       "id": "087",
       "kind": "numbered",
       "file": "supabase/migrations/087_recovery_hold.sql",
@@ -203,7 +269,7 @@
       "id": "RECOVERY_V1",
       "kind": "provisional",
       "file": "supabase/migrations-provisional/RECOVERY_V1_guards.sql",
-      "sha256": "27677792eaeba38321004c4f71e24bcf2066d88d49b62d5aaa6af4853856aded",
+      "sha256": "78dae478e14b4b9faf028724910748292878e198cc03a41fe334b40b05cc49be",
       "status": "provisional; local implementation only",
       "requires": [
         "085|086"
@@ -216,7 +282,10 @@
         "PSAFE-A",
         "PFIN-C",
         "PFIN-D",
-        "PFIN-E"
+        "PFIN-E",
+        "PFIN-F",
+        "PDISC-A",
+        "PNET-A"
       ],
       "apply": "psql -X -v recovery_v1_install_ack=restrict-every-organization -f FILE (opens its own transaction; superuser)",
       "effect": "restricts EVERY organization immediately; no reopen path exists",
@@ -230,7 +299,8 @@
         "every till on a build of this integrated tree (V1 status gate, authorization handling); see minimum_client",
         "087 adopted: the pinned fingerprint has been proven on the target image through apply-migrations.sh (supabase_admin) before the install",
         "after V1: no provisional step (PSAFE-A/PFIN-*/PCOST-A) and no unauthorized DDL; schema changes only through recovery_v1.apply_authorized_migration with an owner-signed authorization bound to the exact SQL (sha256), the target database, the predecessor in the applied-migration chain, allowed commands and new tables (Step 4 Part C, forward repair only)",
-        "financial roadmap: PFIN-D (split payments, cash movements) and PFIN-E (refund lines, payouts, restock) land BEFORE V1; PFIN-C stays held (P-2, P-6)"
+        "financial roadmap: PFIN-D (split payments, cash movements) and PFIN-E (refund lines, payouts, restock) land BEFORE V1; PFIN-C stays held (P-2, P-6)",
+        "Step 6 finalization: PFIN-F (split refunds, approvals), PDISC-A (discount authorization) and PNET-A (pg_net lockdown) land BEFORE V1"
       ]
     }
   ],
@@ -269,6 +339,21 @@
       "first": "RECOVERY_V1",
       "then": "PFIN-E",
       "why": "as PFIN-D"
+    },
+    {
+      "first": "RECOVERY_V1",
+      "then": "PFIN-F",
+      "why": "new financial tables and refund triggers would be unguarded; an authorized migration only adds (no trigger or function changes)"
+    },
+    {
+      "first": "RECOVERY_V1",
+      "then": "PDISC-A",
+      "why": "new triggers on guarded tables are not allowed after V1"
+    },
+    {
+      "first": "RECOVERY_V1",
+      "then": "PNET-A",
+      "why": "an authorized migration cannot add an event trigger; apply only its revoke part after V1"
     }
   ],
   "recommended_order": [
@@ -280,6 +365,9 @@
     "PFIN-D",
     "PFIN-E",
     "PFIN-C",
+    "PFIN-F",
+    "PDISC-A",
+    "PNET-A",
     "087",
     "088",
     "RECOVERY_V1"

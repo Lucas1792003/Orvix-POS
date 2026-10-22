@@ -95,7 +95,9 @@ export const ALL_PERMISSIONS = [
   // Pricing
   "pricing:manage",
   // Approvals
-  "approval:view",
+  //   fin:approve_exception = Shop Admin for the user's shop (PFIN-F / PDISC-A): decides alternative refund payouts,
+  //   adjusted refund prices and discounts above 5% — never their own request. Granted per user; an ADMIN always is one.
+  "approval:view", "fin:approve_exception",
   // Shifts
   "shift:manage_own", "shift:manage_all", "shift:verify",
   // Reports
@@ -631,6 +633,9 @@ export interface CartItem {
   unitsPerItem: number;
   unitBaseQuantity: number;
   priceOverriddenBy?: string;
+  /** Step 6 (PDISC-A): the line's resolved price before a manual override (its reference price — a reduction below it
+   *  counts as a discount). Till-only: never sent to the server. */
+  priceBeforeOverrideMmk?: number;
   stockOverrideBy?: string;
   // Price-level selection (migration 030). Cart uniqueness key widened
   // to `productId + productUnitId + priceLevelId` so the same product

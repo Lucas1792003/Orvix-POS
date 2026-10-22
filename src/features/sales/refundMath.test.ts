@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import type { RefundVoidRequest, SaleItem } from "../../types";
-import { allocateNetLineAmounts, attachRefundLines, buildRefundState, planRefundRequest, refundRequestExcessMmk } from "./refundMath";
+import {
+  allocateNetLineAmounts, attachRefundLines, buildPlannedRefundItems, buildRefundState, defaultRefundPayouts, distributePayouts, planRefundRequest,
+  refundRequestExcessMmk,
+} from "./refundMath";
 
 // Sales are built the way complete_sale (072) stores them: line_total after
 // the item discount, total = Σ lines − round(Σ lines × cart% / 100),
@@ -171,5 +174,98 @@ describe("attachRefundLines (Step 4, PFIN-E)", () => {
     const state = buildRefundState(sale, items, []);
     const plan = planRefundRequest(state, { i1: 1 });
     expect(attachRefundLines(state, { i1: 1 }, plan, { serverSale: false, noRestock: { i1: true }, payoutMethod: "CASH" })).toEqual(plan.items);
+  });
+});
+
+// ---------------------------------------------------------------- Step 6 (PFIN-F) split-payment refunds
+
+describe("defaultRefundPayouts (mirrors PFIN-F fin_refund_default_payouts)", () => {
+  const paid = [{ method: "CASH", paidMmk: 1_800, attributedRefundedMmk: 0 }, { method: "BANK_TRANSFER", paidMmk: 1_200, attributedRefundedMmk: 0 }];
+  it("shares the refund in proportion to what each method paid, sorted by method", () => {
+    expect(defaultRefundPayouts(paid, 3_000)).toEqual([{ method: "BANK_TRANSFER", amountMmk: 1_200 }, { method: "CASH", amountMmk: 1_800 }]);
+    expect(defaultRefundPayouts(paid, 1_000)).toEqual([{ method: "BANK_TRANSFER", amountMmk: 400 }, { method: "CASH", amountMmk: 600 }]);
+  });
+  it("the rounding leftover goes to the largest remainder (then method name)", () => {
+    expect(defaultRefundPayouts(paid, 1_001)).toEqual([{ method: "BANK_TRANSFER", amountMmk: 400 }, { method: "CASH", amountMmk: 601 }]);
+    const even = [{ method: "CARD", paidMmk: 1, attributedRefundedMmk: 0 }, { method: "CASH", paidMmk: 1, attributedRefundedMmk: 0 }];
+    expect(defaultRefundPayouts(even, 1)).toEqual([{ method: "CARD", amountMmk: 1 }]);
+  });
+  it("is cumulative: what each method already got back is deducted; a full refund returns exactly what is left", () => {
+    const after = paid.map((m) => ({ ...m, attributedRefundedMmk: m.method === "CASH" ? 601 : 400 }));
+    expect(defaultRefundPayouts(after, 1_999)).toEqual([{ method: "BANK_TRANSFER", amountMmk: 800 }, { method: "CASH", amountMmk: 1_199 }]);
+  });
+  it("review 1 F1: when several methods already got back more than their share, the excess is taken back (never null)", () => {
+    const three = [{ method: "CASH", paidMmk: 2_000, attributedRefundedMmk: 1_994 }, { method: "BANK_TRANSFER", paidMmk: 500, attributedRefundedMmk: 500 },
+      { method: "MOBILE_WALLET", paidMmk: 2_000, attributedRefundedMmk: 1_994 }];
+    expect(defaultRefundPayouts(three, 3)).toEqual([{ method: "CASH", amountMmk: 1 }, { method: "MOBILE_WALLET", amountMmk: 2 }]);
+    const k = [{ method: "CASH", paidMmk: 3_500, attributedRefundedMmk: 14 }, { method: "BANK_TRANSFER", paidMmk: 2_500, attributedRefundedMmk: 91 },
+      { method: "MOBILE_WALLET", paidMmk: 4_000, attributedRefundedMmk: 895 }];
+    expect(defaultRefundPayouts(k, 1_000)).toEqual([{ method: "BANK_TRANSFER", amountMmk: 314 }, { method: "CASH", amountMmk: 686 }]);   // = PFIN-F (fin_policy p6d0)
+  });
+  it("property: any sequence of refunds up to the total gets an exact default within what each method has left", () => {
+    let seed = 7;
+    const rnd = (n: number) => { seed = (seed * 1103515245 + 12345) % 2147483648; return 1 + (seed % n); };
+    for (let trial = 0; trial < 2_000; trial++) {
+      const ms = ["BANK_TRANSFER", "CARD", "CASH", "MOBILE_WALLET", "OTHER"].slice(0, 2 + (trial % 4));
+      const state = ms.map((method) => ({ method, paidMmk: rnd(3_000), attributedRefundedMmk: 0 }));
+      let left = state.reduce((s, m) => s + m.paidMmk, 0);
+      while (left > 0) {
+        const x = rnd(left);
+        const d = defaultRefundPayouts(state, x);
+        expect(d).not.toBeNull();
+        expect(d!.reduce((s, p) => s + p.amountMmk, 0)).toBe(x);
+        for (const p of d!) {
+          const m = state.find((s) => s.method === p.method)!;
+          m.attributedRefundedMmk += p.amountMmk;
+          expect(m.attributedRefundedMmk).toBeLessThanOrEqual(m.paidMmk);
+        }
+        left -= x;
+      }
+    }
+  });
+  it("never more than what is left (null), nothing for nothing", () => {
+    expect(defaultRefundPayouts(paid, 3_001)).toBeNull();
+    expect(defaultRefundPayouts([], 10)).toBeNull();
+    expect(defaultRefundPayouts(paid, 0)).toEqual([]);
+  });
+});
+
+describe("distributePayouts", () => {
+  it("fills the items in order from the methods in order; each item's payouts add up to its amount", () => {
+    expect(distributePayouts([1_000, 2_000], [{ method: "BANK_TRANSFER", amountMmk: 1_200 }, { method: "CASH", amountMmk: 1_800 }])).toEqual([
+      [{ method: "BANK_TRANSFER", amountMmk: 1_000 }],
+      [{ method: "BANK_TRANSFER", amountMmk: 200 }, { method: "CASH", amountMmk: 1_800 }],
+    ]);
+  });
+  it("an item of 0 gets no payout; totals that do not match are refused", () => {
+    expect(distributePayouts([0, 500], [{ method: "CASH", amountMmk: 500 }])).toEqual([[], [{ method: "CASH", amountMmk: 500 }]]);
+    expect(distributePayouts([1_000], [{ method: "CASH", amountMmk: 999 }])).toBeNull();
+  });
+});
+
+describe("buildPlannedRefundItems", () => {
+  const items: SaleItem[] = [
+    { id: "si-1", saleId: "s1", productId: "p1", qtyUnits: 2, unitPriceMmk: 1_000, lineTotalMmk: 2_000 },
+    { id: "si-2", saleId: "s1", productId: "p2", qtyUnits: 1, unitPriceMmk: 1_000, lineTotalMmk: 1_000 },
+  ];
+  const state = buildRefundState({ id: "s1", status: "NORMAL", totalMmk: 3_000 }, items, []);
+  it("every item names its sale line (with the plan's amount) and its share of the payouts", () => {
+    const r = buildPlannedRefundItems(state, { "si-1": 2, "si-2": 1 }, {
+      amounts: { "si-1": 2_000, "si-2": 1_000 }, noRestock: { "si-2": true },
+      payouts: [{ method: "BANK_TRANSFER", amountMmk: 1_200 }, { method: "CASH", amountMmk: 1_800 }],
+    });
+    expect(r).toEqual({ ok: true, items: [
+      { productId: "p1", qtyUnits: 2, amountMmk: 2_000, lines: [{ saleItemId: "si-1", qtyUnits: 2, amountMmk: 2_000, restock: true }],
+        payouts: [{ method: "BANK_TRANSFER", amountMmk: 1_200 }, { method: "CASH", amountMmk: 800 }] },
+      { productId: "p2", qtyUnits: 1, amountMmk: 1_000, lines: [{ saleItemId: "si-2", qtyUnits: 1, amountMmk: 1_000, restock: false }],
+        payouts: [{ method: "CASH", amountMmk: 1_000 }] },
+    ] });
+  });
+  it("a single-method sale names no payouts (legacy rule); bad amounts or payouts are refused", () => {
+    const r = buildPlannedRefundItems(state, { "si-2": 1 }, { amounts: { "si-2": 900 }, noRestock: {}, payouts: null });
+    expect(r.ok && r.items[0].payouts).toBeUndefined();
+    expect(buildPlannedRefundItems(state, { "si-2": 1 }, { amounts: {}, noRestock: {}, payouts: null })).toEqual({ ok: false, problem: "AMOUNT" });
+    expect(buildPlannedRefundItems(state, { "si-2": 1 }, { amounts: { "si-2": 1_000 }, noRestock: {}, payouts: [{ method: "CASH", amountMmk: 1 }] }))
+      .toEqual({ ok: false, problem: "PAYOUTS" });
   });
 });

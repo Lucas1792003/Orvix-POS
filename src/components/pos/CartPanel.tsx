@@ -28,7 +28,22 @@ interface CartPanelProps {
   stockStatuses?: Record<string, CartItemStockStatus>;
   checkoutDisabled?: boolean;
   checkoutHelper?: string;
+  /** Step 6 (PDISC-A): this discount needs a separate approval — its state and the "Request approval" action. */
+  discountApproval?: DiscountApprovalNotice;
 }
+
+export interface DiscountApprovalNotice {
+  tone: "warning" | "info" | "success" | "error";
+  message: string;
+  action?: { label: string; disabled: boolean; onClick: () => void };
+}
+
+const NOTICE_TONE: Record<DiscountApprovalNotice["tone"], string> = {
+  warning: "border-amber-200 bg-amber-50 text-amber-800",
+  info: "border-sky-200 bg-sky-50 text-sky-800",
+  success: "border-emerald-200 bg-emerald-50 text-emerald-800",
+  error: "border-rose-200 bg-rose-50 text-rose-800",
+};
 
 export const CartPanel = ({
   items,
@@ -47,6 +62,7 @@ export const CartPanel = ({
   stockStatuses = {},
   checkoutDisabled = items.length === 0,
   checkoutHelper,
+  discountApproval,
 }: CartPanelProps) => {
   const [showAllOpen, setShowAllOpen] = useState(false);
   const { t } = useTranslation();
@@ -147,6 +163,17 @@ export const CartPanel = ({
             <span className="font-semibold text-slate-400">- {formatMmk(0)}</span>
           </div>
         )}
+
+        {discountApproval ? (
+          <div role="status" data-testid="discount-approval" className={`flex flex-wrap items-center justify-between gap-2 rounded-xl border px-3 py-2 text-xs font-medium ${NOTICE_TONE[discountApproval.tone]}`}>
+            <span className="min-w-0 flex-1">{discountApproval.message}</span>
+            {discountApproval.action ? (
+              <Button variant="secondary" className="h-8 min-h-8 px-3 text-xs" onClick={discountApproval.action.onClick} disabled={discountApproval.action.disabled}>
+                {discountApproval.action.label}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="h-px bg-slate-200" />
 
