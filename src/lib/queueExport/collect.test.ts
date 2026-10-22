@@ -167,14 +167,22 @@ describe("exportPendingQueue (read-only, encrypted, no secrets)", () => {
     const payload = await decryptQueueExport(contents, PASS);
     const exportedKeys = payload.entries.filter((e) => e.status !== "conflict").map((e) => e.idempotencyKey);
 
-    rpc.mockImplementation((name: string) => Promise.resolve({
-      data: name === "open_shift" ? { shift: { id: "shift-real-1" }, auditLogs: [] } : { sale: { id: "x" }, items: [], movements: [], inventory: [], auditLogs: [] },
-      error: null, status: 200,
-    }));
+    rpc.mockImplementation((name: string) => Promise.resolve(name === "recovery_v1_status"
+      // This backend predates Recovery V1, exactly as a real 085/086/087 server answers.
+      ? { data: null, error: { code: "PGRST202", message: "Could not find the function public.recovery_v1_status(p_org_id) in the schema cache" }, status: 404 }
+      : {
+        data: name === "open_shift" ? { shift: { id: "shift-real-1" }, auditLogs: [] } : { sale: { id: "x" }, items: [], movements: [], inventory: [], auditLogs: [] },
+        error: null, status: 200,
+      }));
     await expect(drainOutbox()).resolves.toBe("drained");
-    const sentKeys = rpc.mock.calls.map((c) => (c[1] as Record<string, unknown>).p_idempotency_key);
+    // The read-only capability probe carries no operation and no key; every
+    // financial send must still be exactly the exported queue, in order.
+    const probes = rpc.mock.calls.filter((c) => c[0] === "recovery_v1_status");
+    expect(probes.every((c) => (c[1] as Record<string, unknown>).p_idempotency_key === undefined)).toBe(true);
+    const sends = rpc.mock.calls.filter((c) => c[0] !== "recovery_v1_status");
+    const sentKeys = sends.map((c) => (c[1] as Record<string, unknown>).p_idempotency_key);
     expect(sentKeys).toEqual(exportedKeys.slice(0, 4));
-    expect(rpc.mock.calls.slice(1).every((c) => (c[1] as Record<string, unknown>).p_shift_id === "shift-real-1")).toBe(true);
+    expect(sends.slice(1).every((c) => (c[1] as Record<string, unknown>).p_shift_id === "shift-real-1")).toBe(true);
     // only the conflict (never auto-retried) is left
     expect((await localDb.syncOutbox.toArray()).map((r) => r.name)).toEqual(["categories.insert"]);
   });

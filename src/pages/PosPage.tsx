@@ -33,6 +33,8 @@ import { hasShopPermission } from "../lib/permissions";
 import { getErrorMessage, reportError } from "../lib/errors";
 import { isPendingConfirmation, isUnresolvedOperation } from "../stores/data/operationPrompt";
 import { isRecoveryBlocked } from "../stores/data/recoveryState";
+import { RecoveryV1Blocked } from "../recovery/client";
+import type { CanonicalPart } from "../features/finance/finCompletion";
 import { journalReceiptPrint } from "../stores/data/opJournal";
 import { useUnresolvedSales } from "../hooks/useUnresolvedSales";
 import { printReceipt as triggerPrint } from "../lib/print";
@@ -477,7 +479,7 @@ export const PosPage = () => {
     return () => window.removeEventListener("keydown", handler);
   }, [handleCheckout]);
 
-  const handlePaymentConfirm = async (paymentMethod: "CASH" | "OTHER", paidMmk: number) => {
+  const handlePaymentConfirm = async (paymentMethod: "CASH" | "OTHER", paidMmk: number, payments?: CanonicalPart[]) => {
     if (!currentUser || submitting) return;
     if (!cartValidation.canCheckout || !openShift) {
       showCartValidationToast(t("pos", "paymentBlocked"));
@@ -493,6 +495,7 @@ export const PosPage = () => {
         cartDiscountPct,
         paymentMethod,
         paidMmk,
+        ...(payments ? { payments } : {}),
       });
       // Clear the cart and stay on POS so the cashier can ring up the
       // next sale immediately. When "Print (F3)" was picked we render a
@@ -505,11 +508,17 @@ export const PosPage = () => {
       // Pull the saved sale from the store so the toast can show the
       // human-friendly receipt number instead of the internal id.
       const savedSale = useDataStore.getState().sales.find((s) => s.id === saleId);
-      toast({
-        title: printAfterSave ? t("pos", "saleRecordedPrinting") : t("pos", "saleRecorded"),
-        description: savedSale ? t("pos", "receiptLine", { no: savedSale.receiptNo }) : undefined,
-        variant: "success",
-      });
+      if (savedSale?.pendingSync) {
+        // recorded on this till only (offline, or the server could not be reached): never shown as a confirmed sale
+        toast({ title: t("fin", "recordedLocallyTitle"),
+          description: `${t("pos", "receiptLine", { no: savedSale.receiptNo })} · ${t("fin", "recordedLocallyBody")}`, variant: "warning" });
+      } else {
+        toast({
+          title: printAfterSave ? t("pos", "saleRecordedPrinting") : t("pos", "saleRecorded"),
+          description: savedSale ? t("pos", "receiptLine", { no: savedSale.receiptNo }) : undefined,
+          variant: "success",
+        });
+      }
       if (printAfterSave) {
         setPrintSaleId(saleId);
       }
@@ -522,6 +531,10 @@ export const PosPage = () => {
         setCartDiscountPct(0);
         setPaymentOpen(false);
         toast({ title: t("unresolved", "pendingTitle"), description: t("unresolved", "pendingSaleBody"), variant: "warning" });
+      } else if (error instanceof RecoveryV1Blocked) {
+        // Recovery V1: nothing was recorded or queued; the cart stays. Step 4: when the server is unreachable this
+        // is the till's offline authorization saying it does not cover this sale (expired, used up, clock, …).
+        toast({ title: error.reason === "communication" ? t("fin", "offlineNotRecordedTitle") : t("fin", "notRecordedTitle"), description: error.message, variant: "error" });
       } else if (isRecoveryBlocked(error)) {
         // 087: nothing was recorded or queued; the cart stays so nothing is lost.
         toast({ title: "Sale not recorded — server recovery", description: error.message, variant: "error" });

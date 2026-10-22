@@ -236,9 +236,19 @@ describe("record cleanup failure", () => {
   });
 
   it("if the operation cannot be saved BEFORE sending, it is not sent", async () => {
-    const put = vi.spyOn(localDb.syncState, "put").mockRejectedValueOnce(new Error("quota"));
+    const actualPut = IDBObjectStore.prototype.put;
+    let failures = 0;
+    const put = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+      if (this.name === "syncState" && (value as { key?: string }).key?.startsWith("online-op:")) {
+        failures += 1;
+        throw new DOMException("quota", "QuotaExceededError");
+      }
+      return actualPut.call(this, value, key);
+    });
     await expect(pay()).rejects.toThrow(/Not sent: the operation could not be saved/);
     expect(payments()).toHaveLength(0);
+    expect(failures).toBe(1);
+    expect(await countUnsettledOnlineOperations()).toBe(0);
     put.mockRestore();
   });
 });

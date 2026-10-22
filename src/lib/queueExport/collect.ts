@@ -15,11 +15,13 @@ import type { LocalDb, SyncOutboxEntry } from "../localDb";
 import { RECONCILE_LOG_PREFIX } from "../reconcile/constants";
 import { entryDigest } from "../reconcile/digest";
 import {
-  QUEUE_EXPORT_FORMAT, QUEUE_EXPORT_FORMAT_VERSION, QUEUE_EXPORT_FORMAT_VERSION_UNREADABLE, inQueueOrder, redactSecrets, summarize,
+  QUEUE_EXPORT_FORMAT, QUEUE_EXPORT_FORMAT_VERSION, QUEUE_EXPORT_FORMAT_VERSION_EVIDENCE, QUEUE_EXPORT_FORMAT_VERSION_UNREADABLE, inQueueOrder, redactSecrets, summarize,
   type QueueExportEntry, type QueueExportPayload, type QueueExportSummary, type UnreadableOnlineRecordExport,
 } from "./format";
 import { ONLINE_OP_PREFIX, UNREADABLE_SET_ASIDE_PREFIX, classifyOnlineRecord, setAsideRecord, unreadableInScope } from "../onlineOpRecord";
 import { JOURNAL_PREFIX, VANISHED_PREFIX, parseJournal } from "../../stores/data/opJournal";
+import { DEVICE_EVIDENCE_PREFIX, WITNESS_RECEIPT_PREFIX } from "../../recovery/journalCapture";
+import type { EvidenceRecord } from "../../recovery/evidence";
 
 export interface QueueExportContext {
   appVersion: string;
@@ -90,13 +92,45 @@ export interface QueueExportSnapshot {
 /** Snapshot of everything not yet on the server (every outbox row, any
  *  status), in queue order, plus the id map needed to resolve `refs` and
  *  (RC3) the local reconciliation log. */
+/** A damaged evidence/receipt record is never dropped silently. Its contents are exported
+ *  only when it still parses as a JSON object whose organization field (`orgId`,
+ *  `envelope.body.orgId` or `body.checkpoint.orgId`) is exactly the exporting organization,
+ *  and then with field-based credential redaction. Anything else (unparseable, another or an
+ *  unknown organization) is exported as key, size and a fingerprint only; the original stays on the
+ *  device. No text matching is used to decide scope. */
+function unreadableMarker(row: { key: string; value?: string | null }, reason: string, orgId: string | null) {
+  const raw = row.value ?? "";
+  let parsed: unknown = null;
+  try { parsed = JSON.parse(raw); } catch { /* unparseable */ }
+  const o = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  const get = (...path: string[]): unknown => path.reduce<unknown>((v, k) => (v && typeof v === "object" ? (v as Record<string, unknown>)[k] : undefined), o);
+  // EVERY organization field present must be exactly this organization (a crafted record with
+  // one matching field and a conflicting, null or non-string other one is not exported).
+  const fields = [get("orgId"), get("envelope", "body", "orgId"), get("body", "checkpoint", "orgId")].filter((v) => v !== undefined);
+  if (o && orgId && fields.length > 0 && fields.every((v) => v === orgId)) {
+    const counter = { n: 0 };
+    const contents = redactSecrets(o, counter);
+    return { unreadable: true, reason, key: row.key, contents, redacted: counter.n > 0 };
+  }
+  return { unreadable: true, reason, key: row.key, rawLength: raw.length, rawFingerprint: rawFingerprint(raw), scope: "unknown-organization" };
+}
+/** A non-cryptographic fingerprint (FNV-1a 32) to match the marker to the original kept on the
+ *  device; WebCrypto SHA-256 is asynchronous and this runs inside a synchronous mapper. */
+const rawFingerprint = (raw: string): string => {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < raw.length; i++) { h ^= raw.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return `fnv1a32:${h.toString(16).padStart(8, "0")}`;
+};
+
 export async function collectQueueExportSnapshot(db: LocalDb, ctx: QueueExportContext): Promise<QueueExportSnapshot> {
-  const [rows, idMap, logRows, opRows, journalRows] = await db.transaction("r", db.syncOutbox, db.provisionalIdMap, db.syncState, async () => [
+  const [rows, idMap, logRows, opRows, journalRows, evidenceRows, witnessRows] = await db.transaction("r", db.syncOutbox, db.provisionalIdMap, db.syncState, async () => [
     (await db.syncOutbox.toArray()) as StoredRow[],
     await db.provisionalIdMap.toArray(),
     await db.syncState.where("key").startsWith(RECONCILE_LOG_PREFIX).toArray(),
     await onlineRows(db),
     [...await db.syncState.where("key").startsWith(JOURNAL_PREFIX).toArray(), ...await db.syncState.where("key").startsWith(VANISHED_PREFIX).toArray()],
+    await db.syncState.where("key").startsWith(DEVICE_EVIDENCE_PREFIX).toArray(),
+    await db.syncState.where("key").startsWith(WITNESS_RECEIPT_PREFIX).toArray(),
   ] as const);
   const unreadable = parseUnreadableRecords(opRows, ctx.session.orgId);
   const base = buildPayload(rows, idMap, logRows, ctx);
@@ -106,14 +140,43 @@ export async function collectQueueExportSnapshot(db: LocalDb, ctx: QueueExportCo
   // security would hide most of it from them). Pending work is in `entries`.
   const owner = ctx.session.role === "ADMIN" && Boolean(ctx.session.orgId);
   const { journal, vanished, redacted } = owner ? parseJournalRows(journalRows, ctx.session.orgId) : { journal: [], vanished: [], redacted: 0 };
+  const evidenceCounter = { n: 0 };
   const payload: QueueExportPayload = {
     ...base,
     ...(unreadable.length ? { formatVersion: QUEUE_EXPORT_FORMAT_VERSION_UNREADABLE } : {}),
     onlineOperations: parseOnlineOperations(opRows, ctx.session.orgId),
     unreadableOnlineRecords: unreadable,
     journal, vanished,
-    redactedFields: base.redactedFields + redacted,
+    deviceEvidence: owner ? evidenceRows.flatMap<unknown>((row) => {
+      // Unparseable or malformed records are exported with their raw bytes (never dropped
+      // silently); only a well-formed record of ANOTHER organization is left out.
+      const unreadable = (reason: string) => [unreadableMarker(row, reason, ctx.session.orgId)];
+      let record: EvidenceRecord;
+      try { record = JSON.parse(row.value ?? "null") as EvidenceRecord; }
+      catch { return unreadable("unparseable"); }
+      if (!record?.envelope?.body || typeof record.envelope.body.orgId !== "string") return unreadable("malformed");
+      if (record.envelope.body.orgId !== ctx.session.orgId) return [];
+      // authorization in this signed envelope contains actor/epoch/tenant
+      // context only. Export it byte-equivalent; redact free-form financial
+      // snapshots separately and explicitly flag the resulting unverifiability.
+      const count = { n: 0 };
+      const payload = redactSecrets(record.payload, count);
+      const observation = redactSecrets(record.observation, count);
+      evidenceCounter.n += count.n;
+      return [{ envelope: record.envelope, enrollment: record.enrollment, payload, observation, redacted: count.n > 0 }];
+    }) : [],
+    witnessReceipts: owner ? witnessRows.flatMap<unknown>((row) => {
+      const unreadable = (reason: string) => [unreadableMarker(row, reason, ctx.session.orgId)];
+      let receipt: { body?: { checkpoint?: { orgId?: unknown } } };
+      try { receipt = JSON.parse(row.value ?? "null"); } catch { return unreadable("unparseable"); }
+      if (typeof receipt?.body?.checkpoint?.orgId !== "string") return unreadable("malformed");
+      return receipt.body.checkpoint.orgId === ctx.session.orgId ? [receipt] : [];
+    }) : [],
+    redactedFields: base.redactedFields + redacted + evidenceCounter.n,
   };
+  // Signed evidence or receipts present: format 4, so an older reader refuses
+  // the file instead of silently dropping them.
+  if ((payload.deviceEvidence?.length ?? 0) > 0 || (payload.witnessReceipts?.length ?? 0) > 0) payload.formatVersion = QUEUE_EXPORT_FORMAT_VERSION_EVIDENCE;
   const digests = await Promise.all(rows.map(async (r) => ({ opId: r.localId, digest: await entryDigest(r) })));
   return { payload, digests };
 }
@@ -186,14 +249,18 @@ function parseJournalRows(rows: readonly { key: string; value?: string }[], orgI
     const rec = parseJournal(r);
     if (!rec) {
       // a damaged record: exported only when it parses as this organisation's
-      // (redacted, without its fingerprint); otherwise only its key and size
+      // (redacted, without its fingerprint); one naming another organisation is
+      // theirs; anything else is exported as key, size and fingerprint
       const d = v as (Record<string, unknown> & { orgId?: unknown; fingerprint?: unknown }) | null;
       if (d && typeof d === "object" && d.orgId === orgId) {
         const { fingerprint: _f, ...rest } = d;
         void _f;
         journal.push({ key: r.key, rpc: String(d.rpc ?? ""), state: "unreadable", orgId, createdAt: String(d.createdAt ?? ""), raw: redactSecrets(rest, counter) });
-      } else if (!d) {
-        journal.push({ key: r.key, rpc: "", state: "unreadable", orgId: null, createdAt: "", rawLength: (r.value ?? "").length });
+      } else if (d && typeof d === "object" && typeof d.orgId === "string") {
+        // a damaged record that still names ANOTHER organization: theirs, not exported (as for well-formed ones)
+      } else {
+        // unparseable, or parseable without a usable organization: never dropped silently
+        journal.push({ key: r.key, rpc: "", state: "unreadable", orgId: null, createdAt: "", rawLength: (r.value ?? "").length, rawFingerprint: rawFingerprint(r.value ?? "") });
       }
       continue;
     }

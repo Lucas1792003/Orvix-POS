@@ -144,6 +144,9 @@ export interface SyncOutboxEntry {
    *  without 087; on an 087 server such an entry is a legacy operation:
    *  never sent, never fenced automatically (owner review). */
   opEpoch?: string | null;
+  /** Recovery V1 Step 4: recorded while disconnected under this server-issued offline capability (sent as the
+   *  x-orvix-offline header on every attempt; never replaced). Absent: created while connected. */
+  offlineAuth?: { capabilityId: string; deviceSeq: number } | null;
   /** The path of the latest attempt. */
   protocol?: "executor" | "direct" | "lookup";
   /** A conflict the server has NOT decided (it could still run if retried):

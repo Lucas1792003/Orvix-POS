@@ -1,0 +1,39 @@
+{
+  "install_without_ack_refused": {
+    "plain_psql_f": true,
+    "session_level_set": true,
+    "database_level_setting": true,
+    "per_connection_with_database_setting": true
+  },
+  "migration_087_with_v1": {
+    "applicable": true,
+    "087_aborted": false,
+    "integrity": "migration_087_present_adapter_required",
+    "guarded_write_refused": true,
+    "status": "QUARANTINED",
+    "incompatible": true,
+    "rolled_back": true
+  },
+  "stage": 86,
+  "financial_provisionals": false,
+  "schema": "actual scrubbed schema-only baseline + actual numbered migrations",
+  "schema_sha256": "ed1fadc304ecc51b2ef3024423cb3388eba0c58f7d286f50c41077baa7975270",
+  "plain_pg_shims": [
+    "auth/storage/publication",
+    "omit unavailable pg_cron/pg_net/vault extensions",
+    "remove PG17 MAINTAIN privilege on PG16"
+  ],
+  "baseline": {
+    "passed": 29,
+    "failed": 0
+  },
+  "total_sql_assertions": {
+    "passed": 102,
+    "failed": 0
+  },
+  "race_completion_preserved": true,
+  "synthetic_authenticated_encrypted_logical_restore": true,
+  "run_directory": "/private/tmp/orvix-recovery-v1-db-8_gpdvhk",
+  "dump": "/private/tmp/orvix-recovery-v1-db-8_gpdvhk/synthetic.dump",
+  "production_authorized": false
+}

@@ -15,7 +15,9 @@ duplicated; a recorded version has no repo file or is not NNN; a recorded checks
 repo file; a selected version is already recorded, older than the newest recorded one, on the
 held list without --allow-skipped, or behind an unrecorded earlier version (gap); the 086 lineage
 (op_execute or the (org_id, key) ledger identity) is present without 086 recorded — only 086 itself
-(the documented forward recovery) may run then; 086 is recorded but its executor is missing; the
+(the documented forward recovery) may run then; 086 is recorded but its executor is missing; Recovery V1
+(schema recovery_v1, the provisional installer) is present and the plan is a rollback, includes 086 or 087,
+or is any other forward run without --recovery-v1-reviewed; the
 ledger table lacks version/statements/name; or a file contains a statement that cannot run inside
 one transaction (owner review). It never edits the ledger itself and never applies a migration
 that was not selected.
@@ -26,7 +28,7 @@ that was not selected.
                              --version NNN --owner-confirmed-till-queues-empty [--lock-timeout 5s] --out DIR
 
 L.tsv: version <TAB> sha256 entries in statements (comma-joined, may be empty) <TAB> statements count
-F.tsv: key <TAB> value  (ledger_md5, ledger_cols, has_op_execute, has_v87, idem_pk)
+F.tsv: key <TAB> value  (ledger_md5, ledger_cols, has_op_execute, has_v87, has_recovery_v1, idem_pk)
 """
 import argparse
 import hashlib
@@ -138,11 +140,11 @@ def read_facts(path):
         if line.strip():
             k, _, val = line.partition("\t")
             facts[k] = val
-    for k in ("ledger_md5", "ledger_cols", "has_op_execute", "has_v87", "idem_pk"):
+    for k in ("ledger_md5", "ledger_cols", "has_op_execute", "has_v87", "has_recovery_v1", "idem_pk"):
         if k not in facts:
             raise Refuse(f"database fact {k} missing (unknown state)")
     # embedded in the guard SQL: exact formats only
-    if not (re.fullmatch(r"[0-9a-f]{32}", facts["ledger_md5"]) and facts["has_op_execute"] in ("t", "f") and facts["has_v87"] in ("t", "f")
+    if not (re.fullmatch(r"[0-9a-f]{32}", facts["ledger_md5"]) and facts["has_op_execute"] in ("t", "f") and facts["has_v87"] in ("t", "f") and facts["has_recovery_v1"] in ("t", "f")
             and re.fullmatch(r"[a-z_,]*", facts["idem_pk"]) and re.fullmatch(r"[a-z_,]*", facts["ledger_cols"])):
         raise Refuse("database facts are malformed (unknown state)")
     return facts
@@ -203,6 +205,10 @@ def guard_sql(facts, lock_timeout, mode, gate=None):
         f"         WHERE c.conrelid = to_regclass('public.idempotency_keys') AND c.contype = 'p'), '') <> '{facts['idem_pk']}' THEN",
         "    RAISE EXCEPTION 'SCHEMA_CHANGED: the executor / ledger identity changed after planning; nothing applied — plan again';",
         "  END IF;",
+        "  IF (to_regnamespace('recovery_v1') IS NOT NULL)::text <> "
+        f"'{'true' if facts['has_recovery_v1'] == 't' else 'false'}' THEN",
+        "    RAISE EXCEPTION 'SCHEMA_CHANGED: Recovery V1 was installed or removed after planning; nothing applied — plan again';",
+        "  END IF;",
         "END $$;",
     ]
     if gate:
@@ -261,6 +267,19 @@ def plan_forward(a):
         problems.append(f"087 is installed here (schema recovery / op_execute_v87 present): {LINEAGE_VERSION} must never be "
                         f"re-run after 087 — its grant step would take the v87 executors away from every till. Forward "
                         f"recovery for {LINEAGE_VERSION} exists only before 087 (or after an 087 rollback)")
+    if facts["has_recovery_v1"] == "t":
+        # Recovery V1 pins the idempotency stage (its DDL guard refuses 086) and adopts 087 only when 087
+        # was installed BEFORE it; 087 applied after V1 quarantines every organization and cannot be
+        # rolled back (its rollback drops every zz_recovery_* trigger, V1's included).
+        for v in ("086", "087"):
+            if v in sel:
+                problems.append(f"Recovery V1 is installed here (schema recovery_v1): {v} must never run after it — V1 "
+                                f"{'pins the idempotency stage' if v == '086' else 'adopts 087 only when 087 was installed first; 087 after V1 quarantines every organization'}")
+        if not a.recovery_v1_reviewed:
+            problems.append("Recovery V1 is installed here (schema recovery_v1): a new migration's tables are not guarded by "
+                            "V1 and its DDL must pass V1's DDL guard — apply only after its V1 review, with --recovery-v1-reviewed")
+    elif a.recovery_v1_reviewed:
+        problems.append("--recovery-v1-reviewed was given but Recovery V1 is not installed here: refused (it attests a V1 review only)")
     for v in sel:
         bad = non_transactional(rd(os.path.join(a.migrations, files[v])))
         if bad:
@@ -304,6 +323,11 @@ def plan_rollback(a):
     facts = read_facts(a.facts)
     problems, notes, recorded, _ = check_history(files, ledger, facts, a.migrations)
     v = a.version
+    if facts["has_recovery_v1"] == "t":
+        # every rollback file drops or re-grants objects V1 guards (087's drops every zz_recovery_* trigger,
+        # V1's included, and restores pre-V1 grants); V1's DDL guard refuses them anyway — refuse up front
+        problems.append(f"Recovery V1 is installed here (schema recovery_v1): rollback of {v} is refused (it would remove "
+                        "or re-grant what V1 guards; V1 has no uninstall — forward repair only, owner decision)")
     if not re.fullmatch(r"\d{3}", v) or v not in files:
         raise Refuse(f"--rollback {v!r}: no such migration")
     rb = [f for f in sorted(os.listdir(a.rollbacks)) if f.startswith(f"{v}_") and f.endswith(".rollback.sql")]
@@ -355,6 +379,8 @@ def main(argv):
     f.add_argument("--held", default="084")
     f.add_argument("--allow-skipped", action="store_true")
     f.add_argument("--lock-timeout", default="10s")
+    f.add_argument("--recovery-v1-reviewed", action="store_true",
+                   help="only when Recovery V1 is installed: the selected migrations were reviewed against V1 (never 086/087)")
     r = sub.choices["rollback"]
     r.add_argument("--rollbacks", required=True)
     r.add_argument("--version", required=True)

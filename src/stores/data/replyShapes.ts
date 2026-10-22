@@ -41,6 +41,9 @@ const CHECKS: Record<string, Check> = {
   adjust_stock: (d) => require(d, { inventory: "inventory-row", movement: "id-object", auditLog: "id-object" }),
   open_shift: (d) => require(d, { shift: "id-object", auditLogs: "array" }),
   close_shift: (d) => require(d, { shift: "id-object", auditLogs: "array" }),
+  // Step 4 (PFIN-D)
+  fin_close_shift: (d) => require(d, { shift: "id-object", auditLogs: "array" }),
+  fin_record_cash_movement: (d) => require(d, { movement: "id-object" }),
   create_refund_void_request: (d) => require(d, { request: "id-object", auditLogs: "array" }),
   receive_purchase_order: (d) => require(d, {
     purchaseOrder: "id-object", purchaseOrderItems: "array", inventory: "array", movements: "array", auditLogs: "array",

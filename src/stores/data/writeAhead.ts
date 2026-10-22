@@ -127,6 +127,8 @@ export interface OfflineCapableSpec<T> {
   applyOnline: (data: unknown, ackId: string) => T | Promise<T>;
   /** Stage the operation locally (the previous offline path, parameterised). */
   stage: (stage: Stage) => Promise<T>;
+  /** Step 4: the value this operation counts against an offline capability (a sale's total). */
+  offlineAmountMmk?: number;
 }
 
 /** Operations a person may legitimately repeat with identical arguments. */
@@ -245,7 +247,7 @@ export const describeEntry = (entry: SyncOutboxEntry): UnresolvedOperationInfo =
 export async function submitOfflineCapable<T>(spec: OfflineCapableSpec<T>): Promise<T> {
   // 087: nothing is saved or sent unless the till may create a financial
   // operation now (verified epoch, not in recovery mode) — online or offline.
-  await gateNewOperation(spec.op);
+  await gateNewOperation(spec.op, { name: spec.name, amountMmk: spec.offlineAmountMmk });
   const args = deepFreeze(stampOperationArgs(spec.name, spec.args, spec.op.idempotencyKey));
   const intent = intentOf(spec.name, args);
   const running = inFlightByIntent.get(intent);
@@ -355,7 +357,7 @@ async function stageAndCommit<T>(
 ): Promise<T> {
   // v87.x, at the shared staging layer too: an OFFLINE staging is refused on an 087 server whoever asks for it
   // ("in-doubt" staging stays: an attempt that may have committed, shown as pending confirmation, same key)
-  if (mode === "offline") assertOfflineQueueAllowed("This till is offline.");
+  if (mode === "offline") assertOfflineQueueAllowed("This till is offline.", spec.op.offlineAuth);
   const stage = new Stage(mode, ownId);
   const result = await spec.stage(stage);
   if (!stage.entry) throw new Error(`${spec.name}: the offline path staged no outbox entry.`);
@@ -379,13 +381,15 @@ async function run<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>
     throw new RecoveryBlockedError("hold", "AWAITING_OWNER_REVIEW",
       `Operation awaiting owner review: ${review.length} earlier ${review.length === 1 ? "operation on this till waits" : "operations on this till wait"} for the owner's review after a server recovery, and this one may depend on ${review.length === 1 ? "it" : "them"}. Nothing was saved or sent. Ask the owner to review the Sync page.`);
   }
-  if (offline || spec.needsProvisionalRefs) {
+  // Step 4: authorized under an offline capability = the server could not be reached when it was created: it is
+  // recorded LOCALLY (pending, its key and capability reference) and sent by the queue — never presented as accepted.
+  if (offline || spec.needsProvisionalRefs || spec.op.offlineAuth) {
     // v87.x: never a new offline operation on an 087 server (nothing saved; the cashier is told why)
     assertOfflineQueueAllowed(spec.needsProvisionalRefs
       ? "It depends on an entry that has not reached the server yet (e.g. a shift opened offline) — let that finish first (Sync)."
-      : "This till is offline.");
+      : "This till is offline.", spec.op.offlineAuth);
     return stageAndCommit(spec, "offline", (entry) => ({
-      put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey, opEpoch: spec.op.opEpoch }, { staged: true }),
+      put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey, opEpoch: spec.op.opEpoch, offlineAuth: spec.op.offlineAuth ?? null }, { staged: true }),
     }));
   }
   // An online operation never overtakes an unsent entry of this till that it
@@ -395,11 +399,11 @@ async function run<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>
   // Entries it is proven independent of (dependencies.ts) do not hold it.
   if ((await blockingEarlierWork({ kind: "rpc", name: spec.name, args, shopId: spec.shopId, actorId: currentActorId() })).length) {
     // v87.x: queuing it behind them would make it an offline operation — refused on an 087 server
-    assertOfflineQueueAllowed("Earlier entries on this till have not reached the server yet — let them finish (Sync), then enter it again.");
+    assertOfflineQueueAllowed("Earlier entries on this till have not reached the server yet — let them finish (Sync), then enter it again.", spec.op.offlineAuth);
     let result: T;
     try {
       result = await stageAndCommit(spec, "offline", (entry) => ({
-        put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey, opEpoch: spec.op.opEpoch }, { staged: true }),
+        put: buildOutboxRow({ ...entry, args, idempotencyKey: spec.op.idempotencyKey, opEpoch: spec.op.opEpoch, offlineAuth: spec.op.offlineAuth ?? null }, { staged: true }),
       }));
     } catch (err) {
       throw new Error(`Not sent: earlier entries on this till have not reached the server yet, and this cannot be queued behind them (${
@@ -414,7 +418,7 @@ async function run<T>(spec: OfflineCapableSpec<T>, args: Record<string, unknown>
   //    window's recovery can pick the row up while it is being sent.
   const sentAt = new Date().toISOString();
   const row = buildOutboxRow(
-    { kind: "rpc", name: spec.name, args, idempotencyKey: spec.op.idempotencyKey, shopId: spec.shopId, opEpoch: spec.op.opEpoch },
+    { kind: "rpc", name: spec.name, args, idempotencyKey: spec.op.idempotencyKey, shopId: spec.shopId, opEpoch: spec.op.opEpoch, offlineAuth: spec.op.offlineAuth ?? null },
     { status: "syncing", writeAhead: true, syncingSince: sentAt, sentAt },
   );
   await markWriteAheadInFlight(row.localId);
@@ -440,7 +444,7 @@ async function sendAndResolve<T>(spec: OfflineCapableSpec<T>, args: Record<strin
   // session's screen or mirror.
   const sentBy = currentActorId();
   // 2. One attempt, bounded; the reply must have the expected shape.
-  const outcome = await callRpc(spec.name, args, { opEpoch: spec.op.opEpoch });
+  const outcome = await callRpc(spec.name, args, { opEpoch: spec.op.opEpoch, offlineAuth: spec.op.offlineAuth ?? null });
   let error: RpcError | null = outcome.error;
   if (!error && outcome.responseUnavailable) {
     // Committed on the server, but this till cannot read the reply (086

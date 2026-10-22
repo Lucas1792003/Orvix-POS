@@ -6,6 +6,9 @@ import { retryAfterRemainingMs } from "../../lib/retryAfter";
 import { touchAuthCache } from "../authCache";
 import { localDb, SYNC_STATE_KEYS } from "../../lib/localDb";
 import { currentBackendOrigin } from "../../lib/backendOrigin";
+import { RecoveryV1Blocked, requireRecoveryV1Write } from "../../recovery/client";
+import { captureTransmission, EvidenceIntegrityError } from "../../recovery/journalCapture";
+import { OFFLINE_HEADER, type OfflineAuth } from "../../recovery/offlineCapability";
 import {
   currentOpEpoch, noteEpochStale, noteRecoveryRefusal, noteWitness, recoveryBlocksSending, recoveryCapability, recoveryMessage,
   recoveryView, storedEpoch, v87Context,
@@ -48,6 +51,8 @@ export const ACTOR_STAMPED_RPCS = new Set([
   "create_refund_void_request",
   "dispatch_stock_transfer",
   "receive_stock_transfer",
+  // Step 4 (PFIN-D)
+  "fin_close_shift",
 ]);
 
 let actorSource: () => string | null = () => null;
@@ -70,7 +75,7 @@ export function currentActorId(): string | null {
  */
 export function stampOperationArgs(name: string, args: Record<string, unknown>, idempotencyKey?: string): Record<string, unknown> {
   const out: Record<string, unknown> = { ...args };
-  if (typeof out[IDEMPOTENCY_KEY_ARG] !== "string") out[IDEMPOTENCY_KEY_ARG] = idempotencyKey ?? newIdempotencyKey();
+  if (typeof out[IDEMPOTENCY_KEY_ARG] !== "string") out[IDEMPOTENCY_KEY_ARG] = idempotencyKey ?? idempotencyKeyFor(name);
   if (ACTOR_STAMPED_RPCS.has(name) && !("p_expected_actor_id" in out)) out.p_expected_actor_id = actorSource();
   return out;
 }
@@ -106,10 +111,28 @@ export interface OperationContext {
    *  (null on a server without 087, or when the till has no usable epoch —
    *  such an operation is refused before anything is saved). Never replaced. */
   opEpoch: string | null;
+  /** Recovery V1 Step 4: set ONLY when the operation was recorded while disconnected under a server-issued offline
+   *  capability (gateNewOperation). Sent with every attempt as the x-orvix-offline header; never changed afterwards. */
+  offlineAuth?: OfflineAuth | null;
 }
 
-export function beginOperation(): OperationContext {
-  return { idempotencyKey: newIdempotencyKey(), createdAt: new Date().toISOString(), opEpoch: currentOpEpoch() };
+export function beginOperation(name?: string): OperationContext {
+  return { idempotencyKey: name ? idempotencyKeyFor(name) : newIdempotencyKey(), createdAt: new Date().toISOString(), opEpoch: currentOpEpoch() };
+}
+
+// Step 4 (PFIN-D): keyed RPCs that are NOT on the executor's (pinned) list. 086's idem_begin runs a UUIDv7 key only
+// inside op_execute, and op_execute can never dispatch these, so they are called directly with a random (v4) key — the
+// 085 ledger rule, which 086 keeps and never prunes. Replays with the same key return the first result as before.
+export const DIRECT_KEYED_RPCS = new Set(["fin_record_cash_movement", "fin_close_shift"]);
+
+/** A random v4 key (crypto.randomUUID), for DIRECT_KEYED_RPCS only. */
+export function newDirectIdempotencyKey(): string {
+  return crypto.randomUUID();
+}
+
+/** The key kind the server accepts for this RPC. */
+export function idempotencyKeyFor(name: string, now: number = Date.now()): string {
+  return DIRECT_KEYED_RPCS.has(name) ? newDirectIdempotencyKey() : newIdempotencyKey(now);
 }
 
 export class RpcError extends Error {
@@ -375,14 +398,53 @@ export function fromExecutorReply(rpc: string, data: unknown, status?: number): 
   }
 }
 
-async function viaExecutor(name: string, args: Record<string, unknown>, timeoutMs: number, actorId: string | null): Promise<RpcOutcome | "absent"> {
+// ----------------------------------------------------------------------
+// Step 4: how a request is actually sent.
+//  - a split / mixed-payment sale (complete_sale with p_payments) is sent through fin_complete_sale_split, which calls the
+//    SAME complete_sale on the route the server needs (direct, 086 op_execute or 087 op_execute_v87) and binds the payment
+//    list to that one sale; the reply shape is exactly that route's reply;
+//  - an operation recorded offline under a capability carries the x-orvix-offline header on every attempt.
+// ----------------------------------------------------------------------
+export interface SendContext { payments: unknown[] | null; offlineAuth: OfflineAuth | null }
+const NO_SEND: SendContext = { payments: null, offlineAuth: null };
+export const SPLIT_RPC = "fin_complete_sale_split";
+type Builder = PromiseLike<RawResponse> & { setHeader?: (name: string, value: string) => unknown };
+function rpcRequest(fn: string, params: Record<string, unknown>, send: SendContext): PromiseLike<RawResponse> {
+  let builder: Builder;
+  if (send.payments) {
+    const route = fn === "op_execute_v87" ? "v87" : fn === "op_execute" ? "op_execute" : "direct";
+    const split = route === "direct"
+      ? { p_route: route, p_key: params[IDEMPOTENCY_KEY_ARG], p_args: params, p_payments: send.payments, p_actor_id: null, p_ctx: null }
+      : { p_route: route, p_key: params.p_key, p_args: params.p_args, p_payments: send.payments, p_actor_id: params.p_actor_id ?? null, p_ctx: params.p_ctx ?? null };
+    builder = supabase.rpc(SPLIT_RPC, split) as unknown as Builder;
+  } else {
+    builder = supabase.rpc(fn, params) as unknown as Builder;
+  }
+  if (send.offlineAuth) {
+    // fail closed: an operation recorded offline is never sent as an ordinary online one
+    if (typeof builder.setHeader !== "function") {
+      // nothing is sent; the queue holds it for an owner like any refused offline sale ([offline_…])
+      return Promise.resolve({ data: null, status: 0, error: { code: "PT503", message:
+        "OFFLINE_HEADER_UNSUPPORTED: this client cannot attach its offline authorization; not sent [offline_header_unsupported]" } } as unknown as RawResponse);
+    }
+    builder = builder.setHeader(OFFLINE_HEADER, JSON.stringify({ capabilityId: send.offlineAuth.capabilityId, deviceSeq: send.offlineAuth.deviceSeq })) as Builder;
+  }
+  return builder;
+}
+/** The server has no split-payment entry point (an 085/086 server without PFIN-D): nothing ran; never converted. */
+const splitUnsupportedError = (status?: number): RpcError => new RpcError(
+  "This sale has a split payment, which this server does not support yet (it needs the PFIN-D migration). Nothing was sent; the sale is kept with its key for review.",
+  { status, code: "FIN_SPLIT_UNSUPPORTED", failure: failureInfo("CONTRACT") });
+
+async function viaExecutor(name: string, args: Record<string, unknown>, timeoutMs: number, actorId: string | null, send: SendContext = NO_SEND): Promise<RpcOutcome | "absent"> {
   const { [IDEMPOTENCY_KEY_ARG]: key, ...rest } = args;
   // p_actor_id: who CREATED the operation. The server runs it only in that
   // user's session (a queue drained by someone else is never executed).
   const outcome = await runRequest(
-    supabase.rpc("op_execute", { p_key: key, p_rpc: name, p_args: rest, p_actor_id: actorId }), name, timeoutMs,
+    rpcRequest("op_execute", { p_key: key, p_rpc: name, p_args: rest, p_actor_id: actorId }, send), name, timeoutMs,
   );
   if (outcome.error) {
+    if (send.payments && isMissingFunction(outcome.error, SPLIT_RPC)) return { data: null, status: outcome.status, via: "executor", error: splitUnsupportedError(outcome.status) };
     if (isMissingFunction(outcome.error, "op_execute")) {
       if (await executorDemonstrated()) return { data: null, status: outcome.status, via: "executor", error: staleSchemaError("op_execute", outcome.status) };
       return "absent";
@@ -433,13 +495,15 @@ async function notePreEpoch(error: RpcError | null, opEpoch: string | null | und
   if (opEpoch && opEpoch === storedEpoch()?.epoch) await noteEpochStale(error!.message).catch(() => undefined);
 }
 
-async function viaExecutor87(name: string, args: Record<string, unknown>, timeoutMs: number, actorId: string | null, opEpoch: string | null | undefined): Promise<RpcOutcome> {
+async function viaExecutor87(name: string, args: Record<string, unknown>, timeoutMs: number, actorId: string | null, opEpoch: string | null | undefined,
+  send: SendContext = NO_SEND): Promise<RpcOutcome> {
   if (!opEpoch) return { data: null, via: "executor", error: legacyOperationError(name) };
   const { [IDEMPOTENCY_KEY_ARG]: key, ...rest } = args;
   const outcome = await runRequest(
-    supabase.rpc("op_execute_v87", { p_key: key, p_rpc: name, p_args: rest, p_actor_id: actorId, p_ctx: v87Context(opEpoch) }), name, timeoutMs,
+    rpcRequest("op_execute_v87", { p_key: key, p_rpc: name, p_args: rest, p_actor_id: actorId, p_ctx: v87Context(opEpoch) }, send), name, timeoutMs,
   );
   if (outcome.error) {
+    if (send.payments && isMissingFunction(outcome.error, SPLIT_RPC)) return { data: null, status: outcome.status, via: "executor", error: splitUnsupportedError(outcome.status) };
     if (isMissingFunction(outcome.error, "op_execute_v87")) return { data: null, status: outcome.status, via: "executor", error: staleSchemaError("op_execute_v87", outcome.status) };
     await notePreEpoch(outcome.error, opEpoch);
     return { ...outcome, via: "executor" };
@@ -569,27 +633,60 @@ interface CallOptions {
   actorId?: string | null;
   /** 087: the epoch the operation was created under (never replaced). */
   opEpoch?: string | null;
+  /** Step 4: the operation was recorded offline under this capability (sent as x-orvix-offline; never replaced). */
+  offlineAuth?: OfflineAuth | null;
 }
 
 /** One attempt: through the executor when the server has it, else direct.
  *  Each supabase-js builder is created and awaited exactly once. */
-async function attempt(name: string, args: Record<string, unknown>, timeoutMs: number, actorId: string | null, opEpoch?: string | null): Promise<RpcOutcome> {
+async function attempt(name: string, args: Record<string, unknown>, timeoutMs: number, actorId: string | null, opEpoch?: string | null,
+  offlineAuth?: OfflineAuth | null): Promise<RpcOutcome> {
+  // Final common financial boundary, including automatic retries. No signed
+  // identity is regenerated and no old operation is given a replacement key.
+  try {
+    const { useAuthStore } = await import("../authStore");
+    const { useAppStore } = await import("../appStore");
+    const { getJournalRecord } = await import("./opJournal");
+    const key = String(args[IDEMPOTENCY_KEY_ARG]);
+    const original = await getJournalRecord(key);
+    const orgId = original?.orgId ?? useAuthStore.getState().currentOrgId ?? null;
+    const shopId = original?.shopId ?? (typeof args.p_shop_id === "string" ? args.p_shop_id : useAppStore.getState().currentShopId ?? null);
+    if (await requireRecoveryV1Write(orgId, shopId)) {
+      await captureTransmission({ orgId, shopId, backendOrigin: original?.backendOrigin ?? currentBackendOrigin(), actorId,
+        key, rpc: name, args, opEpoch: opEpoch ?? null, createdAt: original?.createdAt ?? new Date().toISOString() });
+    }
+  } catch (error) {
+    // Nothing was sent in any of these cases. A communication failure with a
+    // recovery-aware server, a verified restriction or an unavailable device
+    // authorization is a HOLD: the operation stays pending with its original key
+    // and is retried later under the existing idempotency rules (never re-keyed).
+    // Only contradictory local evidence stops it for a person (conflict).
+    const message = error instanceof Error ? error.message : "Recovery evidence unavailable";
+    const integrity = error instanceof EvidenceIntegrityError || (error instanceof RecoveryV1Blocked && error.reason === "integrity");
+    return { data: null, error: new RpcError(message, { code: "PT503", status: 503,
+      failure: integrity ? { ...failureInfo("RECOVERY"), mayHaveCommitted: false, retryable: false } : { ...failureInfo("RECOVERY"), mayHaveCommitted: false } }) };
+  }
+  // Step 4: a split payment travels beside the sale's own (hashed) arguments, never inside them
+  const payments = name === "complete_sale" && Array.isArray(args.p_payments) ? (args.p_payments as unknown[]) : null;
+  if (payments) { const { p_payments: _drop, ...rest } = args; void _drop; args = rest; }
+  const send: SendContext = { payments, offlineAuth: offlineAuth ?? null };
   // 087 backend: executor RPCs only through op_execute_v87 (legacy paths are closed there)
   // (an operation that carries an epoch was created against an 087 server: always the v87 path)
-  if (EXECUTOR_RPCS.has(name) && (v87Routing() || opEpoch)) return viaExecutor87(name, args, timeoutMs, actorId, opEpoch);
+  if (EXECUTOR_RPCS.has(name) && (v87Routing() || opEpoch)) return viaExecutor87(name, args, timeoutMs, actorId, opEpoch, send);
   if (EXECUTOR_RPCS.has(name) && mayUseExecutor()) {
-    const viaExec = await viaExecutor(name, args, timeoutMs, actorId);
+    const viaExec = await viaExecutor(name, args, timeoutMs, actorId, send);
     if (viaExec !== "absent") return viaExec;
     // op_execute does not exist on this server: nothing ran. 085 behaviour.
     noteCapability("absent");
   }
-  const direct = { ...(await runRequest(supabase.rpc(name, args), name, timeoutMs)), via: "direct" as const };
+  const direct = { ...(await runRequest(rpcRequest(name, args, send), name, timeoutMs)), via: "direct" as const };
+  if (payments && direct.error && isMissingFunction(direct.error, SPLIT_RPC)) return { data: null, status: direct.status, via: "direct", error: splitUnsupportedError(direct.status) };
   if (EXECUTOR_RPCS.has(name) && executorRequired(direct.error)) {
     // An 086 server refused the legacy path for this key (nothing ran): the
     // executor exists after all (e.g. a stale schema cache). Ask it.
     noteDemonstrated();
     noteCapability("unknown");
-    const viaExec = await viaExecutor(name, args, timeoutMs, actorId);
+    const viaExec = await viaExecutor(name, args, timeoutMs, actorId, send);
     if (viaExec !== "absent") return viaExec;
   }
   return direct;
@@ -610,7 +707,7 @@ export async function callRpc(
   // Same rule as the queue (stampOperationArgs): every in-scope caller mints
   // the key up front; the actor is stamped exactly as a queued replay is.
   args = stampOperationArgs(name, args);
-  let outcome = await attempt(name, args, timeoutMs, actorId, options.opEpoch);
+  let outcome = await attempt(name, args, timeoutMs, actorId, options.opEpoch, options.offlineAuth);
   // An attempt whose outcome is unknown (timeout, lost reply) stays unknown
   // until the SERVER answers for this key: a later attempt that never
   // reached the operation (401, edge block, network, another session…) does
@@ -620,7 +717,7 @@ export async function callRpc(
   for (let n = 0; n < retries && outcome.error?.transient && outcome.error.failure.klass !== "RECOVERY"; n++) {
     if (typeof navigator !== "undefined" && navigator.onLine === false) break;
     await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[Math.min(n, RETRY_DELAYS_MS.length - 1)]));
-    outcome = await attempt(name, args, timeoutMs, actorId, options.opEpoch);
+    outcome = await attempt(name, args, timeoutMs, actorId, options.opEpoch, options.offlineAuth);
     if (outcome.error?.failure.mayHaveCommitted) uncertain = true;
   }
   if (uncertain) outcome = keepUnknown(outcome);

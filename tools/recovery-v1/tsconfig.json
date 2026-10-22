@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.app.json",
+  "compilerOptions": { "types": ["node"], "tsBuildInfoFile": "../../node_modules/.tmp/recovery-tools.tsbuildinfo" },
+  "include": ["./verify-recovery.ts", "./integration-smoke.ts", "./witness-local.ts"],
+  "exclude": []
+}

@@ -1,3 +1,4 @@
+import { cashPartOf } from "../finance/payments";
 import type { Refund, Sale, Shift } from "../../types";
 
 /**
@@ -14,8 +15,9 @@ export const buildShiftBreakdown = (
   const activeSales = shiftSales.filter((sale) => sale.status !== "VOID");
   const cashSales = activeSales.filter((sale) => sale.paymentMethod === "CASH");
   const otherSales = activeSales.filter((sale) => sale.paymentMethod !== "CASH");
-  const cashTotal = cashSales.reduce((sum, sale) => sum + sale.totalMmk, 0);
-  const otherTotal = otherSales.reduce((sum, sale) => sum + sale.totalMmk, 0);
+  // Step 4: a split sale known to this device counts only its CASH part as cash (cashPartOf)
+  const cashTotal = activeSales.reduce((sum, sale) => sum + cashPartOf(sale), 0);
+  const otherTotal = activeSales.reduce((sum, sale) => sum + sale.totalMmk, 0) - cashTotal;
   const voidedCount = shiftSales.length - activeSales.length;
 
   const cashSaleIds = new Set(cashSales.map((sale) => sale.id));

@@ -1,9 +1,13 @@
 # Provisional financial migrations (PFIN-A, PFIN-B, PCOST-A)
 
+**Order, checksums, prerequisites and gates of the whole sequence** (numbered 086–088, these files, the held PFIN-C and
+Recovery V1): `SEQUENCE.json`, checked by `tools/migration-sequence/verify.py`; design and inventory:
+`docs/selfhost-migration/phase-g/final-migration-sequence.md`; numbering (088 is retired): `supabase/migrations/NUMBERING.md`.
+
 These files are **not** in `supabase/migrations/` on purpose: nothing applies them automatically, and they carry no
-number. Every number from 088 to 099 is already claimed by the 1.0.17 master implementation plan v2 (§5.2; a planning
-document kept outside this repository's history), for example 088 sale_payments, 089 cash_movements / close_shift v2, 090 refund line model, 097 report RPCs). The coordinator
-assigns numbers. Until then the identifiers below are the only names to use.
+number. The 1.0.17 master implementation plan v2 (a planning document kept outside this repository's history) uses
+088–099 as **labels** (e.g. 088 sale_payments); they are not numbers. 088 itself is a retired number
+(`supabase/migrations/NUMBERING.md`). The coordinator assigns the next free number at owner approval. Until then the identifiers below are the only names to use.
 
 | Id | File | What | Touches 087-guarded tables | Depends on |
 |---|---|---|---|---|
@@ -16,8 +20,8 @@ PFIN-A and PFIN-B are independent of each other: either can be installed or roll
 runs without PFIN-A's indexes, only slower. Rollbacks (`PFIN-*.rollback.sql`) only drop objects; none changes or
 deletes data.
 
-A third migration, the refund cap PFIN-C, is **held** and not part of this set. If present, it lives in `held/` with
-its own notes; nothing here needs it. The PFIN-B rollback refuses to run while PFIN-C's triggers exist, and is a no-op
+A third migration, the refund cap PFIN-C, is **held** and not part of this set. Its reviewed, byte-identical copy lives
+in `held/` with its own notes (still held: owner decisions P-2 and P-6); nothing here needs it. The PFIN-B rollback refuses to run while PFIN-C's triggers exist, and is a no-op
 check otherwise.
 
 ## How they must be applied
@@ -142,4 +146,5 @@ Switches:
 | P-5 | Whether to align `refund_void_requests_sel` with `sales_sel` (RLS) | unchanged; reports use aggregates so they do not depend on it |
 | P-7 | Whether ADMIN org-wide reports need more than 93 days per call (needs pre-aggregation) | ORG level limited to 93 days; per-shop reports up to 367 days |
 
-P-2 and P-6 concern the held PFIN-C. Its notes travel with the held files (`held/README.md`), which are not committed with this set.
+P-2 and P-6 concern the held PFIN-C. Its notes travel with the held files (`held/README.md`), kept byte-identical to the
+archived originals (`verify.py check-repo --held-originals`).

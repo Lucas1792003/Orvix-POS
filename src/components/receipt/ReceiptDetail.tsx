@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuthStore } from "../../stores/authStore";
 import { useDataStore } from "../../stores/dataStore";
@@ -10,7 +10,8 @@ import { ReceiptPreview } from "../pos/ReceiptPreview";
 import { SaleVoucher } from "../sales/SaleVoucher";
 import { RefundModal } from "../sales/RefundModal";
 import { VoidModal } from "../sales/VoidModal";
-import { buildRefundState, planRefundRequest } from "../../features/sales/service";
+import { attachRefundLines, buildRefundState, planRefundRequest } from "../../features/sales/service";
+import { fetchSalePayments, finCapabilities, type CanonicalPart, type FinCapabilities, NO_FIN_CAPABILITIES } from "../../features/finance/finCompletion";
 import { hasPermission } from "../../lib/permissions";
 import { formatDateTime } from "../../lib/utils";
 import { printReceipt } from "../../lib/print";
@@ -64,6 +65,25 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
     () => allRefunds.filter((refund) => refund.saleId === saleId),
     [allRefunds, saleId]
   );
+  // Step 4 (PFIN-D / PFIN-E): the payment lines as the server recorded them, and whether refund lines are recorded
+  const [caps, setCaps] = useState<FinCapabilities>(NO_FIN_CAPABILITIES);
+  const [serverPayments, setServerPayments] = useState<CanonicalPart[] | null>(null);
+  const [noRestock, setNoRestock] = useState<Record<string, boolean>>({});
+  const [payoutMethod, setPayoutMethod] = useState<string | null>(null);
+  const saleKnownToServer = !!sale && !sale.pendingSync && !sale.pendingConfirmation;
+  useEffect(() => {
+    let live = true;
+    setServerPayments(null);
+    void finCapabilities().then(async (c) => {
+      if (!live) return;
+      setCaps(c);
+      if (c.splitPayments && saleKnownToServer) {
+        const res = await fetchSalePayments(saleId);
+        if (live && res.status === "ok") setServerPayments(res.data);
+      }
+    }).catch(() => undefined);
+    return () => { live = false; };
+  }, [saleId, saleKnownToServer]);
 
   if (!sale) {
     return (
@@ -120,6 +140,17 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
   // (the server marks any refunded sale REFUNDED, ORV-030).
   const refundState = buildRefundState(sale, saleItems, refundsForSale);
   const refundPlan = planRefundRequest(refundState, refundSelection);
+  const payments = sale.payments ?? serverPayments ?? undefined;
+  const shownSale = payments && !sale.payments ? { ...sale, payments } : sale;
+  const PAYOUT_LABEL: Record<string, string> = { CASH: t("fin", "methodCash"), BANK_TRANSFER: t("fin", "methodBank"),
+    MOBILE_WALLET: t("fin", "methodWallet"), CARD: t("fin", "methodCard"), OTHER: t("fin", "methodOther") };
+  const payoutMethods = (payments ?? []).map((p) => ({ method: p.method, label: PAYOUT_LABEL[p.method] ?? p.method }));
+  // a single-method sale keeps the legacy payout rule (no payout recorded); a split sale names its payout
+  const effectivePayout = payoutMethods.length > 1 ? payoutMethod : null;
+  const lineDetail = caps.refundLines && saleKnownToServer ? {
+    noRestock, onToggleRestock: (key: string, value: boolean) => setNoRestock((m) => ({ ...m, [key]: value })),
+    payoutMethods, payoutMethod: effectivePayout, onChangePayout: (m: string) => setPayoutMethod(m),
+  } : undefined;
   const hasRefundableUnits = refundState.lines.some((line) => !line.ambiguous && line.remainingSoldUnits > 0);
   const statusNote = refundState.partiallyRefunded
     ? "PARTIALLY REFUNDED"
@@ -186,12 +217,16 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
   const handleRequestRefund = async () => {
     if (!currentUserId) return;
     if (refundPlan.items.length === 0 || refundPlan.errors.length > 0) return;
-    const items = refundPlan.items;
+    const items = lineDetail
+      ? attachRefundLines(refundState, refundSelection, refundPlan, { serverSale: true, noRestock, payoutMethod: effectivePayout })
+      : refundPlan.items;
     try {
       await requestRefund({ saleId: sale.id, items, reason: refundReason || "No reason", actorId: currentUserId });
       setRefundOpen(false);
       setRefundReason("");
       setRefundSelection({});
+      setNoRestock({});
+      setPayoutMethod(null);
       toast({ title: "Refund request submitted", variant: "success" });
     } catch (error) {
       toast({
@@ -219,7 +254,10 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
   // Void: only an untouched sale (the server voids NORMAL sales only).
   // Refund: any non-void sale with units left and no refund already waiting.
   const showVoidRequest = canRequestVoid && isNormal && !refundState.hasApprovedRefund;
-  const showRefundRequest = canRequestRefund && sale.status !== "VOID" && hasRefundableUnits && !refundState.hasPendingRefund;
+  // Step 4: on a server with split payments, a refund waits until this sale's payment lines are known (a split sale
+  // must name how the money goes back; the legacy rule would count all of it as cash)
+  const paymentsKnown = !caps.splitPayments || !saleKnownToServer || Boolean(sale.payments?.length) || serverPayments !== null;
+  const showRefundRequest = canRequestRefund && sale.status !== "VOID" && hasRefundableUnits && !refundState.hasPendingRefund && paymentsKnown;
   const showRequestActions = showVoidRequest || showRefundRequest;
   // The server refuses approving one's own request: do not offer it.
   const visibleApprovals = pendingRequests.filter(
@@ -278,13 +316,13 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
         // `.receipt` node is what Print / Reprint output — the print CSS
         // isolates it regardless of where it sits on screen.
         <SaleVoucher
-          sale={sale}
+          sale={shownSale}
           lines={lines}
           shop={shop}
           cashier={cashier}
           aside={
             <ReceiptPreview
-              sale={sale}
+              sale={shownSale}
               lines={lines}
               shop={shop}
               cashier={cashier}
@@ -294,7 +332,7 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
         />
       ) : (
         <ReceiptPreview
-          sale={sale}
+          sale={shownSale}
           lines={lines}
           shop={shop}
           cashier={cashier}
@@ -374,6 +412,7 @@ export const ReceiptDetail = ({ saleId, variant = "page", backTo }: ReceiptDetai
         onChangeReason={setRefundReason}
         onClose={() => setRefundOpen(false)}
         onSubmit={() => void handleRequestRefund()}
+        lineDetail={lineDetail}
       />
     </div>
   );

@@ -34,3 +34,27 @@ describe("RefundModal", () => {
     expect(html).toMatch(/<button[^>]*\sdisabled=""[^>]*>Submit/); // nothing selected
   });
 });
+
+describe("RefundModal line detail (Step 4, PFIN-E)", () => {
+  const renderDetail = (selection: Record<string, number>, payoutMethods: { method: string; label: string }[], payoutMethod: string | null) =>
+    renderToStaticMarkup(
+      <RefundModal
+        open lines={state.lines} selection={selection} plan={planRefundRequest(state, selection)} reason=""
+        productNames={{ p1: "Tea", p2: "Rice" }}
+        onChangeSelection={() => undefined} onChangeReason={() => undefined} onClose={() => undefined} onSubmit={() => undefined}
+        lineDetail={{ noRestock: {}, onToggleRestock: () => undefined, payoutMethods, payoutMethod, onChangePayout: () => undefined }}
+      />,
+    );
+  it("offers 'not back to stock' only for a selected line", () => {
+    const html = renderDetail({ i1: 1 }, [], null);
+    expect(html).toContain('aria-label="Do not return Tea to stock"');
+    expect(html).not.toContain('aria-label="Do not return Rice to stock"');
+  });
+  it("a split sale must name how the refund is paid back before it can be submitted", () => {
+    const methods = [{ method: "CASH", label: "Cash" }, { method: "CARD", label: "Card" }];
+    expect(renderDetail({ i1: 1 }, methods, null)).toMatch(/<button[^>]*\sdisabled=""[^>]*>Submit/);
+    expect(renderDetail({ i1: 1 }, methods, "CARD")).not.toMatch(/<button[^>]*\sdisabled=""[^>]*>Submit/);
+    // a single-method sale keeps the legacy rule: no payout choice is shown
+    expect(renderDetail({ i1: 1 }, [{ method: "CASH", label: "Cash" }], null)).not.toContain("Paid back as");
+  });
+});

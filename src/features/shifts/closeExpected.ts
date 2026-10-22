@@ -1,4 +1,5 @@
 import { closeWouldExpect, fetchFinShiftReconciliation } from "../reports/finReports";
+import { fetchShiftCashSummary, finCapabilities } from "../finance/finCompletion";
 
 /**
  * Just before a close is sent: ask the server for the open shift's expected
@@ -11,6 +12,13 @@ export async function checkExpectedBeforeClose(
   shiftId: string,
   shownExpectedMmk: number,
 ): Promise<{ proceed: true } | { proceed: false; latestMmk: number }> {
+  // Step 4: a PFIN-D server closes with fin_shift_cash (split payments, cash movements, refund payouts)
+  if ((await finCapabilities()).cashMovements) {
+    const c = await fetchShiftCashSummary(shiftId);
+    const latest = c.status === "ok" ? c.data.expectedCashMmk : null;
+    if (latest === null) return { proceed: true };
+    return latest === shownExpectedMmk ? { proceed: true } : { proceed: false, latestMmk: latest };
+  }
   const r = await fetchFinShiftReconciliation(shiftId);
   const latest = r.status === "ok" ? closeWouldExpect(r.data) : null;
   if (latest === null) return { proceed: true };

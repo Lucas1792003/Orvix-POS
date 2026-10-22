@@ -7,6 +7,7 @@ import {
   type FinResult,
   type FinShiftReconciliation,
 } from "./finReports";
+import { fetchShiftCashSummary, finCapabilities, type ShiftCashSummary } from "../finance/finCompletion";
 
 export type FinState<T> = { status: "idle" } | { status: "loading" } | FinResult<T>;
 
@@ -93,5 +94,15 @@ export function useShiftReconciliations(shiftIds: string[] | null) {
     const ids = shiftIds ?? [];
     const results = await mapLimited(ids, REPORT_CONCURRENCY, (id) => fetchFinShiftReconciliation(id));
     return { status: "ok", data: Object.fromEntries(ids.map((id, i) => [id, results[i]])) };
+  });
+}
+
+/** Step 4 (PFIN-D): the server's authoritative cash of a shift (opening, cash sales, refunds, movements, expected).
+ *  `unavailable / NOT_INSTALLED` when the server has no PFIN-D — the caller then keeps the PFIN-B figure. */
+export function useShiftCash(shiftId: string | null, nonce = 0) {
+  return useFinRequest<ShiftCashSummary>(shiftId === null ? null : `${shiftId}|${nonce}`, async () => {
+    const caps = await finCapabilities();
+    if (!caps.cashMovements) return { status: "unavailable", reason: "NOT_INSTALLED", message: "PFIN-D is not installed on this server" };
+    return fetchShiftCashSummary(shiftId as string);
   });
 }

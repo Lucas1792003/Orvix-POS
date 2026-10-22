@@ -1,4 +1,5 @@
 import { supabase } from "../../lib/supabase";
+import { RecoveryV1Blocked, requireRecoveryV1Write } from "../../recovery/client";
 import { uuidV7TimeMs } from "../../lib/executorRpcs";
 import { mayDepend, type DependencyContext, type DependencySubject } from "./dependencies";
 import { belongsToBackend, currentBackendOrigin, quarantineForeignOutboxEntries } from "../../lib/backendOrigin";
@@ -8,7 +9,7 @@ import { isNetworkError } from "../../lib/errors";
 import { classifyFailure, holdBackoffMs } from "../../lib/failureClass";
 import { isPrimaryKeyDuplicate, runTableWrite } from "./tableWrite";
 import {
-  callRpc, currentActorId, IDEMPOTENCY_KEY_ARG, LEGACY_OPERATION, legacyOperationError, lookupOperation, newIdempotencyKey, RPC_TIMEOUT_MS,
+  callRpc, currentActorId, IDEMPOTENCY_KEY_ARG, LEGACY_OPERATION, legacyOperationError, lookupOperation, idempotencyKeyFor, RPC_TIMEOUT_MS,
   RpcError, setActorSource, stampOperationArgs, v87Routing, type RpcOutcome,
 } from "./idempotentRpc";
 import { recoveryCodeOf } from "../../lib/failureClass";
@@ -38,7 +39,7 @@ setRecoveryOrgSource(() => useAuthStore.getState().currentOrgId ?? null);
 
 type EnqueueInput = Pick<
   SyncOutboxEntry,
-  "kind" | "name" | "args" | "shopId" | "provisional" | "refs" | "table" | "op" | "row" | "id" | "idempotencyKey" | "opEpoch"
+  "kind" | "name" | "args" | "shopId" | "provisional" | "refs" | "table" | "op" | "row" | "id" | "idempotencyKey" | "opEpoch" | "offlineAuth"
 >;
 
 // Queue position, assigned inside the enqueue transaction. `createdAt` has
@@ -192,7 +193,7 @@ export function buildOutboxRow(entry: EnqueueInput, overrides: Partial<SyncOutbo
   let idempotencyKey = entry.idempotencyKey;
   if (entry.kind === "rpc") {
     const existing = args?.[IDEMPOTENCY_KEY_ARG];
-    idempotencyKey = idempotencyKey ?? (typeof existing === "string" ? existing : newIdempotencyKey());
+    idempotencyKey = idempotencyKey ?? (typeof existing === "string" ? existing : idempotencyKeyFor(entry.name));
     // The same rule the online call uses (idempotentRpc.stampOperationArgs).
     args = stampOperationArgs(entry.name, { ...(args ?? {}), [IDEMPOTENCY_KEY_ARG]: idempotencyKey }, idempotencyKey);
   }
@@ -933,6 +934,18 @@ async function runDrainPass(): Promise<DrainResult> {
     notifyQueueChanged();
   }
   if ((await pendingInQueueOrder()).length === 0) return "drained";
+  try {
+    await requireRecoveryV1Write(useAuthStore.getState().currentOrgId ?? null, null, { requireDevice: false });
+  } catch (error) {
+    // A recovery-aware server that did not accept this sign-in (after one refresh): the same
+    // sign-in prompt as the 085 path below. The queue is kept; nothing was sent.
+    if (error instanceof RecoveryV1Blocked && error.reason === "authorization") {
+      await setNeedsReauth("The server did not accept this device's sign-in. Sign in again to resume syncing.");
+      return "needs-reauth";
+    }
+    useSyncStore.getState().setStatus({ lastTransientError: error instanceof Error ? error.message : "Recovery evidence unavailable; queue preserved." });
+    return "backoff";
+  }
   // W8 Phase 0: the server no longer has records this till had loaded from it
   // (possibly restored from an older backup): nothing is sent or looked up
   // automatically until an owner acknowledges it (Sync page).
@@ -1153,7 +1166,7 @@ async function runDrainPass(): Promise<DrainResult> {
 
     let outcome: RpcOutcome = entry.kind === "table_write"
       ? await runTableWrite(entry.table!, entry.op!, entry.row, entry.id!, entry.opEpoch ?? null)
-      : await callRpc(entry.name, resolvedArgs ?? {}, { actorId: actorOf(entry), opEpoch: entry.opEpoch ?? null });
+      : await callRpc(entry.name, resolvedArgs ?? {}, { actorId: actorOf(entry), opEpoch: entry.opEpoch ?? null, offlineAuth: entry.offlineAuth ?? null });
     if (entry.kind === "rpc" && outcome.via) {
       await localDb.syncOutbox.update(entry.localId, { protocol: outcome.via });
     }
@@ -1170,6 +1183,16 @@ async function runDrainPass(): Promise<DrainResult> {
       await markFinal(entry, outcome.serverOutcome, outcome.error.message);
       continue;
     }
+    // Step 4: the server did not accept a sale recorded OFFLINE under a capability (stale epoch, revoked
+    // device, exposure, sync deadline, integrity, reused sequence, …: recovery_v1.offline_problem, raised as
+    // PT503 "[offline_…]"). Retrying can never change that answer: it waits for an owner's review, with its
+    // key, arguments and offline authorization (never deleted, never re-keyed, never resent automatically).
+    const offlineHeld = outcome.error && entry.offlineAuth ? /\[(offline_[a-z_]+)\]/.exec(outcome.error.message) : null;
+    if (offlineHeld) {
+      await holdForOwnerReview(entry, "RECOVERY_V1_OFFLINE_HELD",
+        `Held for review: the server did not accept this sale recorded offline (${offlineHeld[1]}). It keeps its original key and offline authorization and waits for an owner's review (Sync).`);
+      continue;
+    }
     // 087 recovery refusal: nothing ran, nothing was recorded. A refusal of
     // THIS operation (created under an older epoch, or without one) waits for
     // an owner — never resent, re-stamped or stopped automatically; anything
@@ -1181,6 +1204,12 @@ async function runDrainPass(): Promise<DrainResult> {
         // a row that resolves to no organisation, while another organisation is held: this one waits (5 min)
         await park(entry, "recovery", outcome.error.message, 5 * 60_000);
         return "backoff";
+      }
+      // Recovery V1 integrity (contradictory local evidence or a malformed server answer): nothing was
+      // sent; it stops for a person instead of being retried silently. Key, arguments, flags kept.
+      if (outcome.error.failure.retryable === false) {
+        await holdForOwnerReview(entry, "RECOVERY_V1_INTEGRITY", `Not sent: ${outcome.error.message} It keeps its original key and waits for an owner's review (Sync).`);
+        continue;
       }
       if (code === "PRE_EPOCH_OPERATION" || code === "CLIENT_UPGRADE_REQUIRED" || code === LEGACY_OPERATION) {
         await holdForOwnerReview(entry, code, `Not executed: the server treats it as an operation from before its current recovery epoch (${code}). It keeps its original key, arguments and epoch, is never resent or stopped automatically, and waits for an owner's review (Sync).`);
@@ -1645,6 +1674,7 @@ export async function retryOutboxEntry(localId: string): Promise<void> {
   // send it to the wrong server. It can only be exported and reconciled.
   const entry = await localDb.syncOutbox.get(localId);
   if (!entry) return;
+  await requireRecoveryV1Write(entry.orgId ?? useAuthStore.getState().currentOrgId ?? null, entry.shopId);
   if (entry.status === "archived") {
     throw new Error("This entry is set aside. An owner restores it first (Set aside list), then it syncs again.");
   }
@@ -1757,6 +1787,7 @@ export async function stopOnServer(localId: string, statement: string): Promise<
   if (text.length < STOP_STATEMENT_MIN) throw new Error(`Write down what you established and why it may be stopped (at least ${STOP_STATEMENT_MIN} characters). Nothing was changed.`);
   const entry = await localDb.syncOutbox.get(localId);
   if (!entry) throw new OutboxActionError("not-found", "This entry is no longer on this till.");
+  await requireRecoveryV1Write(entry.orgId ?? useAuthStore.getState().currentOrgId ?? null, entry.shopId, { requireDevice: false });
   const myOrg = useAuthStore.getState().currentOrgId ?? null;
   if (entry.orgId && entry.orgId !== myOrg) throw new Error("This entry belongs to another organisation; only its own owner can decide it. Nothing was changed.");
   if (entry.status === "quarantined" || !belongsToBackend(entry, currentBackendOrigin())) {
@@ -1913,6 +1944,8 @@ export async function setAsideOutboxEntry(
     throw new OutboxActionError("export-first", "Export pending transactions first (in this session), keep the file, then set the entry aside.");
   }
   const actor = useAuthStore.getState().currentUserId ?? undefined;
+  const before = await localDb.syncOutbox.get(localId);
+  if (before) await requireRecoveryV1Write(before.orgId ?? useAuthStore.getState().currentOrgId ?? null, before.shopId, { requireDevice: false });
   const updated = await localDb.transaction("rw", localDb.syncOutbox, localDb.syncState, async () => {
     const entry = await localDb.syncOutbox.get(localId);
     if (!entry) throw new OutboxActionError("not-found", "This entry is no longer in the queue (it may have synced).");
@@ -1948,6 +1981,8 @@ export async function restoreSetAsideEntry(localId: string): Promise<SyncOutboxE
   if (!isOwnerSession()) {
     throw new OutboxActionError("not-owner", "Only the owner (administrator) can restore a set-aside entry.");
   }
+  const beforeRestore = await localDb.syncOutbox.get(localId);
+  if (beforeRestore) await requireRecoveryV1Write(beforeRestore.orgId ?? useAuthStore.getState().currentOrgId ?? null, beforeRestore.shopId, { requireDevice: false });
   const restored = await localDb.transaction("rw", localDb.syncOutbox, localDb.shifts, localDb.stockTransfers, localDb.syncState, async () => {
     const entry = await localDb.syncOutbox.get(localId);
     if (!entry) throw new OutboxActionError("not-found", "This entry is no longer on this till.");

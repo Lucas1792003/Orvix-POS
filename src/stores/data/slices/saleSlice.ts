@@ -1,8 +1,9 @@
 import type { StateCreator } from "zustand";
-import type { DataState, SaleState, CreateSaleInput } from "../types";
+import type { DataState, SaleState, CreateSaleInput, RefundItemInput } from "../types";
 import type { AuditLog, Inventory, InventoryMovement, Refund, Sale, SaleItem } from "../../../types";
 import { newId } from "../../../lib/id";
 import { calculateCartTotals } from "../../../features/pos/service";
+import { planPayments } from "../../../features/finance/finCompletion";
 import { recordIdMapping } from "../outbox";
 import { beginOperation, newIdempotencyKey, ONLINE_ONLY_RETRIES, type OperationContext } from "../idempotentRpc";
 import { callOnlineOnly } from "../onlineOnly";
@@ -59,7 +60,7 @@ const mergeRefundRequest = (current: Refund[], request: Refund): Refund[] => {
 // replay verbatim once back online) so the two can never drift apart — the
 // same event time AND the same idempotency key on every attempt.
 const buildCompleteSaleArgs = (
-  { shopId, shiftId, cartItems, cartDiscountPct, paymentMethod, paidMmk }: CreateSaleInput,
+  { shopId, shiftId, cartItems, cartDiscountPct, paymentMethod, paidMmk, payments }: CreateSaleInput,
   get: () => DataState,
   { createdAt, idempotencyKey }: OperationContext,
 ) => {
@@ -112,6 +113,9 @@ const buildCompleteSaleArgs = (
     // Minted when the sale was created; a retry after a lost response
     // returns the original result instead of a second sale (Phase D).
     p_idempotency_key: idempotencyKey,
+    // Step 4 (PFIN-D): the split travels beside the sale (idempotentRpc sends it through
+    // fin_complete_sale_split, never inside complete_sale's own hashed arguments).
+    ...(payments && payments.length > 0 ? { p_payments: payments } : {}),
   };
 };
 
@@ -130,8 +134,10 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
       ? result
       : { ...result, items: result.items.map(stripLineCost) };
 
-  const applyCompleteSale = async (data: unknown, ackId: string): Promise<string> => {
-    const result = withoutHiddenCost(data as CompleteSaleResult);
+  const applyCompleteSale = async (data: unknown, ackId: string, payments?: CreateSaleInput["payments"]): Promise<string> => {
+    const confirmed = withoutHiddenCost(data as CompleteSaleResult);
+    // the server confirmed THIS split (fin_complete_sale_split checks it); its reply carries no payment lines
+    const result = payments && payments.length > 0 ? { ...confirmed, sale: { ...confirmed.sale, payments } } : confirmed;
     // Server rows + the effects of other unresolved entries (stockLedger.ts).
     const shownStock = serverStockRows(result.inventory, ackId);
 
@@ -162,7 +168,7 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
     // authorises a sale this till could not make offline (correction pass).
     await assertOfflineWriteEligible();
     assertStockKnown();
-    const { shopId, shiftId, cashierId, cartItems, cartDiscountPct, paymentMethod, paidMmk } = input;
+    const { shopId, shiftId, cashierId, cartItems, cartDiscountPct, paymentMethod, paidMmk, payments } = input;
     const now = op.createdAt;
     const saleId = newId("sale");
 
@@ -229,6 +235,7 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
       cashierId, status: "NORMAL",
       subtotalMmk: subtotal, discountMmk: itemDiscount + cartDiscount, cartDiscountPct,
       totalMmk: total, paymentMethod, paidMmk, changeMmk: Math.max(0, paidMmk - total),
+      ...(payments && payments.length > 0 ? { payments } : {}),
       createdAt: now, pendingSync: true, idempotencyKey: op.idempotencyKey,
       // Outcome unknown: shown as unconfirmed, never as a recorded sale.
       ...(stage.mode === "in-doubt" ? { pendingConfirmation: true } : {}),
@@ -267,7 +274,7 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   // The ONE argument builder for create_refund_void_request (online and queued).
   const buildRequestArgs = (
     saleId: string, type: "VOID" | "PARTIAL", reason: string,
-    items: { productId: string; qtyUnits: number; amountMmk: number }[] | null | undefined, op: OperationContext,
+    items: RefundItemInput[] | null | undefined, op: OperationContext,
   ) => ({
     p_sale_id: saleId, p_type: type, p_reason: reason, p_items: items ?? null,
     p_created_at: op.createdAt, p_idempotency_key: op.idempotencyKey,
@@ -291,7 +298,7 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   // reconcileCompleteSale's recordIdMapping call.
   const stageRefundVoidRequest = async (
     saleId: string, type: "VOID" | "PARTIAL", reason: string,
-    items: { productId: string; qtyUnits: number; amountMmk: number }[] | undefined, actorId: string,
+    items: RefundItemInput[] | undefined, actorId: string,
     op: OperationContext, stage: Stage,
   ): Promise<void> => {
     await assertOfflineWriteEligible();
@@ -324,7 +331,7 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   // Write-ahead lifecycle (writeAhead.ts), like checkout.
   const submitRequest = (
     saleId: string, type: "VOID" | "PARTIAL", reason: string,
-    items: { productId: string; qtyUnits: number; amountMmk: number }[] | undefined, actorId: string,
+    items: RefundItemInput[] | undefined, actorId: string,
   ): Promise<void> => {
     const op = beginOperation();
     const sale = get().sales.find((s) => s.id === saleId);
@@ -350,11 +357,22 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
     // longer leave a committed sale without a durable record, and pressing
     // Confirm again while it is unresolved reuses it instead of a new key.
     const op = beginOperation();
+    if (input.payments && input.payments.length > 0) {
+      // the same rule the server applies (fin_complete_sale_split): refuse here, before anything is recorded
+      const total = calculateCartTotals(input.cartItems, input.cartDiscountPct).total;
+      const planned = planPayments(input.payments, total);
+      if (!planned.ok) throw new Error(`Payment split is not valid (${planned.problem.code}).`);
+      if (planned.plan.legacyMethod !== input.paymentMethod || planned.plan.paidMmk !== input.paidMmk) {
+        throw new Error("Payment split is not valid (method or amount received differs from the split).");
+      }
+    }
     const saleId = await submitOfflineCapable({
       set, name: "complete_sale", shopId: input.shopId, op,
+      // Step 4 (Part B): the value a sale recorded offline counts against the till's capability
+      offlineAmountMmk: calculateCartTotals(input.cartItems, input.cartDiscountPct).total,
       args: buildCompleteSaleArgs(input, get, op),
       needsProvisionalRefs: isProvisionalShift(input.shiftId),
-      applyOnline: applyCompleteSale,
+      applyOnline: (data, ackId) => applyCompleteSale(data, ackId, input.payments),
       stage: (stage) => stageSale(input, op, stage),
     });
     // 087 journal: which operation a printed receipt belongs to (opJournal.journalPrinted)
@@ -365,10 +383,13 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   // Called by the outbox once a queued complete_sale actually runs — swaps
   // the provisional sale/items/movements for the server's authoritative rows.
   reconcileCompleteSale: (data, provisional, ackId) => {
-    const result = withoutHiddenCost(data as CompleteSaleResult);
+    const confirmed = withoutHiddenCost(data as CompleteSaleResult);
     // Server rows + the effects of other unresolved entries (stockLedger.ts).
-    const shownStock = serverStockRows(result.inventory, ackId ?? null);
+    const shownStock = serverStockRows(confirmed.inventory, ackId ?? null);
     const provisionalSaleIds = new Set(provisional.find((p) => p.table === "sales")?.ids ?? []);
+    // the queued split was confirmed with the sale: keep its payment lines (the reply carries none)
+    const stagedPayments = get().sales.find((s) => provisionalSaleIds.has(s.id))?.payments;
+    const result = stagedPayments?.length ? { ...confirmed, sale: { ...confirmed.sale, payments: stagedPayments } } : confirmed;
     const provisionalItemIds = new Set(provisional.find((p) => p.table === "saleItems")?.ids ?? []);
     const provisionalMovementIds = new Set(provisional.find((p) => p.table === "movements")?.ids ?? []);
 
@@ -422,8 +443,11 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
   requestVoid: async ({ saleId, reason, actorId }) => submitRequest(saleId, "VOID", reason, undefined, actorId),
 
   requestRefund: async ({ saleId, items, reason, actorId }) => {
+    // Step 4 (PFIN-E): the line detail (sale line, restock) and the payouts travel with the item, verbatim
     const payload = items.map((item) => ({
       productId: item.productId, qtyUnits: item.qtyUnits, amountMmk: item.amountMmk,
+      ...(item.lines?.length ? { lines: item.lines.map((l) => ({ saleItemId: l.saleItemId, qtyUnits: l.qtyUnits, amountMmk: l.amountMmk, restock: l.restock })) } : {}),
+      ...(item.payouts?.length ? { payouts: item.payouts.map((p) => ({ method: p.method, amountMmk: p.amountMmk })) } : {}),
     }));
     return submitRequest(saleId, "PARTIAL", reason, payload, actorId);
   },
@@ -471,6 +495,11 @@ export const createSaleSlice: StateCreator<DataState, [], [], SaleState> = (set,
       movements: [...result.movements, ...state.movements],
       auditLogs: [...result.auditLogs, ...state.auditLogs],
     }));
+    // Step 4 (PFIN-E): a line refunded WITHOUT restock is taken back out of stock by a server trigger after the pinned
+    // approval built its reply (RETURN_NO_RESTOCK), so the reply's stock is too high: read the server's stock again.
+    const noRestock = (request.items ?? []).some((it) =>
+      ((it as { lines?: { restock?: boolean }[] }).lines ?? []).some((l) => l.restock === false));
+    if (noRestock) await get().refreshInventoryFromServer({ shopId: result.sale.shopId }).catch(() => undefined);
   },
 
   // Online only (a decision, like approval — never queued). The server

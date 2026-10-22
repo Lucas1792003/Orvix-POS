@@ -17,7 +17,8 @@ import { ShiftSummary } from "../../../components/shifts/ShiftSummary";
 import { StartShiftCard } from "../../../components/shifts/StartShiftCard";
 import { EndShiftCard } from "../../../components/shifts/EndShiftCard";
 import { buildShiftBreakdown } from "../service";
-import { useShiftReconciliation } from "../../reports/useFinReport";
+import { useShiftCash, useShiftReconciliation } from "../../reports/useFinReport";
+import { CashMovementsCard } from "../../../components/shifts/CashMovementsCard";
 import { checkExpectedBeforeClose, extraReasonError } from "../closeExpected";
 import { closeWouldExpect } from "../../reports/finReports";
 import {
@@ -123,7 +124,14 @@ export const ShiftsPage = () => {
   // shift (every approved refund, whoever entered it) when it answers;
   // otherwise this device's estimate from loaded sales, labelled as such.
   const ownRecon = useShiftReconciliation(ownOpenShift?.id ?? null);
-  const ownServerExpected = ownRecon.state.status === "ok" ? closeWouldExpect(ownRecon.state.data) : null;
+  // Step 4 (PFIN-D): on a server with cash movements / split payments, ITS expected cash (fin_shift_cash) is the one
+  // the close uses; the PFIN-B figure (which cannot see movements) is used only on a server without PFIN-D.
+  const [cashNonce, setCashNonce] = useState(0);
+  const ownCash = useShiftCash(ownOpenShift && !ownOpenShift.pendingSync ? ownOpenShift.id : null, cashNonce);
+  const pfinD = !(ownCash.state.status === "unavailable" && ownCash.state.reason === "NOT_INSTALLED") && ownCash.state.status !== "idle";
+  const ownServerExpected = pfinD
+    ? (ownCash.state.status === "ok" ? ownCash.state.data.expectedCashMmk : null)
+    : ownRecon.state.status === "ok" ? closeWouldExpect(ownRecon.state.data) : null;
   const ownCloseExpected = ownServerExpected ?? activeBreakdown?.expectedCash ?? 0;
 
   const baseActiveValidation = activeBreakdown
@@ -185,7 +193,7 @@ export const ShiftsPage = () => {
 
   const handleEndOwnShift = async () => {
     if (!ownOpenShift || !activeBreakdown) return;
-    if (ownRecon.state.status === "loading") {
+    if (ownRecon.state.status === "loading" || ownCash.state.status === "loading") {
       toast({ title: "Checking expected cash", description: "The server reconciliation is still loading. Try again in a moment.", variant: "error" });
       return;
     }
@@ -423,6 +431,15 @@ export const ShiftsPage = () => {
             </div>
 
             <ShiftSummary shift={ownOpenShift} breakdown={activeBreakdown} />
+
+            {!ownOpenShift.pendingSync ? (
+              <CashMovementsCard
+                shiftId={ownOpenShift.id}
+                cash={ownCash.state}
+                canManage={hasPermission(currentUser, "shift:manage_all")}
+                onChanged={() => setCashNonce((n) => n + 1)}
+              />
+            ) : null}
 
             <div className="text-xs text-slate-500" data-close-expected-source={ownServerExpected !== null ? "server" : "device"}>
               {ownServerExpected !== null

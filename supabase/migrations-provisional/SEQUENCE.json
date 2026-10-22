@@ -1,0 +1,305 @@
+{
+  "schema": "orvix-final-migration-sequence-v1",
+  "status": "PROPOSED - local integration branch ws/final-migrations; nothing here is applied anywhere; owner review required",
+  "verify": "python3 -I tools/migration-sequence/verify.py check-repo   |   ... plan --facts FACTS.json (facts: verify.py facts-sql, read-only)",
+  "production_recorded": {
+    "max_version": "085",
+    "held_numbered": [
+      "084"
+    ],
+    "source": "docs/lucashome-selfhost/status.md (last verified 2026-10-16; 084 deliberately not applied)"
+  },
+  "steps": [
+    {
+      "id": "086",
+      "kind": "numbered",
+      "file": "supabase/migrations/086_operation_outcomes.sql",
+      "sha256": "ddfbedbd301bb5ebf97b13c4844b3d43a5792746a6dd3b3604a41ded79826e53",
+      "status": "implemented-not-applied",
+      "requires": [],
+      "apply": "deploy/lucashome/apply-migrations.sh --from 086 --to 086",
+      "never_after": [
+        "087",
+        "RECOVERY_V1"
+      ],
+      "gates": [
+        "owner approval and a verified base backup with its LSN (shared rule for every file)",
+        "every precondition of docs/selfhost-migration/phase-g/migration-086.md 'Deployment' (stage 1; legacy v4 keys on the direct path; outside the e-mail backup window)",
+        "never schedule prune_idempotency_keys / op_purge_responses (migration-086.md)"
+      ]
+    },
+    {
+      "id": "PSAFE-A",
+      "kind": "provisional",
+      "file": "supabase/migrations-provisional/PSAFE-A_no_086_rerun_after_087.sql",
+      "sha256": "7b048b954a1362277a4f0dc478a519283def28cda9b92b7c643b3afc41f2fec3",
+      "rollback": "supabase/migrations-provisional/PSAFE-A.rollback.sql",
+      "status": "provisional",
+      "requires": [
+        "086"
+      ],
+      "apply": "psql --single-transaction -f FILE as the superuser runner (supabase_admin); inactive until 087",
+      "gates": [
+        "coordinator assigns a number (see supabase/migrations/NUMBERING.md)"
+      ]
+    },
+    {
+      "id": "PFIN-A",
+      "kind": "provisional",
+      "file": "supabase/migrations-provisional/PFIN-A_report_indexes.sql",
+      "sha256": "3c44a4162be882a956c206e929824d11f6baa8ba6564a037702bb99496ad4051",
+      "rollback": "supabase/migrations-provisional/PFIN-A.rollback.sql",
+      "status": "provisional",
+      "requires": [
+        "086"
+      ],
+      "apply": "psql --single-transaction -f FILE as the superuser runner; on its own (SHARE locks until commit)",
+      "gates": [
+        "coordinator assigns a number",
+        "quiet time (index builds hold SHARE locks)"
+      ]
+    },
+    {
+      "id": "PFIN-B",
+      "kind": "provisional",
+      "file": "supabase/migrations-provisional/PFIN-B_financial_reports.sql",
+      "sha256": "a1a3b02d8b2de40fbe1fcca403d4dd4021d0f79fe61e8a3ae22f07b858acb3c5",
+      "rollback": "supabase/migrations-provisional/PFIN-B.rollback.sql",
+      "status": "provisional",
+      "requires": [
+        "086"
+      ],
+      "apply": "psql --single-transaction -f FILE as the superuser runner",
+      "gates": [
+        "coordinator assigns a number",
+        "owner decisions P-1 (refund revenue date, caller passes p_refund_basis), P-3, P-5, P-7 recorded in migrations-provisional/README.md"
+      ]
+    },
+    {
+      "id": "PCOST-A",
+      "kind": "provisional",
+      "file": "supabase/migrations-provisional/PCOST-A_cost_privacy.sql",
+      "sha256": "105d7ea1fb65bdc39b5d4986aa80e4b4c1ea98c9b615d53cd6fc6f890bfe8141",
+      "rollback": "supabase/migrations-provisional/PCOST-A.rollback.sql",
+      "status": "provisional",
+      "requires": [
+        "086"
+      ],
+      "apply": "psql --single-transaction -f FILE as the superuser runner, at a quiet time, while 087 is absent or OPEN",
+      "never_after": [
+        "RECOVERY_V1"
+      ],
+      "first_apply_requires_087_open_or_absent": true,
+      "gates": [
+        "coordinator assigns a number",
+        "owner decision P-4 (who sees cost/profit; recommended MANAGER too)",
+        "released ADMIN clients show blank cost until updated (accepted by owner)"
+      ]
+    },
+    {
+      "id": "PFIN-D",
+      "kind": "provisional",
+      "file": "supabase/migrations-provisional/PFIN-D_payments_cash.sql",
+      "sha256": "bd2fc8c4907a6823559a46dc196b0152b7a23772ac28f330f0d127f3cabb6a8c",
+      "rollback": "supabase/migrations-provisional/PFIN-D.rollback.sql",
+      "status": "provisional; local implementation only (Step 4 Part A)",
+      "requires": [
+        "PFIN-B"
+      ],
+      "apply": "psql --single-transaction -f FILE as the superuser runner (re-registers 087 guards when 087 is present)",
+      "never_after": [
+        "RECOVERY_V1"
+      ],
+      "gates": [
+        "coordinator assigns a number",
+        "owner decision P-8 (who may record cash outflows, corrections and reversals; the file's conservative default: shift:manage_all, single person)",
+        "every till on a build of this tree before split payments or cash movements are used: an older till's close_shift is refused (FIN_CLOSE_SHIFT_UPGRADE_REQUIRED, nothing changed) once a shift has a split payment, a cash movement or a refund payout",
+        "backfill of one single-payment row per existing sale (asserted in the file); a quiet time"
+      ]
+    },
+    {
+      "id": "PFIN-E",
+      "kind": "provisional",
+      "file": "supabase/migrations-provisional/PFIN-E_refund_lines.sql",
+      "sha256": "5abd8da1c2c533800f5fd845c4134063591e05495bb2d7f50e71dd20017fceea",
+      "rollback": "supabase/migrations-provisional/PFIN-E.rollback.sql",
+      "status": "provisional; local implementation only (Step 4 Part A)",
+      "requires": [
+        "PFIN-D",
+        "PCOST-A"
+      ],
+      "apply": "psql --single-transaction -f FILE as the superuser runner (re-registers 087 guards when 087 is present)",
+      "never_after": [
+        "RECOVERY_V1"
+      ],
+      "gates": [
+        "coordinator assigns a number",
+        "refund lines are an opt-in contract of updated tills; legacy refund items keep their existing checks (the legacy cap is PFIN-C, held: P-2, P-6)",
+        "owner decision on the refund payout rule for split sales (the till asks the cashier; no default method is assumed)"
+      ]
+    },
+    {
+      "id": "PFIN-C",
+      "kind": "held",
+      "file": "supabase/migrations-provisional/held/PFIN-C_refund_net_paid_cap.sql",
+      "sha256": "3970ebc789f77a79bbfe1d0c4129726062965ef9b4a3462db3825b82f83f7780",
+      "rollback": "supabase/migrations-provisional/held/PFIN-C.rollback.sql",
+      "status": "implemented-not-applied (held; reviewed copy of worktrees/fin-backend held files, byte-identical)",
+      "optional": true,
+      "requires": [
+        "PFIN-B"
+      ],
+      "apply": "psql --single-transaction -f FILE as the superuser runner (re-registers 087 guards when 087 is present)",
+      "gates": [
+        "owner decision P-2 (per-unit refund pricing; the file enforces only the hard cap)",
+        "owner decision P-6 (when to ship; whether folded into the refund line model)",
+        "every till runs the net-paid refund math (src/features/sales/refundMath.ts allocateNetLineAmounts); RC3/1.0.16-era tills would have cart-discounted refund requests refused",
+        "PFIN-E (refund lines) coexists: PFIN-C caps legacy items, PFIN-E caps line-bearing items; apply PFIN-C after PFIN-E when both are wanted"
+      ],
+      "never_after": [
+        "RECOVERY_V1"
+      ]
+    },
+    {
+      "id": "087",
+      "kind": "numbered",
+      "file": "supabase/migrations/087_recovery_hold.sql",
+      "sha256": "2dbaf34673e243defb30a613345b3834b3118ca9e669d9ef81739800be37baa6",
+      "catalog_fingerprint": "3406f665ad19c883798e40d607412c4d",
+      "status": "implemented-not-applied",
+      "optional": false,
+      "requires": [
+        "086"
+      ],
+      "apply": "deploy/lucashome/apply-migrations.sh --from 087 --to 087 (installs HELD; opening needs the off-host witness authority and two people)",
+      "never_after": [
+        "RECOVERY_V1"
+      ],
+      "gates": [
+        "every precondition of docs/selfhost-migration/phase-g/migration-087.md 'Deployment' (copied in brief below; that list is authoritative)",
+        "host prerequisite: supautils.reserved_roles lists recovery_owner, recovery_authority, recovery_gate (recovery-roles-prerequisite.md)",
+        "maintenance gateway swap; synchronous_commit=on; till queues drained; every till online and signed in, no offline trading for 30 minutes before the step",
+        "every till on a v87.x-capable build; the v87 (non-.x) installer and every legacy build withdrawn",
+        "off-host witness authority provisioned (tools/recovery-authority); owner anchor by two people after every server start",
+        "Studio isolation applied; SUPABASE_DB_URL removed from edge functions",
+        "OWNER DECISION: once Recovery V1 adopts 087, 087 is frozen for good (no reviewed release/extension of an 087 hold can be added; V1 has no uninstall)"
+      ],
+      "note": "required before 088 and every later numbered migration (the planner refuses gaps); skipping 087 is an owner decision that needs a reviewed edit of HELD=084 in deploy/lucashome/apply-migrations.sh, otherwise the numbered chain stops at 086"
+    },
+    {
+      "id": "088",
+      "kind": "numbered-tombstone",
+      "file": "supabase/migrations/088_retired_number.sql",
+      "sha256": "a0348825d96262c14810fbdb51718ff35816611c9eb4658099e9a847e6f1ee83",
+      "status": "retired number (no-op); never reused",
+      "requires": [
+        "087"
+      ],
+      "apply": "apply-migrations.sh records it like any version; it changes nothing. Its rollback removes only its own ledger row, so 087 stays rollback-able before V1",
+      "gates": [],
+      "rollback": "supabase/rollbacks/088_retired_number.rollback.sql"
+    },
+    {
+      "id": "RECOVERY_V1",
+      "kind": "provisional",
+      "file": "supabase/migrations-provisional/RECOVERY_V1_guards.sql",
+      "sha256": "7a865a91ac0ea6daf6b7cb4051690f13c1861e1a81c01d4cfb05b0f86920141c",
+      "status": "provisional; local implementation only",
+      "requires": [
+        "085|086"
+      ],
+      "after_if_present": [
+        "087",
+        "PCOST-A",
+        "PFIN-A",
+        "PFIN-B",
+        "PSAFE-A",
+        "PFIN-C",
+        "PFIN-D",
+        "PFIN-E"
+      ],
+      "apply": "psql -X -v recovery_v1_install_ack=restrict-every-organization -f FILE (opens its own transaction; superuser)",
+      "effect": "restricts EVERY organization immediately; no reopen path exists",
+      "gates": [
+        "OWNER BLOCKER: offline limits (docs/recovery-v1/STEP4-DESIGN.md): the install's offline_policy is DEFAULT_UNAPPROVED test limits only with -v recovery_v1_offline_defaults=allow-unapproved-test-defaults; production needs an owner-signed offline-policy authorization (recovery_v1.set_offline_policy)",
+        "OWNER BLOCKER: the owner's RSA public key (>= 2048 bits) is given at install (-v recovery_v1_owner_public_key); without it no owner authorization (migration, offline policy, key enrollment) is ever possible; the private key never touches the server",
+        "OWNER BLOCKER: reopening an organization is still not provided (V1 restricts every organization at install; Script 2 scope) - offline selling applies only to ACTIVE organizations",
+        "OWNER BLOCKER: witness infrastructure and an offsite backup proven restorable",
+        "host prerequisite: supautils.reserved_roles also lists orvix_recovery_operator (the installer refuses otherwise when supautils is loaded)",
+        "ledger retention policy (V1 keeps every ledger row; recovery_v1.ledger_retention_report)",
+        "every till on a build of this integrated tree (V1 status gate, authorization handling); see minimum_client",
+        "087 adopted: the pinned fingerprint has been proven on the target image through apply-migrations.sh (supabase_admin) before the install",
+        "after V1: no provisional step (PSAFE-A/PFIN-*/PCOST-A) and no unauthorized DDL; schema changes only through recovery_v1.apply_authorized_migration with an owner-signed authorization bound to the exact SQL (sha256), the target database, the predecessor in the applied-migration chain, allowed commands and new tables (Step 4 Part C, forward repair only)",
+        "financial roadmap: PFIN-D (split payments, cash movements) and PFIN-E (refund lines, payouts, restock) land BEFORE V1; PFIN-C stays held (P-2, P-6)"
+      ]
+    }
+  ],
+  "forbidden_orders": [
+    {
+      "first": "RECOVERY_V1",
+      "then": "087",
+      "why": "087 disables every event trigger, installs unadopted; every organization QUARANTINED; its rollback drops V1's triggers"
+    },
+    {
+      "first": "RECOVERY_V1",
+      "then": "086",
+      "why": "V1 pins the idempotency stage (its DDL guard refuses the change)"
+    },
+    {
+      "first": "087",
+      "then": "086",
+      "why": "086's grant step takes the v87 executors away from every till (planner refuses; PSAFE-A refuses)"
+    },
+    {
+      "first": "RECOVERY_V1",
+      "then": "PCOST-A",
+      "why": "new cost tables would be unguarded; V1's DDL guard refuses new public tables"
+    },
+    {
+      "first": "RECOVERY_V1",
+      "then": "PFIN-C",
+      "why": "untested after V1; apply it before V1 or not at all"
+    },
+    {
+      "first": "RECOVERY_V1",
+      "then": "PFIN-D",
+      "why": "new financial tables would be unguarded; V1's DDL guard refuses unauthorized new public tables (after V1 only an owner-authorized migration)"
+    },
+    {
+      "first": "RECOVERY_V1",
+      "then": "PFIN-E",
+      "why": "as PFIN-D"
+    }
+  ],
+  "recommended_order": [
+    "086",
+    "PSAFE-A",
+    "PFIN-A",
+    "PFIN-B",
+    "PCOST-A",
+    "PFIN-D",
+    "PFIN-E",
+    "PFIN-C",
+    "087",
+    "088",
+    "RECOVERY_V1"
+  ],
+  "minimum_client": {
+    "rule": "per stage: 086 -> any keyed (074+) build; 087, PFIN-C, PCOST-A -> a v87.x build (b28f17d or later); RECOVERY_V1 -> a build of this integrated tree (V1 status gate, authorization vs network handling, signed device evidence); PFIN-D -> a build of this tree before any split payment / cash movement is used (older tills keep selling single payments; their close is refused once the shift has one)",
+    "why": [
+      "1.0.15 (published) is pinned to hosted Supabase at build time and sends no idempotency keys: it never reaches the self-hosted server; if it were pointed there its keyed RPCs are refused (074+) while some direct catalogue writes would still succeed",
+      "087: only v87.x builds (x-orvix-epoch, op_execute_v87); legacy builds keep selling locally on errors and must be withdrawn (migration-087.md)",
+      "PFIN-C: only builds with allocateNetLineAmounts (b28f17d has it; RC3 a722aa3 does not) request refunds the cap accepts on cart-discounted sales",
+      "PCOST-A: ADMIN builds before it show blank cost",
+      "RECOVERY_V1: b28f17d builds already hold PT503 as retryable with their keys but keep selling offline until refused; only this tree refuses offline financial writes once V1 is seen"
+    ],
+    "not_machine_distinguishable_today": "every build since RC1 (b777345) sends 'shwephala-pos/1.0.16 (validated-uploads; idem-v1; outbox-origin-v1; update-guard-v1)'; this tree adds the 'recovery-v1' capability token to X-Client-Info; the version label of the integrated build is an owner release decision (recommended 1.0.17)",
+    "forced_update": "none added; note that 1.0.15's updater installs on quit without a guard (release-1.0.16.md section 4.3)"
+  },
+  "post_v1_protocol": {
+    "name": "orvix-owner-authorization-v1 / recovery_v1.apply_authorized_migration",
+    "doc": "docs/recovery-v1/STEP4-DESIGN.md (Part C)",
+    "rule": "after RECOVERY_V1 a schema change runs only inside apply_authorized_migration: the owner signs (RSASSA-PKCS1-v1_5 SHA-256, offline key) an authorization naming the purpose 'migration', the exact SQL sha256, the target (database, system identifier, V1 install time), the current chain head, the allowed DDL commands and the new tables, with a short expiry and a single-use nonce. Unknown checksums, a wrong predecessor, a wrong target, an expired or replayed authorization, or any DDL outside the list are refused before anything runs; an interruption rolls the whole transaction back (the log records the step reached). New tables need org_id and row-level security and are guarded automatically. A compromised server cannot mint an authorization (it holds only the public key).",
+    "local_simulation_only": "tools/recovery-v1/owner/owner-sim.mjs (synthetic keys under the system temp directory)"
+  }
+}

@@ -20,7 +20,7 @@ describe("client identification", () => {
   });
 
   it("header: shwephala-pos/<version> (<capabilities>), parseable", () => {
-    expect(CLIENT_INFO).toBe(`shwephala-pos/${pkg.version} (validated-uploads; idem-v1; outbox-origin-v1; update-guard-v1)`);
+    expect(CLIENT_INFO).toBe(`shwephala-pos/${pkg.version} (validated-uploads; idem-v1; outbox-origin-v1; update-guard-v1; recovery-v1)`);
     expect(parseClientInfo(CLIENT_INFO)).toEqual({ name: "shwephala-pos", version: pkg.version, capabilities: [...CLIENT_CAPABILITIES] });
     expect(parseClientInfo(clientInfoHeader("1.2.3", ["validated-uploads"]))?.capabilities).toEqual(["validated-uploads"]);
     expect(parseClientInfo("supabase-js-web/2.106.1")).toBeNull();

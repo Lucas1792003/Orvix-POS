@@ -21,7 +21,8 @@ Both stop when the three 087 roles are reserved: supautils then refuses every ch
 | `recovery_owner` | 087 | never (owns every 087 object) |
 | `recovery_authority` | 087 | yes — the off-host witness authority |
 | `recovery_gate` | 087 | yes — the read-only restore gate |
-| `recovery_restorer` | proposed 088 only (not in 087) | never; reserve it when 088 is installed |
+| `recovery_restorer` | proposed by the original 088 only (that design is rejected; 088 is a retired number) | never created |
+| `orvix_recovery_operator` | Recovery V1 installer (provisional) | never; **must be listed in `supautils.reserved_roles` before V1 is installed** (the installer refuses otherwise when supautils is loaded): it holds EXECUTE on `recovery_v1.fence_key` |
 
 ## What 087 now checks (fail closed)
 

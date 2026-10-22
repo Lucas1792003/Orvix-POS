@@ -17,11 +17,12 @@ set -euo pipefail
 HOST=${HOST:-lucashome}; STACK=/srv/supabase/stack; BK=/srv/supabase/backup/bin
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 MIG="$REPO/supabase/migrations"; RB="$REPO/supabase/rollbacks"; HELD=084; DB_USER=supabase_admin
-FROM=""; TO=""; DRY=0; ROLLBACK=""; CONFIRM=0; ALLOW_SKIPPED=0
+FROM=""; TO=""; DRY=0; ROLLBACK=""; CONFIRM=0; ALLOW_SKIPPED=0; RV1_REVIEWED=0
 while [ $# -gt 0 ]; do case "$1" in
   --from) FROM=$2; shift 2;; --to) TO=$2; shift 2;; --dry-run) DRY=1; shift;;
   --rollback) ROLLBACK=$2; shift 2;; --owner-confirmed-till-queues-empty) CONFIRM=1; shift;;
   --allow-skipped) ALLOW_SKIPPED=1; shift;;
+  --recovery-v1-reviewed) RV1_REVIEWED=1; shift;;   # only with Recovery V1 installed; never for 086/087
   *) echo "unknown arg $1"; exit 2;; esac; done
 if [ -n "$ROLLBACK" ]; then [ -z "$FROM$TO" ] || { echo "--rollback takes no --from/--to"; exit 2; }
 else [ -n "$FROM" ] && [ -n "$TO" ] || { echo "usage: --from NNN --to NNN [--dry-run] | --rollback NNN --owner-confirmed-till-queues-empty [--dry-run]"; exit 2; }; fi
@@ -59,6 +60,7 @@ q > "$W/snapshot.txt" <<'SQL'
 SELECT 'F' || E'\t' || 'ledger_md5' || E'\t' || (SELECT md5(coalesce(string_agg(version || ':' || coalesce(to_jsonb(m)->>'statements', ''), '|' ORDER BY version), '')) FROM supabase_migrations.schema_migrations m);
 SELECT 'F' || E'\t' || 'ledger_cols' || E'\t' || (SELECT string_agg(attname, ',' ORDER BY attname) FROM pg_attribute WHERE attrelid = 'supabase_migrations.schema_migrations'::regclass AND attnum > 0 AND NOT attisdropped);
 SELECT 'F' || E'\t' || 'has_op_execute' || E'\t' || CASE WHEN to_regprocedure('public.op_execute(uuid,text,jsonb,text)') IS NOT NULL THEN 't' ELSE 'f' END;
+SELECT 'F' || E'\t' || 'has_recovery_v1' || E'\t' || CASE WHEN to_regnamespace('recovery_v1') IS NOT NULL THEN 't' ELSE 'f' END;
 SELECT 'F' || E'\t' || 'has_v87' || E'\t' || CASE WHEN to_regnamespace('recovery') IS NOT NULL OR to_regprocedure('public.op_execute_v87(uuid,text,jsonb,text,jsonb)') IS NOT NULL THEN 't' ELSE 'f' END;
 SELECT 'F' || E'\t' || 'idem_pk' || E'\t' || coalesce((SELECT string_agg(a.attname, ',' ORDER BY k.ord) FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY k(attnum, ord) JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum WHERE c.conrelid = to_regclass('public.idempotency_keys') AND c.contype = 'p'), '');
 SELECT 'L' || E'\t' || version || E'\t' || coalesce((SELECT string_agg(s, ',') FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(to_jsonb(m)->'statements') = 'array' THEN to_jsonb(m)->'statements' ELSE '[]' END) s WHERE s LIKE 'sha256:%'), '') || E'\t' || coalesce(jsonb_array_length(CASE WHEN jsonb_typeof(to_jsonb(m)->'statements') = 'array' THEN to_jsonb(m)->'statements' ELSE '[]' END), 0) FROM supabase_migrations.schema_migrations m ORDER BY version;
@@ -76,7 +78,7 @@ if [ -n "$ROLLBACK" ]; then
     --version "$ROLLBACK" ${FLAGS[@]+"${FLAGS[@]}"} --out "$W/plan" || exit 2
 else
   python3 -I "$HERE/migration_plan.py" forward --migrations "$MIG" --ledger "$W/ledger.tsv" --facts "$W/facts.tsv" \
-    --from "$FROM" --to "$TO" --held "$HELD" ${FLAGS[@]+"${FLAGS[@]}"} --out "$W/plan" || exit 2
+    --from "$FROM" --to "$TO" --held "$HELD" ${FLAGS[@]+"${FLAGS[@]}"} $([ "$RV1_REVIEWED" = 1 ] && echo --recovery-v1-reviewed) --out "$W/plan" || exit 2
 fi
 mkdir "$W/bundle"
 while read -r f; do

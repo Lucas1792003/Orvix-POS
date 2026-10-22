@@ -1,3 +1,4 @@
+import type { CanonicalPart, CashMovementKind } from "../../features/finance/finCompletion";
 import type {
   AuditLog,
   Brand,
@@ -43,12 +44,18 @@ export interface CreateSaleInput {
   cartDiscountPct: number;
   paymentMethod: "CASH" | "OTHER";
   paidMmk: number;
+  /** Step 4 (PFIN-D): a split / mixed payment. When present, paymentMethod and paidMmk must be the ones
+   *  planPayments() derived from it (the server checks); sent through fin_complete_sale_split. */
+  payments?: CanonicalPart[];
 }
 
 export interface RefundItemInput {
   productId: string;
   qtyUnits: number;
   amountMmk: number;
+  /** Step 4 (PFIN-E, optional): sale-line attribution with the restock choice, and the payout method(s). */
+  lines?: { saleItemId: string; qtyUnits: number; amountMmk: number; restock: boolean }[];
+  payouts?: { method: string; amountMmk: number }[];
 }
 
 export interface CreateTransferInput {
@@ -279,6 +286,9 @@ export interface ShiftState {
   shifts: Shift[];
   startShift: (input: { shopId: string; cashierId: string; openingCashMmk: number }) => Promise<string>;
   endShift: (input: { shiftId: string; closingCashMmk: number; varianceReason?: string }) => Promise<void>;
+  /** Step 4 (PFIN-D): cash put in or taken out of a shift's drawer. Online only, keyed, audited, never edited
+   *  (a mistake is corrected by a REVERSAL). Returns the server's authoritative expected cash afterwards. */
+  recordCashMovement: (input: { shiftId: string; kind: CashMovementKind; amountMmk: number | null; reason: string; reversesId?: string | null }) => Promise<{ expectedCashMmk: number | null }>;
   requireShiftForCashier: (shopId: string, cashierId: string) => Shift | undefined;
   /** Internal — called by the outbox drain once open_shift/close_shift
    *  actually runs server-side. Not for direct UI use. */

@@ -185,6 +185,7 @@ Details: [`../../desktop-app/release-1.0.16.md`](../../desktop-app/release-1.0.1
 
 The client also identifies itself on every request:
 `X-Client-Info: shwephala-pos/1.0.16 (validated-uploads; idem-v1; outbox-origin-v1; update-guard-v1)`.
+A build of the final migration integration tree adds the `recovery-v1` capability (see `../phase-g/final-migration-sequence.md` §4).
 
 **Matrix rows changed for the current build × lucashome:**
 

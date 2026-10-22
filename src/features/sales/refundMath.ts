@@ -205,6 +205,39 @@ export function planRefundRequest(state: RefundState, selection: Readonly<Record
   return { items, totalMmk, amounts, errors: [...new Set(errors)] };
 }
 
+/** Step 4 (PFIN-E): the optional line detail of a refund item (sale line, restock) and how the money goes back. */
+export interface RefundLineDetail { saleItemId: string; qtyUnits: number; amountMmk: number; restock: boolean }
+export interface RefundPayout { method: string; amountMmk: number }
+export interface DetailedRefundItem { productId: string; qtyUnits: number; amountMmk: number; lines?: RefundLineDetail[]; payouts?: RefundPayout[] }
+
+/**
+ * PFIN-E: attach the sale line (and its restock choice) to every planned item, and — when a payout method is
+ * chosen — the payout. Only for a sale the server already has (a provisional sale's line ids are local) and only
+ * for lines keyed by a real sale_items id. Lines are an opt-in contract: an item without them keeps the legacy
+ * rules. `noRestock[key]` = true: the goods are not returned to stock (damaged / not returned).
+ */
+export function attachRefundLines(
+  state: RefundState, selection: Readonly<Record<string, number>>, plan: RefundRequestPlan,
+  options: { serverSale: boolean; noRestock: Readonly<Record<string, boolean>>; payoutMethod: string | null },
+): DetailedRefundItem[] {
+  if (!options.serverSale) return plan.items;
+  const out: DetailedRefundItem[] = [];
+  let i = 0;
+  for (const line of state.lines) {
+    const units = Math.trunc(Number(selection[line.key] ?? 0));
+    if (!units || units < 0 || line.ambiguous || units > line.remainingSoldUnits) continue;
+    const item = plan.items[i++];
+    if (!item) break;
+    const detailed: DetailedRefundItem = { ...item };
+    if (!line.key.includes("#")) {
+      detailed.lines = [{ saleItemId: line.key, qtyUnits: item.qtyUnits, amountMmk: item.amountMmk, restock: options.noRestock[line.key] !== true }];
+    }
+    if (options.payoutMethod && item.amountMmk > 0) detailed.payouts = [{ method: options.payoutMethod, amountMmk: item.amountMmk }];
+    out.push(detailed);
+  }
+  return out;
+}
+
 /**
  * Does a request (e.g. one raised by an older app version, which used the
  * pre-discount line total) ask for more than the net amount still owed?

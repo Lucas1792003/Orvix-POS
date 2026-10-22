@@ -206,6 +206,7 @@ export function uploadRecordOf(r: JournalRecord): Record<string, unknown> {
     code: ev?.code ?? null, message: ev?.message ?? null, signed_reply: r.signedReply ?? null, acks: r.acks ?? null,
     contradiction: r.contradiction ?? null, replaced_by: r.replacedBy ?? null, replaces: r.replaces ?? null,
     events: r.events.slice(-12),
+    device_evidence_hash: r.deviceEvidenceHash ?? null,
   };
 }
 

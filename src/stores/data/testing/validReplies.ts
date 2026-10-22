@@ -20,6 +20,7 @@ export function validReply(rpc: string, overrides: Record<string, unknown> = {})
       };
     case "open_shift":
     case "close_shift":
+    case "fin_close_shift":
       return { shift: { id: id("shift"), shopId: "shop-1" }, auditLogs: [], ...overrides };
     case "create_refund_void_request":
       return { request: { id: id("refund"), saleId: "sale-1", status: "REQUESTED" }, auditLogs: [], ...overrides };
@@ -42,6 +43,8 @@ export function validReply(rpc: string, overrides: Record<string, unknown> = {})
     case "approve_void_request":
     case "approve_refund_request":
       return { request: { id: id("refund") }, sale: { id: id("sale") }, movements: [], inventory: [], auditLogs: [], ...overrides };
+    case "fin_record_cash_movement":
+      return { movement: { id: id("cm"), kind: "PAY_IN" }, cash: { expectedCashMmk: 0 }, ...overrides };
     default:
       return { ok: true, ...overrides };
   }

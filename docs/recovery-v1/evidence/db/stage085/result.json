@@ -1,0 +1,24 @@
+{
+  "stage": 85,
+  "financial_provisionals": false,
+  "schema": "actual scrubbed schema-only baseline + actual numbered migrations",
+  "schema_sha256": "ed1fadc304ecc51b2ef3024423cb3388eba0c58f7d286f50c41077baa7975270",
+  "plain_pg_shims": [
+    "auth/storage/publication",
+    "omit unavailable pg_cron/pg_net/vault extensions",
+    "remove PG17 MAINTAIN privilege on PG16"
+  ],
+  "baseline": {
+    "passed": 29,
+    "failed": 0
+  },
+  "total_sql_assertions": {
+    "passed": 75,
+    "failed": 0
+  },
+  "race_completion_preserved": true,
+  "synthetic_authenticated_encrypted_logical_restore": true,
+  "run_directory": "/private/tmp/orvix-recovery-v1-db-5u0wg31l",
+  "dump": "/private/tmp/orvix-recovery-v1-db-5u0wg31l/synthetic.dump",
+  "production_authorized": false
+}

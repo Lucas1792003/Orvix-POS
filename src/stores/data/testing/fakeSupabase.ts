@@ -76,6 +76,8 @@ export interface RecordedCall {
   mode: RpcMode;
   /** True when the server answered from its idempotency ledger. */
   replayed: boolean;
+  /** Request headers set on the builder (setHeader), e.g. x-orvix-offline (Step 4). */
+  headers?: Record<string, string>;
 }
 
 interface ServerSale {
@@ -183,6 +185,9 @@ function createFakeSupabase() {
   let serverClockOffsetMs = 0;
   // Migration 086 emulation.
   let executor = false;
+  // Step 4 (PFIN-D): fin_capabilities / fin_complete_sale_split (off by default, like a server without PFIN-D)
+  let fin = false;
+  const finSplits = new Map<string, string>(); // operation key -> canonical payment list (committed with the sale)
   let caller = { id: "user-1", admin: false, org: "org-1", aal2: false };
   // the server's message for a definitive refusal ("permanent-error")
   let rejectionMessage = "Insufficient stock for Tea Mix";
@@ -537,6 +542,31 @@ function createFakeSupabase() {
       const r = respond87(name, args, mode);
       if (r) return r as { data: unknown; error: unknown; status: number; replayed: boolean };
     }
+    if (name === "fin_complete_sale_split") {
+      if (!fin) return MISSING_FUNCTION(name);
+      const payments = (args.p_payments ?? []) as { method: string; amountMmk: number; tenderedMmk: number }[];
+      const inner = (args.p_args ?? {}) as Record<string, unknown>;
+      const cash = payments.some((p) => p.method === "CASH");
+      const paid = payments.reduce((t, p) => t + Number(p.tenderedMmk ?? p.amountMmk), 0);
+      if (inner.p_payment_method !== (cash ? "CASH" : "OTHER") || Number(inner.p_paid_mmk) !== paid) {
+        return { data: null, status: 400, replayed: false, error: { message: "FIN_PAYMENTS_INVALID: p_payment_method / p_paid_mmk must match the payment list", code: "P0001", details: null, hint: null } };
+      }
+      const canonicalList = JSON.stringify(payments);
+      const route = String(args.p_route);
+      // the real trigger writes sale_payments in the sale's own transaction: committed with it (also when the reply is lost)
+      const opKey = String(route === "direct" ? inner.p_idempotency_key : args.p_key);
+      const before = server.idempotency.get(opKey)?.state === "committed";
+      const stored = finSplits.get(opKey);
+      if (before && stored !== canonicalList) {
+        return { data: null, status: 400, replayed: false, error: { message: "FIN_PAYMENTS_MISMATCH: this operation key was already used with a different payment split", code: "P0001", details: null, hint: null } };
+      }
+      const bare = Object.fromEntries(Object.entries(inner).filter(([k]) => k !== "p_idempotency_key"));
+      const r = route === "direct" ? respond("complete_sale", inner, mode)
+        : route === "op_execute" ? respond("op_execute", { p_key: args.p_key, p_rpc: "complete_sale", p_args: bare, p_actor_id: args.p_actor_id }, mode)
+        : respond("op_execute_v87", { p_key: args.p_key, p_rpc: "complete_sale", p_args: bare, p_actor_id: args.p_actor_id, p_ctx: args.p_ctx }, mode);
+      if (!before && server.idempotency.get(opKey)?.state === "committed") finSplits.set(opKey, canonicalList);
+      return r;
+    }
     if (name === "op_execute" || name === "op_status") {
       if (!executor && !(inner87 && r87.enabled)) return MISSING_FUNCTION(name);
       if (name === "op_status" && mode === "network-error") return { ...NETWORK_FAILURE, replayed: false };
@@ -591,6 +621,22 @@ function createFakeSupabase() {
   };
 
   const rpc = (name: string, args: Record<string, unknown> = {}) => {
+    // This fixture models an 085/086/087 backend, which predates Safe
+    // Recovery V1. Capability discovery is read-only and must not consume
+    // a financial failure injected by a test for the next actual attempt.
+    if (name === "recovery_v1_status") {
+      const promise = Promise.resolve(MISSING_FUNCTION(name));
+      const builder = { abortSignal: () => builder, then: promise.then.bind(promise) };
+      return builder;
+    }
+    if (name === "fin_capabilities") {
+      const promise = Promise.resolve(fin
+        ? { data: { protocol: "orvix-fin-capabilities-v1", splitPayments: true, cashMovements: true, refundLines: true,
+            paymentMethods: ["CASH", "BANK_TRANSFER", "MOBILE_WALLET", "CARD", "OTHER"] }, error: null, status: 200 }
+        : MISSING_FUNCTION(name));
+      const builder = { abortSignal: () => builder, then: promise.then.bind(promise) };
+      return builder;
+    }
     if (READ_ONLY_RPCS.has(name)) {
       const mode: RpcMode = queuedModes.shift() ?? defaultMode;
       calls.push({ name, args, mode, replayed: false });
@@ -614,6 +660,7 @@ function createFakeSupabase() {
     if (raw) {
       const builder = {
         abortSignal: () => builder,
+        setHeader(header: string, value: string) { call.headers = { ...(call.headers ?? {}), [header]: value }; return builder; },
         then<T1 = unknown, T2 = never>(
           onfulfilled?: ((value: unknown) => T1 | PromiseLike<T1>) | null,
           onrejected?: ((reason: unknown) => T2 | PromiseLike<T2>) | null,
@@ -640,6 +687,10 @@ function createFakeSupabase() {
     const builder = {
       abortSignal(signal: AbortSignal) {
         void signal; // accepted like the real builder; the fake never aborts
+        return builder;
+      },
+      setHeader(header: string, value: string) {
+        call.headers = { ...(call.headers ?? {}), [header]: value };
         return builder;
       },
       then<T1 = unknown, T2 = never>(
@@ -771,6 +822,9 @@ function createFakeSupabase() {
     setDefaultMode: (mode: RpcMode) => { defaultMode = mode; },
     /** Migration 086 on the fake server (op_execute / op_status). */
     enableExecutor: (on = true) => { executor = on; },
+    /** Step 4: a server with PFIN-D (fin_capabilities, fin_complete_sale_split). */
+    enableFin: (on = true) => { fin = on; },
+    get finSplits() { return finSplits; },
     /** Who the server believes is calling (086 visibility / fence rules; 087 organisation and MFA level). */
     setCaller: (id: string, admin = false, org = "org-1", aal2 = false) => { caller = { id, admin, org, aal2 }; },
     /** Migration 087 on the fake server. */
@@ -836,6 +890,8 @@ function createFakeSupabase() {
       serverClockOffsetMs = 0;
       channels.length = 0;
       executor = false;
+      fin = false;
+      finSplits.clear();
       caller = { id: "user-1", admin: false, org: "org-1", aal2: false };
       r87 = fresh87();
       rejectionMessage = "Insufficient stock for Tea Mix";

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { RefundVoidRequest, SaleItem } from "../../types";
-import { allocateNetLineAmounts, buildRefundState, planRefundRequest, refundRequestExcessMmk } from "./refundMath";
+import { allocateNetLineAmounts, attachRefundLines, buildRefundState, planRefundRequest, refundRequestExcessMmk } from "./refundMath";
 
 // Sales are built the way complete_sale (072) stores them: line_total after
 // the item discount, total = Σ lines − round(Σ lines × cart% / 100),
@@ -147,5 +147,29 @@ describe("refundRequestExcessMmk (approver warning)", () => {
     const plan = planRefundRequest(buildRefundState(sale, items, []), { i1: 1, i2: 1 });
     const fresh = request(plan.items, "REQUESTED");
     expect(refundRequestExcessMmk(fresh, sale, items, [fresh])).toBe(0);
+  });
+});
+
+describe("attachRefundLines (Step 4, PFIN-E)", () => {
+  const items = [item("i1", "p1", 3, 3000), item("i2", "p2", 2, 1000)];
+  const sale = saleOf(items, 0);
+  it("each planned item names its sale line, quantity and amount; restock is per line; a payout only when chosen", () => {
+    const state = buildRefundState(sale, items, []);
+    const selection = { i1: 1, i2: 2 };
+    const plan = planRefundRequest(state, selection);
+    const out = attachRefundLines(state, selection, plan, { serverSale: true, noRestock: { i2: true }, payoutMethod: null });
+    expect(out).toEqual([
+      { productId: "p1", qtyUnits: 1, amountMmk: 1000, lines: [{ saleItemId: "i1", qtyUnits: 1, amountMmk: 1000, restock: true }] },
+      { productId: "p2", qtyUnits: 2, amountMmk: 1000, lines: [{ saleItemId: "i2", qtyUnits: 2, amountMmk: 1000, restock: false }] },
+    ]);
+    const paid = attachRefundLines(state, selection, plan, { serverSale: true, noRestock: {}, payoutMethod: "BANK_TRANSFER" });
+    expect(paid.map((i) => i.payouts)).toEqual([[{ method: "BANK_TRANSFER", amountMmk: 1000 }], [{ method: "BANK_TRANSFER", amountMmk: 1000 }]]);
+    // the legacy fields are exactly the plan's (the pinned approval reads only those)
+    expect(out.map(({ productId, qtyUnits, amountMmk }) => ({ productId, qtyUnits, amountMmk }))).toEqual(plan.items);
+  });
+  it("a sale the server does not have yet (provisional line ids) keeps the legacy items", () => {
+    const state = buildRefundState(sale, items, []);
+    const plan = planRefundRequest(state, { i1: 1 });
+    expect(attachRefundLines(state, { i1: 1 }, plan, { serverSale: false, noRestock: { i1: true }, payoutMethod: "CASH" })).toEqual(plan.items);
   });
 });

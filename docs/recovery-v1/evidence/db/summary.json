@@ -1,0 +1,27 @@
+{
+  "final_configurations": {
+    "stage085": {
+      "passed": 75,
+      "failed": 0,
+      "original_baseline": 29
+    },
+    "stage086_financial": {
+      "passed": 81,
+      "failed": 0,
+      "original_baseline": 29
+    }
+  },
+  "total_final_sql_assertions": 156,
+  "original_baseline_assertions": 58,
+  "new_assertions": 98,
+  "concurrent_race_smokes": 2,
+  "authenticated_encrypted_restore_smokes": 2,
+  "full087_integration": "BLOCKED: separate reviewed adapter required",
+  "production": "NO-GO",
+  "notes": [
+    "Earlier 73-assertion runs superseded; not added to totals",
+    "PSAFE-A pre-existing absent087 install defect fixed only in unnumbered provisional source",
+    "Present087-shaped PSAFE probe is a minimal contract fixture, not full087"
+  ],
+  "superseded": "Pre-correction runs (75/81). Superseded by docs/recovery-v1/evidence/correction-pass/ (085=102, 086=102, 086+financial=115). Kept as history."
+}

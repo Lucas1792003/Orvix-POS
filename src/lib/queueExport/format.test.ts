@@ -199,7 +199,7 @@ describe("format version 2 (migration 086 final pass)", () => {
 
   it("refuses a version it does not know (and an older tool refuses version 2 the same way)", async () => {
     const env = JSON.parse(JSON.stringify(await encryptQueueExport(payload(), PASS, FAST)));
-    env.formatVersion = 4;                                  // 3 = unreadable online records (deployment-blocker pass)
+    env.formatVersion = 5;                                  // 3 = unreadable online records; 4 = Recovery V1 signed evidence
     await expect(decryptQueueExport(JSON.stringify(env), PASS)).rejects.toMatchObject({ code: "unsupported-version" });
   });
 

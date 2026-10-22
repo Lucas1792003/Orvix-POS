@@ -533,6 +533,10 @@ export interface Sale {
   paidMmk: number;
   changeMmk: number;
   createdAt: string;
+  /** Step 4 (PFIN-D): the payment lines, when this till knows them (a sale rung up here with a split).
+   *  Otherwise the single legacy method applies (paymentMethod, totalMmk). Never used as an authoritative
+   *  figure: expected cash comes from the server (fin_shift_cash_summary). */
+  payments?: { method: string; amountMmk: number; tenderedMmk: number; reference: string | null }[];
   /** Set on a sale completed locally while offline (a provisional record —
    *  receiptNo is a placeholder until the real complete_sale RPC runs).
    *  Cleared once the outbox entry syncs. See stores/data/outbox.ts. */

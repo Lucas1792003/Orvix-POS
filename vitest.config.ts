@@ -12,7 +12,8 @@ export default defineConfig((env) =>
       // tools/m086-verify/results/<run>/legacy-app: a full checkout of an older
       // build, run only by tools/m086-verify/run.sh inside that checkout.
       // tools/m087-verify/browser: Playwright specs run by tools/m087-verify/run.sh, not unit tests.
-      exclude: [...configDefaults.exclude, "tools/m086-verify/results/**", "tools/m087-verify/browser/**", "tools/m087-verify/results/**"],
+      // tools/recovery-v1/*.test.mjs: node:test suites, run by `node --test` (docs/recovery-v1/backup-readiness.md).
+      exclude: [...configDefaults.exclude, "tools/m086-verify/results/**", "tools/m087-verify/browser/**", "tools/m087-verify/results/**", "tools/recovery-v1/**/*.test.mjs"],
     },
   }),
 );

@@ -32,6 +32,10 @@ const formatCashierName = (name: string | undefined): string => {
   return withoutDigits || "-";
 };
 
+const PAYMENT_LABEL: Record<string, string> = {
+  CASH: "methodCash", BANK_TRANSFER: "methodBank", MOBILE_WALLET: "methodWallet", CARD: "methodCard", OTHER: "methodOther",
+};
+
 export const ReceiptPreview = ({ sale, lines, shop, cashier, statusNote }: ReceiptPreviewProps) => {
   const { t } = useTranslation();
   const businessProfile = useDataStore((state) => state.businessProfile);
@@ -107,9 +111,23 @@ export const ReceiptPreview = ({ sale, lines, shop, cashier, statusNote }: Recei
           <span className="receipt-meta-label">{t("pos", "receiptPayment")}</span>
           <span className="receipt-meta-sep">:</span>
           <span className="receipt-meta-value">
-            {sale.paymentMethod === "CASH" ? t("pos", "cash") : t("pos", "other")}
+            {sale.payments && sale.payments.length > 1
+              ? t("fin", "splitPayment")
+              : sale.paymentMethod === "CASH" ? t("pos", "cash") : t("pos", "other")}
           </span>
         </div>
+        {/* Step 4 (PFIN-D): each payment line of a split / mixed payment, as recorded */}
+        {sale.payments && sale.payments.length > 1
+          ? sale.payments.map((p) => (
+              <div className="receipt-meta-row" key={p.method} data-testid="receipt-payment-line">
+                <span className="receipt-meta-label">{t("fin", PAYMENT_LABEL[p.method] ?? "methodOther")}</span>
+                <span className="receipt-meta-sep">:</span>
+                <span className="receipt-meta-value">
+                  {formatMmk(p.amountMmk)}{p.reference ? ` (${p.reference})` : ""}
+                </span>
+              </div>
+            ))
+          : null}
         <div className="receipt-meta-row">
           <span className="receipt-meta-label">{t("pos", "receiptItems")}</span>
           <span className="receipt-meta-sep">:</span>

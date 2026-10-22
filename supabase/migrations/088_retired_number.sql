@@ -1,0 +1,19 @@
+-- ============================================================
+-- Migration 088: RETIRED NUMBER (no-op tombstone). Nothing may ever be numbered 088.
+--
+-- WHY
+--   "088" has two incompatible meanings in this repository's history, and neither was implemented:
+--   1. the original Recovery Migration 088 named in the committed 087 (087_recovery_hold.sql:21, :45,
+--      :424, :688, :931) and in docs/selfhost-migration/phase-g/migration-087.md: restore of financial
+--      outcomes, receipt continuity, bulk approval, reopening. That design was REJECTED; Recovery V1
+--      (supabase/migrations-provisional/RECOVERY_V1_guards.sql, unnumbered) replaces it and is not 088;
+--   2. the 1.0.17 master plan v2 register (a planning document outside this repository's history),
+--      where 088 is sale_payments.
+--   Any new file numbered 088 would be read as one of the two by someone. History (087's comments,
+--   evidence, the plan) is not rewritten; the number is retired instead. The planner refuses a second
+--   088 file (duplicate version), and this file applies nothing.
+--
+-- Registry: supabase/migrations/NUMBERING.md. Rollback: supabase/rollbacks/088_retired_number.rollback.sql removes only
+-- 088's own ledger row (no objects exist), so 087 stays rollback-able before Recovery V1. 087 is required before 088.
+-- ============================================================
+SELECT 'migration 088 is a retired number: no-op' AS migration_088;

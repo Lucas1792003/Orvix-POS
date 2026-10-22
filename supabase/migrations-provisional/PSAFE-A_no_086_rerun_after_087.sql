@@ -64,6 +64,8 @@
 --     lifts only the executor check — never the prune or ledger checks.
 --   * Without 087 installed the trigger does nothing (either order works).
 --
+-- Recovery-v1 compatibility fix: nullable to_regprocedure lookups avoid
+-- planning-time failures before 087 exists; existing 087 checks are unchanged.
 -- Apply as the superuser migration runner, one transaction. Idempotent.
 -- Rollback: PSAFE-A.rollback.sql.
 -- ============================================================
@@ -84,8 +86,8 @@ BEGIN
   IF to_regnamespace('recovery') IS NOT NULL
      AND to_regprocedure('public.op_execute_v87(uuid,text,jsonb,text,jsonb)') IS NOT NULL
      AND (EXISTS (SELECT 1 FROM pg_proc p
-                   WHERE p.oid IN ('public.op_execute_v87(uuid,text,jsonb,text,jsonb)'::regprocedure,
-                                   'public.op_status_v87(uuid,text,boolean,text,jsonb,jsonb)'::regprocedure)
+                   WHERE p.oid IN (to_regprocedure('public.op_execute_v87(uuid,text,jsonb,text,jsonb)'),
+                                   to_regprocedure('public.op_status_v87(uuid,text,boolean,text,jsonb,jsonb)'))
                      AND (p.proowner IS DISTINCT FROM (SELECT oid FROM pg_roles WHERE rolname = 'recovery_owner')
                           OR NOT has_function_privilege('authenticated', p.oid, 'EXECUTE')))
           OR has_function_privilege('service_role', 'public.prune_idempotency_keys()', 'EXECUTE')) THEN

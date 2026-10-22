@@ -15,6 +15,11 @@ reprices anything. **It has no normal release of a hold** (see "Not in 087").
 **Migration 088** owns the rest: restoring financial outcomes, receipt-number continuity, bulk approval, safe reopening of an
 organisation, and `restore` / `re-reject` decisions.
 
+> **Superseded (2026-10-21, final migration integration).** That original Recovery Migration 088 design was rejected and is
+> never implemented. The number 088 is **retired** (`supabase/migrations/NUMBERING.md`). Recovery V1 (provisional, unnumbered)
+> replaces it, and adopts this 087 only when 087 is installed first. Once adopted, 087 is frozen. No reviewed release of an
+> 087 hold exists. See `final-migration-sequence.md` §3. The "088" mentions below are kept as history.
+
 ## Host prerequisite (v87.x, 2026-10-19)
 
 087 installs only where the recovery roles are protected from the Supabase privileged role: `recovery_owner`,

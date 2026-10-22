@@ -3,6 +3,11 @@ import { Link } from "react-router-dom";
 import { localDb } from "../../lib/localDb";
 import { recoveryMessage, useRecoveryStore } from "../../stores/data/recoveryState";
 import { OWNER_REVIEW, onQueueChanged } from "../../stores/data/outbox";
+import { useAuthStore } from "../../stores/authStore";
+import { onRecoveryV1Change, recoveryV1View, type RecoveryV1Status } from "../../recovery/client";
+import { offlineAuthorizationView, type OfflineView } from "../../recovery/offlineCapability";
+import { useAppStore } from "../../stores/appStore";
+import { formatDateTime, formatMmk } from "../../lib/utils";
 
 // Migration 087: the till's recovery state, shown on every screen
 // (docs/selfhost-migration/phase-g/migration-087.md, "Client contract").
@@ -34,11 +39,53 @@ function useOwnerReviewCount(): number {
   return n;
 }
 
+/** Step 4 (Part B): while this till cannot reach the server, what its server-issued offline authorization allows. */
+function useOfflineAuthorization(orgId: string | null, shopId: string | null, userId: string | null): (OfflineView & { waiting?: number }) | null {
+  const [view, setView] = useState<(OfflineView & { waiting?: number }) | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const read = () => {
+      const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+      if (!orgId || !shopId) { if (alive) setView(null); return; }
+      // shown while the device is offline AND whenever sales recorded under the offline authorization are still waiting
+      // for the server (the OS can report "online" while the server is unreachable: Tailscale, timeouts)
+      void localDb.syncOutbox.filter((e) => Boolean(e.offlineAuth) && !e.serverOutcome).count().then(async (waiting) => {
+        if (!offline && waiting === 0) { if (alive) setView(null); return; }
+        const v = await offlineAuthorizationView(orgId, shopId, userId);
+        if (alive) setView(v.state === "missing" && waiting === 0 ? null : { ...v, waiting });
+      }, () => undefined);
+    };
+    read();
+    const offQueue = onQueueChanged(() => read());
+    window.addEventListener("online", read);
+    window.addEventListener("offline", read);
+    const timer = window.setInterval(read, 15_000);
+    return () => { alive = false; offQueue(); window.removeEventListener("online", read); window.removeEventListener("offline", read); window.clearInterval(timer); };
+  }, [orgId, shopId, userId]);
+  return view;
+}
+
 export function RecoveryBanner() {
   const view = useRecoveryStore((s) => s.view);
   const review = useOwnerReviewCount();
   const blocked = !view.allowed && view.orgId !== null;
   const [shownResume, setShownResume] = useState<string | null>(null);
+  const orgId = useAuthStore((s) => s.currentOrgId);
+  const userId = useAuthStore((s) => s.currentUserId);
+  const shopId = useAppStore((s) => s.currentShopId);
+  const offlineAuth = useOfflineAuthorization(orgId ?? null, shopId ?? null, userId ?? null);
+  const [v1, setV1] = useState<{ present: boolean; status: RecoveryV1Status | null }>({ present: false, status: null });
+  useEffect(() => {
+    let alive = true;
+    const read = () => {
+      if (!orgId) { setV1({ present: false, status: null }); return; }
+      void recoveryV1View(orgId).then((value) => { if (alive) setV1(value); }, () => { if (alive) setV1({ present: true, status: null }); });
+    };
+    read();
+    const off = onRecoveryV1Change(read);
+    const timer = window.setInterval(read, 15_000);
+    return () => { alive = false; off(); window.clearInterval(timer); };
+  }, [orgId]);
   // "Safe to resume": shown after a blocked till was verified by the server again
   useEffect(() => {
     let timer: number | undefined;
@@ -56,6 +103,15 @@ export function RecoveryBanner() {
 
   return (
     <>
+      {v1.present && (
+        <div role="alert" data-testid="recovery-v1-banner"
+          className="border-b border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-900 print-hidden">
+          <strong>Recovery: {v1.status?.state ?? "QUARANTINED"}.</strong>{" "}
+          Recovered as of: {v1.status?.recovered_as_of ?? "unknown"}. Financial completeness, current stock, open shifts, profit and settlements are unproven.
+          {v1.status?.uncertainties.length ? ` ${v1.status.uncertainties.join("; ")}.` : ""}{" "}
+          Existing device records are preserved. Financial operations require current server and independent device authorization.
+        </div>
+      )}
       {blocked && view.mode !== "normal" && view.mode !== "legacy-server" && (
         <div role="alert" data-testid="recovery-banner" data-mode={view.mode}
           className="flex flex-wrap items-center justify-between gap-3 border-b border-rose-300 bg-rose-50 px-4 py-2 text-sm text-rose-900 print-hidden">
@@ -63,6 +119,28 @@ export function RecoveryBanner() {
             <strong>{TITLE[view.mode] ?? "Recovery"}.</strong> {recoveryMessage(view.mode, view.code)}
           </span>
           <Link to="/app/sync/recovery" className="text-xs font-medium underline" data-testid="recovery-banner-open">Recovery details</Link>
+        </div>
+      )}
+      {offlineAuth && (
+        <div role="status" data-testid="offline-authorization-banner" data-state={offlineAuth.state}
+          className={`border-b px-4 py-2 text-sm print-hidden ${offlineAuth.state === "valid"
+            ? "border-sky-200 bg-sky-50 text-sky-900" : "border-rose-300 bg-rose-50 text-rose-900"}`}>
+          {offlineAuth.waiting ? (
+            <span data-testid="offline-waiting">
+              <strong>{offlineAuth.waiting} {offlineAuth.waiting === 1 ? "sale is" : "sales are"} recorded on this till only.</strong>{" "}
+              The server has not confirmed {offlineAuth.waiting === 1 ? "it" : "them"} yet.{" "}
+            </span>
+          ) : null}
+          {offlineAuth.state === "valid" ? (
+            <>
+              <strong>Offline selling.</strong> Up to {offlineAuth.remainingOps} more {offlineAuth.remainingOps === 1 ? "sale" : "sales"} (
+              {formatMmk(offlineAuth.remainingAmountMmk)}) until {offlineAuth.expiresAt ? formatDateTime(offlineAuth.expiresAt) : "—"}.
+              {" "}Sales are recorded on this till only; the server confirms or holds them for review when it is reached again.
+              {offlineAuth.policyStatus === "DEFAULT_UNAPPROVED" ? " (Test limits — not approved by the owner.)" : ""}
+            </>
+          ) : (
+            <><strong>Offline selling stopped.</strong> {offlineAuth.reason}</>
+          )}
         </div>
       )}
       {review > 0 && (
@@ -75,7 +153,7 @@ export function RecoveryBanner() {
           </span>
         </div>
       )}
-      {!blocked && shownResume && view.mode === "normal" && (
+      {!blocked && !v1.present && shownResume && view.mode === "normal" && (
         <div role="status" data-testid="recovery-resumed"
           className="border-b border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-900 print-hidden">
           <strong>Safe to resume.</strong> The server verified this till (epoch {view.epochNo}); new sales are allowed again.

@@ -55,7 +55,7 @@ class Plan(unittest.TestCase):
             v, s = (e, "") if isinstance(e, str) else e
             lines.append(f"{v}\t{s}\t{1 if s else 0}")
         wr(lp, "\n".join(lines) + "\n")
-        f = {"ledger_md5": MD5, "ledger_cols": "name,statements,version", "has_op_execute": "f", "has_v87": "f", "idem_pk": "key"}
+        f = {"ledger_md5": MD5, "ledger_cols": "name,statements,version", "has_op_execute": "f", "has_v87": "f", "has_recovery_v1": "f", "idem_pk": "key"}
         f.update(facts or {})
         wr(fp, "".join(f"{k}\t{v}\n" for k, v in f.items()))
         argv = [mode, "--migrations", mig or self.mig, "--ledger", lp, "--facts", fp, "--out", out, *args]
@@ -129,6 +129,75 @@ class Plan(unittest.TestCase):
 
     def test_has_v87_fact_required_and_validated(self):
         self.refused(self.run_plan("forward", self.upto(85), {"has_v87": "maybe"}, "--from", "086", "--to", "086"), "malformed")
+
+    # ---------------------------------------------------------------- Recovery V1 (final migration integration)
+    def test_has_recovery_v1_fact_required_and_validated(self):
+        self.refused(self.run_plan("forward", self.upto(85), {"has_recovery_v1": "yes"}, "--from", "086", "--to", "086"), "malformed")
+        fp = os.path.join(self.t, "f-missing.tsv")
+        wr(fp, f"ledger_md5\t{MD5}\nledger_cols\tname,statements,version\nhas_op_execute\tf\nhas_v87\tf\nidem_pk\tkey\n")
+        lp = os.path.join(self.t, "l-missing.tsv")
+        wr(lp, "".join(f"{v}\t\t0\n" for v in self.upto(85)))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = mp.main(["forward", "--migrations", self.mig, "--ledger", lp, "--facts", fp, "--out", os.path.join(self.t, "o3"),
+                          "--from", "086", "--to", "086"])
+        self.assertEqual(rc, 2)
+        self.assertIn("has_recovery_v1 missing", buf.getvalue())
+
+    def test_086_and_087_never_after_recovery_v1(self):
+        self.add("087_m87.sql", "SELECT 1;\n")
+        self.refused(self.run_plan("forward", self.upto(85), {"has_recovery_v1": "t"}, "--from", "086", "--to", "086",
+                                   "--recovery-v1-reviewed"), "086 must never run after it")
+        led = self.upto(85) + [("086", sha(os.path.join(self.mig, "086_m86.sql")))]
+        self.refused(self.run_plan("forward", led, {"has_recovery_v1": "t", "has_op_execute": "t", "idem_pk": "org_id,key"},
+                                   "--from", "087", "--to", "087", "--recovery-v1-reviewed"), "087 must never run after it")
+
+    def test_other_migrations_after_recovery_v1_need_review_flag(self):
+        self.add("087_m87.sql", "SELECT 1;\n")
+        self.add("088_m88.sql", "SELECT 1;\n")
+        led = self.upto(85) + [("086", sha(os.path.join(self.mig, "086_m86.sql"))), ("087", sha(os.path.join(self.mig, "087_m87.sql")))]
+        f = {"has_recovery_v1": "t", "has_op_execute": "t", "idem_pk": "org_id,key", "has_v87": "t"}
+        self.refused(self.run_plan("forward", led, f, "--from", "088", "--to", "088"), "--recovery-v1-reviewed")
+        _, _, d = self.ok(self.run_plan("forward", led, f, "--from", "088", "--to", "088", "--recovery-v1-reviewed"))
+        self.assertIn("Recovery V1 was installed or removed after planning", rd(os.path.join(d, "000_runner_guard.sql")))
+        self.assertIn("<> 'true' THEN", rd(os.path.join(d, "000_runner_guard.sql")))
+
+    def test_reviewed_flag_refused_without_recovery_v1(self):
+        self.refused(self.run_plan("forward", self.upto(85), None, "--from", "086", "--to", "086", "--recovery-v1-reviewed"),
+                     "Recovery V1 is not installed here")
+
+    def test_real_repo_088_rollback_restores_087_rollbackability(self):
+        led = [f"{v:03d}" for v in range(1, 87) if v != 84] + [("087", sha(os.path.join(REAL_MIG, "087_recovery_hold.sql"))),
+                                                               ("088", sha(os.path.join(REAL_MIG, "088_retired_number.sql")))]
+        f = {"has_op_execute": "t", "idem_pk": "org_id,key", "has_v87": "t"}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            lp, fp = os.path.join(self.t, "l88.tsv"), os.path.join(self.t, "f88.tsv")
+            wr(lp, "".join(f"{v}\t{s}\t{1 if s else 0}\n" for v, s in [(e, "") if isinstance(e, str) else e for e in led]))
+            base = {"ledger_md5": MD5, "ledger_cols": "name,statements,version", "has_v87": "t", "has_recovery_v1": "f", **f}
+            wr(fp, "".join(f"{k}\t{v}\n" for k, v in base.items()))
+            rc = mp.main(["rollback", "--migrations", REAL_MIG, "--rollbacks", REAL_RB, "--ledger", lp, "--facts", fp,
+                          "--out", os.path.join(self.t, "o88"), "--version", "088", "--owner-confirmed-till-queues-empty"])
+        self.assertEqual(rc, 0, buf.getvalue())
+        self.assertIn("088_retired_number.rollback.sql", rd(os.path.join(self.t, "o88", "files.txt")))
+
+    def test_guard_rechecks_recovery_v1_absent(self):
+        _, _, d = self.ok(self.run_plan("forward", self.upto(85), None, "--from", "086", "--to", "086"))
+        g = rd(os.path.join(d, "000_runner_guard.sql"))
+        self.assertIn("(to_regnamespace('recovery_v1') IS NOT NULL)::text <> 'false'", g)
+
+    def test_rollback_refused_while_recovery_v1_installed(self):
+        self.refused(self.run_plan("rollback", self.rb_ledger(), {"has_op_execute": "t", "idem_pk": "org_id,key", "has_recovery_v1": "t"},
+                                   "--version", "086", "--owner-confirmed-till-queues-empty"), "rollback of 086 is refused")
+
+    def test_real_repo_088_is_the_retired_tombstone(self):
+        f88 = [f for f in os.listdir(REAL_MIG) if f.startswith("088_")]
+        self.assertEqual(f88, ["088_retired_number.sql"])
+        body = mp.strip_comments(rd(os.path.join(REAL_MIG, f88[0]))).strip()
+        self.assertEqual(body, "SELECT 'migration 088 is a retired number: no-op' AS migration_088;")
+        led = [f"{v:03d}" for v in range(1, 88) if v != 84]
+        self.ok(self.run_plan("forward", led, {"has_op_execute": "t", "idem_pk": "org_id,key", "has_v87": "t"}, "--from", "088", "--to", "088",
+                              mig=REAL_MIG))
 
     def test_legacy_rows_without_checksum_are_noted_not_hidden(self):
         _, out, _ = self.ok(self.run_plan("forward", self.upto(85), None, "--from", "086", "--to", "086"))

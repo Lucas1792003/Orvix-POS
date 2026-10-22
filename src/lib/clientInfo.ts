@@ -20,6 +20,10 @@
 //                      for another backend are quarantined, never replayed
 //   update-guard-v1    the desktop updater never installs while sales are
 //                      unsynced or a sale is in progress
+//   recovery-v1        asks the server for its Recovery V1 state before
+//                      financial writes, holds refusals with their keys, and
+//                      tells an expired sign-in apart from a network failure
+//                      (minimum client for a Recovery V1 server)
 // Dependency-free on purpose (imported by lib/supabase.ts at module load).
 // ----------------------------------------------------------------------
 
@@ -41,6 +45,7 @@ export const CLIENT_CAPABILITIES = [
   "idem-v1",
   "outbox-origin-v1",
   "update-guard-v1",
+  "recovery-v1",
 ] as const;
 
 /** Value of the X-Client-Info request header. */

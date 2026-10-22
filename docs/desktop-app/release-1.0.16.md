@@ -28,6 +28,7 @@ No migration. No new server function. Dexie stays at schema version 2. New field
   - The till id appears **on screen only**. It is never put in a request or header.
 - Machine-readable header on every supabase-js request (REST, RPC, auth, storage, functions) and on the raw upload-status poll:
   `X-Client-Info: shwephala-pos/1.0.16 (validated-uploads; idem-v1; outbox-origin-v1; update-guard-v1)`
+  - A build of the final migration integration tree (`ws/final-migrations`) also sends `; recovery-v1` (minimum client for a Recovery V1 server). Its version label is an owner release decision (`supabase/migrations-provisional/SEQUENCE.json`, `minimum_client`).
   - The header replaces supabase-js's default `supabase-js-web/…`. It is set with the exact key `X-Client-Info`, so there is a single value (tested).
   - `deploy/lucashome/verify-till-readiness.sh` parses it with `^shwephala-pos/(\d+\.\d+\.\d+)(?:\s*\(([^)]*)\))?` and `"validated-uploads" in caps`. The format matches.
   - The Electron user agent stays `… retails-shop/1.0.16 Chrome/… Electron/43.4.1 …` (seen in the packaged smoke).

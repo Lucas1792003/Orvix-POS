@@ -1,6 +1,9 @@
 import { recoveryCodeOf } from "../../lib/failureClass";
 import { refreshRecoveryEpoch } from "./recovery87";
 import { useAuthStore } from "../authStore";
+import { useAppStore } from "../appStore";
+import { RecoveryV1Blocked, recoveryV1View, requireRecoveryV1Write } from "../../recovery/client";
+import { authorizeOfflineOperation, maintainOfflineCapability, OfflineAuthorizationUnavailable, OFFLINE_ELIGIBLE_OPS, type OfflineAuth } from "../../recovery/offlineCapability";
 import {
   assertNewOperationAllowed, loadedRecoveryOrg, loadRecoveryState, verifiedSinceStart, capabilityCheckedAt, currentOpEpoch, modeForCode, recoveryCapability, recoveryMessage, recoveryView,
   RecoveryBlockedError, offlineFinancialBlockedError, offlineFinancialOpsBlocked, verifiedWithin,
@@ -31,11 +34,42 @@ let lastAskAt = 0;
 /** Tests only. */
 export function resetRecoveryGateForTests(): void { lastAskAt = 0; }
 
-export async function gateNewOperation(op: { opEpoch: string | null }): Promise<void> {
+export async function gateNewOperation(op: { opEpoch: string | null; offlineAuth?: OfflineAuth | null },
+  intent?: { name: string; amountMmk?: number }): Promise<void> {
   // the durable state as it is NOW (another window may have entered a hold; another organisation may be signed in)
   const org = useAuthStore.getState().currentOrgId ?? null;
+  const shop = useAppStore.getState().currentShopId ?? null;
+  const user = useAuthStore.getState().currentUserId ?? null;
+  try {
+    const protectedByV1 = await requireRecoveryV1Write(org, shop);
+    // connected to a Recovery V1 server and ACTIVE: keep this till's offline authorization fresh (never while offline)
+    if (protectedByV1 && org && shop) void maintainOfflineCapability(org, shop, user).catch(() => undefined);
+  } catch (error) {
+    // Step 4: the recovery-aware server cannot be reached. An ELIGIBLE operation (a sale) may still be recorded locally
+    // under a valid server-issued offline capability; anything else (and every other block) stays refused.
+    if (!(error instanceof RecoveryV1Blocked) || error.reason !== "communication" || !intent || !OFFLINE_ELIGIBLE_OPS.has(intent.name) || !org || !shop) throw error;
+    // the server's LAST answer must have been ACTIVE (a restriction it reported is never sold through offline, even if
+    // the local capability was not withdrawn yet — e.g. a crash between saving the answer and the withdrawal)
+    const last = await recoveryV1View(org).catch(() => null);
+    if (last?.status?.state !== "ACTIVE") throw error;
+    try {
+      op.offlineAuth = await authorizeOfflineOperation({ orgId: org, shopId: shop, userId: user, rpc: intent.name, amountMmk: intent.amountMmk ?? 0 });
+    } catch (offline) {
+      if (offline instanceof OfflineAuthorizationUnavailable) throw new RecoveryV1Blocked("RESTRICTED", offline.message, "communication");
+      throw offline;
+    }
+  }
   await loadRecoveryState(org);
   void loadedRecoveryOrg;
+  if (op.offlineAuth) {
+    // Step 4: authorized by a server-issued offline capability (Recovery V1, which needs 087). The capability replaces
+    // the v87.x "server now" rule for THIS operation only: it was issued by the server while connected and ACTIVE, is
+    // bounded (count, value, expiry, epoch) and is verified again by the server at sync. The till must still hold an
+    // epoch and must not be in recovery mode; a sale created under an older epoch is held there for review.
+    if (!op.opEpoch) op.opEpoch = currentOpEpoch();
+    assertNewOperationAllowed(op.opEpoch);
+    return;
+  }
   const cap = recoveryCapability();
   const checkedAt = capabilityCheckedAt();
   const stale = cap === "absent" && (!checkedAt || Date.now() - Date.parse(checkedAt) > ABSENT_RECHECK_MS);
@@ -77,7 +111,9 @@ async function requireFreshAuthorization(): Promise<void> {
 
 /** v87.x: refuse to stage / queue a NEW financial operation offline on an 087 server (the shared layers call this
  *  before anything is persisted; existing queued operations are never touched). */
-export function assertOfflineQueueAllowed(reason: string): void {
+export function assertOfflineQueueAllowed(reason: string, offlineAuth?: OfflineAuth | null): void {
+  // Step 4: an operation reserved under a server-issued offline capability is the one exception (gateNewOperation)
+  if (offlineAuth) return;
   if (offlineFinancialOpsBlocked()) throw offlineFinancialBlockedError(reason);
 }
 

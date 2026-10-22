@@ -2,7 +2,7 @@ import { localDb } from "../../lib/localDb";
 import { newId } from "../../lib/id";
 import { classifyFailure } from "../../lib/failureClass";
 import {
-  callRpc, executorCapability, executorDemonstrated, IDEMPOTENCY_KEY_ARG, keepUnknown, lookupOperation, newIdempotencyKey, ONLINE_ONLY_RETRIES, recoveryModeError, RpcError, stampOperationArgs,
+  callRpc, executorCapability, executorDemonstrated, IDEMPOTENCY_KEY_ARG, idempotencyKeyFor, keepUnknown, lookupOperation, ONLINE_ONLY_RETRIES, recoveryModeError, RpcError, stampOperationArgs,
   type OperationStatus, type RpcOutcome,
 } from "./idempotentRpc";
 import { replyProblem } from "./replyShapes";
@@ -120,6 +120,8 @@ const CREATION_SCOPE: Record<string, (a: Record<string, unknown>) => string> = {
   create_purchase_order: (a) => `${a.p_supplier_id}|${a.p_shop_id}`,
   create_stock_transfer: (a) => `${a.p_from_shop_id}|${a.p_to_shop_id}`,
   create_supplier: (a) => String(a.p_code ?? "").trim().toLowerCase(),
+  // Step 4: one shift's drawer (an unresolved movement is offered for retry before a new one is entered)
+  fin_record_cash_movement: (a) => String(a.p_shift_id),
 };
 
 // Log writes: each call is its own new event; nothing to recover.
@@ -131,6 +133,7 @@ const FRIENDLY: Record<string, string> = {
   cancel_purchase_order: "Cancel purchase order", approve_stock_transfer: "Approve transfer", reject_stock_transfer: "Reject transfer",
   cancel_stock_transfer: "Cancel transfer", approve_void_request: "Approve void", approve_refund_request: "Approve refund",
   reject_refund_void_request: "Reject refund/void", create_refund_void_request: "Void request", delete_product: "Delete product",
+  fin_record_cash_movement: "Cash movement",
   update_supplier: "Update supplier", update_app_user: "Update user", deactivate_app_user: "User status", replace_manager: "Replace manager",
 };
 
@@ -472,7 +475,7 @@ export async function callOnlineOnly(
   const scope = scopeOf(name, args);
 
   if (LOGS.has(name)) {
-    return callRpc(name, stampOperationArgs(name, { ...args, [IDEMPOTENCY_KEY_ARG]: newIdempotencyKey() }), { retries, opEpoch: currentOpEpoch() });
+    return callRpc(name, stampOperationArgs(name, { ...args, [IDEMPOTENCY_KEY_ARG]: idempotencyKeyFor(name) }), { retries, opEpoch: currentOpEpoch() });
   }
 
   // A double click acts once.
@@ -576,7 +579,7 @@ async function run(
   const createdAt = new Date(now).toISOString();
   const op: OnlineOperation = {
     v: 2, id: newId("op"), name, orgId, userId, fingerprint, scope,
-    args: stampOperationArgs(name, { ...args, [IDEMPOTENCY_KEY_ARG]: newIdempotencyKey() }),
+    args: stampOperationArgs(name, { ...args, [IDEMPOTENCY_KEY_ARG]: idempotencyKeyFor(name) }),
     status: "unresolved", createdAt, updatedAt: createdAt, attempts: 0, backendOrigin: currentBackendOrigin(),
     opEpoch: created.opEpoch,
   };

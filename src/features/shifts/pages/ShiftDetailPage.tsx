@@ -11,7 +11,9 @@ import { useToast } from "../../../components/ui/Toast";
 import { ShiftDetail } from "../../../components/shifts/ShiftDetail";
 import { EndShiftCard } from "../../../components/shifts/EndShiftCard";
 import { buildShiftBreakdown } from "../service";
-import { useShiftReconciliation } from "../../reports/useFinReport";
+import { useShiftCash, useShiftReconciliation } from "../../reports/useFinReport";
+import { CashMovementsCard } from "../../../components/shifts/CashMovementsCard";
+import { hasPermission } from "../../../lib/permissions";
 import { ShiftReconciliationPanel } from "../components/ShiftReconciliationPanel";
 import { checkExpectedBeforeClose, extraReasonError } from "../closeExpected";
 import { closeWouldExpect } from "../../reports/finReports";
@@ -76,7 +78,15 @@ export const ShiftDetailPage = () => {
   // available; otherwise the device's figure, labelled as an estimate (the
   // server recomputes expected cash when the close is applied).
   const recon = useShiftReconciliation(shift?.id ?? null);
-  const serverExpected = recon.state.status === "ok" ? closeWouldExpect(recon.state.data) : null;
+  // Step 4 (PFIN-D): the server's own expected cash (movements, split payments, payouts) when it has PFIN-D
+  const [cashNonce, setCashNonce] = useState(0);
+  const cash = useShiftCash(shift && !shift.pendingSync ? shift.id : null, cashNonce);
+  const pfinD = cash.state.status !== "idle" && !(cash.state.status === "unavailable" && cash.state.reason === "NOT_INSTALLED");
+  const serverExpected = shift?.endedAt
+    ? (recon.state.status === "ok" ? closeWouldExpect(recon.state.data) : null)
+    : pfinD
+      ? (cash.state.status === "ok" ? cash.state.data.expectedCashMmk : null)
+      : recon.state.status === "ok" ? closeWouldExpect(recon.state.data) : null;
   const closeExpectedCash = serverExpected ?? breakdown?.expectedCash ?? 0;
 
   // Pre-compute "sales sorted newest-first + line items grouped by sale"
@@ -112,7 +122,7 @@ export const ShiftDetailPage = () => {
 
   const handleEndShift = async () => {
     if (!shift || !breakdown) return;
-    if (recon.state.status === "loading") {
+    if (recon.state.status === "loading" || cash.state.status === "loading") {
       toast({ title: "Checking expected cash", description: "The server reconciliation is still loading. Try again in a moment.", variant: "error" });
       return;
     }
@@ -232,6 +242,15 @@ export const ShiftDetailPage = () => {
           sales={[]}
           now={now}
         />
+
+        {!shift.endedAt && !shift.pendingSync ? (
+          <CashMovementsCard
+            shiftId={shift.id}
+            cash={cash.state}
+            canManage={hasPermission(currentUser, "shift:manage_all")}
+            onChanged={() => setCashNonce((n) => n + 1)}
+          />
+        ) : null}
 
         {/* Items rolled up across the shift. Useful for end-of-day
             reviews ("what did this cashier mostly sell?") and matches

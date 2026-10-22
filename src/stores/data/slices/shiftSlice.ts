@@ -4,6 +4,8 @@ import type { AuditLog, Shift } from "../../../types";
 import { newId } from "../../../lib/id";
 import { recordIdMapping } from "../outbox";
 import { beginOperation, type OperationContext } from "../idempotentRpc";
+import { callOnlineOnly } from "../onlineOnly";
+import { cashPartOf, finCapabilities } from "../../../features/finance/finCompletion";
 import { Stage, submitOfflineCapable } from "../writeAhead";
 import { deleteLocalRows, putLocalRows } from "../localWrites";
 import { assertOfflineWriteEligible } from "../../authStore";
@@ -80,9 +82,10 @@ export const createShiftSlice: StateCreator<DataState, [], [], ShiftState> = (se
     if (!shift) throw new Error("Shift not found.");
 
     const shiftSaleIds = new Set(get().sales.filter((s) => s.shiftId === shiftId).map((s) => s.id));
+    // the cash part of each sale (a split's CASH line; the whole total for a legacy CASH sale)
     const cashSales = get().sales
-      .filter((s) => s.shiftId === shiftId && s.paymentMethod === "CASH" && s.status !== "VOID")
-      .reduce((sum, s) => sum + s.totalMmk, 0);
+      .filter((s) => s.shiftId === shiftId && s.status !== "VOID")
+      .reduce((sum, s) => sum + cashPartOf(s), 0);
     const cashRefunds = get().refunds
       .filter((r) => shiftSaleIds.has(r.saleId) && r.type === "PARTIAL" && r.status === "APPROVED")
       .flatMap((r) => r.items ?? [])
@@ -131,8 +134,27 @@ export const createShiftSlice: StateCreator<DataState, [], [], ShiftState> = (se
     },
 
     endShift: async ({ shiftId, closingCashMmk, varianceReason }) => {
-      const op = beginOperation();
       const shift = get().shifts.find((s) => s.id === shiftId);
+      // Step 4 (PFIN-D): a server with cash movements / split payments closes with ITS expected cash
+      // (fin_close_shift, online only; the legacy close_shift would be refused there with
+      // FIN_CLOSE_SHIFT_UPGRADE_REQUIRED whenever its figure is wrong). Offline, or on an older server,
+      // the existing queued close_shift is used unchanged.
+      const online = typeof navigator === "undefined" || navigator.onLine !== false;
+      if (online && shift && !shift.pendingSync && (await finCapabilities()).cashMovements) {
+        const outcome = await callOnlineOnly("fin_close_shift", {
+          p_shift_id: shiftId, p_closing_cash_mmk: closingCashMmk, p_variance_reason: varianceReason ?? null,
+          p_created_at: new Date().toISOString(),
+        });
+        if (outcome.error) throw outcome.error;
+        await applyShift(outcome.data);
+        return;
+      }
+      // a server with cash movements / split payments refuses a queued legacy close whenever its figure differs; the
+      // till cannot know every other till's records, so it does not close such a shift offline at all
+      if (!online && (await finCapabilities()).cashMovements) {
+        throw new Error("Close the shift when this till is connected: this server computes expected cash from split payments and cash movements. Nothing was changed.");
+      }
+      const op = beginOperation();
       await submitOfflineCapable({
         set, name: "close_shift", shopId: shift?.shopId ?? null, op,
         args: closeArgs(shiftId, closingCashMmk, varianceReason, op),
@@ -140,6 +162,20 @@ export const createShiftSlice: StateCreator<DataState, [], [], ShiftState> = (se
         applyOnline: async (data) => { await applyShift(data); },
         stage: (stage) => stageCloseShift(shiftId, closingCashMmk, varianceReason, op, stage),
       });
+    },
+
+    recordCashMovement: async ({ shiftId, kind, amountMmk, reason, reversesId }) => {
+      if (!(await finCapabilities()).cashMovements) {
+        throw new Error("Cash movements need the updated server (PFIN-D). Nothing was recorded.");
+      }
+      const outcome = await callOnlineOnly("fin_record_cash_movement", {
+        p_shift_id: shiftId, p_kind: kind, p_amount_mmk: kind === "REVERSAL" ? null : amountMmk,
+        p_reason: reason.trim(), p_reverses_id: kind === "REVERSAL" ? reversesId ?? null : null,
+        p_created_at: new Date().toISOString(),
+      });
+      if (outcome.error) throw outcome.error;
+      const cash = (outcome.data as { cash?: { expectedCashMmk?: unknown } } | null)?.cash;
+      return { expectedCashMmk: typeof cash?.expectedCashMmk === "number" ? cash.expectedCashMmk : null };
     },
 
     // Called by the outbox once a queued open_shift actually runs — swaps
