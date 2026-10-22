@@ -76,8 +76,9 @@ test("H1 owner sets a queued sale aside (export first, confirm, one row), restor
 
   // 2. API refuses both RPCs (503) so nothing syncs while the owner works
   const refused = { hits: 0 };
-  const g1 = await A.routeStatus("/rest/v1/rpc/open_shift", 503, { message: "e2e: held" }, refused);
-  const g2 = await A.routeStatus("/rest/v1/rpc/complete_sale", 503, { message: "e2e: held" }, refused);
+  // both are executor RPCs since 086 (op_execute): intercept the operations, not the URL
+  const g1 = await A.routeRpcStatus("open_shift", 503, { message: "e2e: held" }, refused);
+  const g2 = await A.routeRpcStatus("complete_sale", 503, { message: "e2e: held" }, refused);
   await A.setOffline(false);
   await A.logout();
   await A.loginAdminWithTotp(emails.admin, pw, qaTotpSecret());
@@ -131,8 +132,10 @@ test("H1 owner sets a queued sale aside (export first, confirm, one row), restor
   expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore);
 
   // 7. API back; the cashier (the entries' actor) signs in; the till drains once
-  await A.unroutePath(g1);
-  await A.unroutePath(g2);
+  // (the 503 routes may see no request at all: since 086 the till never sends the cashier's queued operations under the
+  //  admin's session — run only in the creator's session; nothing was executed either way, asserted above)
+  await g1();
+  await g2();
   await A.logout();
   await A.signIn(emails.cashA, pw, "/app/pos");
   await A.waitForApp();

@@ -20,10 +20,12 @@ export const operator = <T = Record<string, unknown>>(call: string): T =>
 export class SyntheticOwner {
   private n = 0;
   constructor(readonly keydir: string, readonly keyId: string, readonly workdir: string) { mkdirSync(workdir, { recursive: true }); }
-  authorize(purpose: string, payload: Record<string, unknown>, opts: { expiresIn?: number; issuedOffset?: number; keyId?: string } = {}): { authorization: string; signature: string } {
+  /** opts.target: the POS signing target as the owner received it (Step 6: from Control's reconciliation report); by default
+   *  it is read from the POS (Step 5 fixtures). */
+  authorize(purpose: string, payload: Record<string, unknown>, opts: { expiresIn?: number; issuedOffset?: number; keyId?: string; target?: Record<string, unknown> } = {}): { authorization: string; signature: string } {
     this.n += 1;
     const target = path.join(this.workdir, `target-${this.n}.json`); const pay = path.join(this.workdir, `payload-${this.n}.json`);
-    writeFileSync(target, sqlOne("SELECT recovery_v1.authorization_target()::text;"));
+    writeFileSync(target, opts.target ? JSON.stringify(opts.target) : sqlOne("SELECT recovery_v1.authorization_target()::text;"));
     writeFileSync(pay, JSON.stringify(payload));
     const keyId = opts.keyId ?? this.keyId;
     const out = execFileSync("node", [SIM, "authorize", path.join(this.keydir, `${keyId}.private.pem`), keyId, purpose, target, pay,

@@ -140,7 +140,11 @@ export const useDataStore = create<DataState>()((...args) => {
           return;
         }
         if (cached) {
-          set({ ...cached, refundVoidRequests: cached.refunds, isLoaded: true });
+          // Online, the server load follows: the cache is shown as loaded AND still loading (the contract above), so
+          // the route guards wait for the server's rows instead of judging the sign-in by a mirror that may be another
+          // account's view (e2e C3: a deactivated cashier's empty users mirror bounced the next admin to /login).
+          const online = typeof navigator === "undefined" || navigator.onLine !== false;
+          set({ ...cached, refundVoidRequests: cached.refunds, isLoaded: true, isLoading: online });
           // The mirrored rows already carry what is queued (D-NEW-1 ledger).
           await get().adoptStockLedger();
         }
@@ -164,6 +168,7 @@ export const useDataStore = create<DataState>()((...args) => {
     // a first run with no cache yet) in place until connectivity returns.
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
       if (!get().isLoaded) set({ loadError: "You're offline and no cached data is available yet." });
+      if (get().isLoading) set({ isLoading: false });   // raised with the cache above; no server load follows
       return;
     }
 
@@ -189,7 +194,11 @@ export const useDataStore = create<DataState>()((...args) => {
         endWriteRecording(recorder);
         liveEvents.finish();
         set({ isLoading: false });
-        await setNeedsReauth("The server rejected this device's sign-in. Sign in again to resume syncing.");
+        // only for the session this load belongs to: a load of the previous user finishing after sign-out must not
+        // flag the next user's session (Step 6, review 2 finding 3b)
+        if (useAuthStore.getState().currentUserId === loadUserId) {
+          await setNeedsReauth("The server rejected this device's sign-in. Sign in again to resume syncing.");
+        }
         return;
       }
       // Server clock BEFORE the first read: the delta cursors start just
@@ -273,7 +282,11 @@ export const useDataStore = create<DataState>()((...args) => {
         endWriteRecording(recorder);
         liveEvents.finish();
         set({ isLoading: false });
-        await setNeedsReauth("The server rejected this device's sign-in. Sign in again to resume syncing.");
+        // only for the session this load belongs to: a load of the previous user finishing after sign-out must not
+        // flag the next user's session (Step 6, review 2 finding 3b)
+        if (useAuthStore.getState().currentUserId === loadUserId) {
+          await setNeedsReauth("The server rejected this device's sign-in. Sign in again to resume syncing.");
+        }
         return;
       }
 

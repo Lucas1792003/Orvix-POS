@@ -48,8 +48,44 @@ async function asAdmin(T: Terminal): Promise<void> {
 async function recoveryPage(T: Terminal): Promise<string> {
   await T.navigate("/app/sync/recovery");
   const state = T.page.getByTestId("recovery-state");
-  await state.waitFor({ state: "visible" });
+  try {
+    await state.waitFor({ state: "visible", timeout: 60_000 });
+  } catch (e) {
+    // Step 6: never wait out the whole test on one locator; record WHY the state is not visible (an ancestor hidden? the
+    // server-revoked session banner? zero size?), so a recurrence is diagnosable, then fail.
+    const hiddenBy = await T.page.evaluate(() => {
+      const out: string[] = [];
+      let el = document.querySelector('[data-testid="recovery-state"]') as HTMLElement | null;
+      if (!el) return ["not in the DOM"];
+      const r = el.getBoundingClientRect(); out.push(`self ${Math.round(r.width)}x${Math.round(r.height)}`);
+      while (el) {
+        const cs = getComputedStyle(el);
+        if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0" || el.hasAttribute("hidden") || el.getAttribute("aria-hidden") === "true") {
+          out.push(`${el.tagName.toLowerCase()}#${el.id}.${el.className} display=${cs.display} visibility=${cs.visibility} hidden=${el.hasAttribute("hidden")}`);
+        }
+        el = el.parentElement;
+      }
+      return out;
+    }).catch(() => ["page gone"]);
+    note("recoveryPage.not-visible", { route: T.currentRoute(), hiddenBy, reauth: await reauthBanner(T).isVisible().catch(() => false),
+      console: T.consoleErrors.slice(-8) });
+    await T.screenshot(`m087c-recovery-hidden-${Date.now()}`).catch(() => undefined);
+    throw e;
+  }
   return (await state.getAttribute("data-mode")) ?? "";
+}
+const reauthBanner = (T: Terminal) => T.page.getByRole("alert").filter({ hasText: "Your sign-in has expired on the server" });
+/** The server revoked this till's session (seen after a crash-restart: a rotated refresh token lost with the killed
+ *  process is presented again and the server revokes the session — expected security behaviour). Do what the cashier does:
+ *  "Sign in again", then the password form. Recorded, never silent. */
+async function signInAgainIfRevoked(T: Terminal, id: string): Promise<void> {
+  if (!(await reauthBanner(T).waitFor({ state: "visible", timeout: 10_000 }).then(() => true, () => false))) return;
+  note(`${id}.session-revoked-by-server`, { refresh: T.requestsMatching(/auth\/v1\/token/).map((r) => r.status) });
+  await reauthBanner(T).getByRole("button", { name: "Sign in again" }).click();
+  await T.waitForRoute("/login");
+  await T.signIn(st.emails.cashA, pw, "/app");
+  await T.waitForApp();
+  await expect(reauthBanner(T)).toHaveCount(0);
 }
 async function recoveryAction(T: Terminal, testId: string, expected: RegExp): Promise<string> {
   await T.page.getByTestId(testId).click();
@@ -67,6 +103,7 @@ async function reopen(name: string): Promise<Terminal> {
   ]);
   if (await T.page.locator('input[type="email"]').isVisible()) { note(`${name}.session-lost-on-restart`, true); await T.signIn(st.emails.cashA, pw, "/app"); }
   await T.waitForApp();
+  await signInAgainIfRevoked(T, name);
   return T;
 }
 /** Register (admin, TOTP) -> upload (cashier) -> approve (admin) -> verified (cashier). Ends signed in as the cashier. */

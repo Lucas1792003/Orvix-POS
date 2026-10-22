@@ -52,9 +52,10 @@ let salesBefore = 0;
 let q1 = 0;
 let q2 = 0;
 
-/** The till's queue exactly as stored (every field, primary-key order). */
-async function rawOutbox(t: Terminal): Promise<string> {
-  return t.page.evaluate(() => new Promise<string>((resolve, reject) => {
+/** The till's queue exactly as stored (every field, primary-key order), and apart from it the export marker that the export
+ *  itself writes before the file leaves the till (9d37787: syncState "queue-export:last-at"). */
+async function rawOutbox(t: Terminal): Promise<{ raw: string; exportMark: string | null }> {
+  return t.page.evaluate(() => new Promise<{ raw: string; exportMark: string | null }>((resolve, reject) => {
     const req = indexedDB.open("shwe-phala-local");
     req.onerror = () => reject(req.error);
     req.onsuccess = () => {
@@ -65,7 +66,13 @@ async function rawOutbox(t: Terminal): Promise<string> {
         const r = tx.objectStore(s).getAll();
         r.onsuccess = () => { out[s] = r.result; };
       }
-      tx.oncomplete = () => { db.close(); resolve(JSON.stringify(out)); };
+      tx.oncomplete = () => {
+        db.close();
+        const ss = out.syncState as { key: string; value?: unknown }[];
+        const mark = ss.find((r) => r.key === "queue-export:last-at");
+        out.syncState = ss.filter((r) => r.key !== "queue-export:last-at");
+        resolve({ raw: JSON.stringify(out), exportMark: mark ? String(mark.value) : null });
+      };
       tx.onerror = () => { db.close(); reject(tx.error); };
     };
   }));
@@ -166,8 +173,11 @@ test("F1 offline sales -> restart offline -> export via the UI: encrypted file, 
   await expect(A.page.getByTestId("queue-export-path")).toContainText(EXPORT_FILE);
   await A.page.getByTestId("queue-export-close").click();
 
-  // the queue is byte-identical and nothing was sent
-  expect(await rawOutbox(A)).toBe(before);
+  // the queue is byte-identical and nothing was sent; the ONLY new state is the export marker, written by this export
+  const afterExport = await rawOutbox(A);
+  expect(afterExport.raw).toBe(before.raw);
+  expect(before.exportMark).toBeNull();
+  expect(Date.parse(afterExport.exportMark ?? "")).toBeGreaterThanOrEqual(t0 - 1000);
   outboxAtExport = await A.outbox();
   expect(A.requestsMatching(/rest\/v1|auth\/v1/).length).toBe(requestsBefore);
   expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore);
@@ -276,7 +286,7 @@ test("F2 recovery tool: explicit target, dry run, replay x2 into the QA org, out
   await A.page.unroute(apiPattern);
   await expect.poll(async () => (await A.outbox()).length, { timeout: 8 * 60_000, intervals: [2_000] }).toBe(0);
   const drainS = Math.round((Date.now() - tRestore) / 1000);
-  const tillSent = A.rpcBodies.filter((b) => b.at >= tRestore).map((b) => b.body?.p_idempotency_key);
+  const tillSent = A.logicalCalls(undefined, tRestore).map((b) => b.body?.p_idempotency_key);
   for (const k of keys) expect(tillSent).toContain(k);
   expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore + 3);
   expect(await keyRows(keys)).toHaveLength(4);

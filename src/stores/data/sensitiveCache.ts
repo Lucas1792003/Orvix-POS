@@ -63,15 +63,23 @@ const sameViewer = (a: Viewer, b: Viewer): boolean => JSON.stringify(a) === JSON
 
 /** The cached snapshot as far as this person may see it (memory only). */
 export function limitSnapshotToViewer<S extends LocalSnapshot>(snapshot: S, viewer: Viewer): S {
-  const purchaseOrders = snapshot.purchaseOrders.filter((po) => inScope(viewer.purchases, po.shopId));
+  // A row whose money an earlier logout / switch scrubbed from the mirror is incomplete: it is not shown from the cache
+  // (the pages would render — or crash on — missing amounts; e2e A5: a manager signing in after the owner's logout hit
+  // "Cannot read properties of undefined (reading 'toLocaleString')" on the Purchases page). The row stays on disk and the
+  // server's load brings it back complete. A row still waiting to be sent (pendingSync) is never scrubbed.
+  const hasMoney = (v: unknown): boolean => typeof v === "number";
+  const purchaseOrders = snapshot.purchaseOrders.filter((po) => inScope(viewer.purchases, po.shopId)
+    && (po.pendingSync === true || hasMoney(po.totalMmk)));
   const visiblePo = new Set(purchaseOrders.map((po) => po.id));
   // cost: kept as cached for a permitted person, removed for anyone else
   const base = viewer.cost ? snapshot : applyCostOverlay(snapshot, null, false);
   return {
     ...base,
     purchaseOrders,
-    purchaseOrderItems: snapshot.purchaseOrderItems.filter((i) => visiblePo.has(i.purchaseOrderId)),
-    supplierPayments: snapshot.supplierPayments.filter((p) => inScope(viewer.supplierPayments, p.shopId)),
+    purchaseOrderItems: snapshot.purchaseOrderItems.filter((i) => visiblePo.has(i.purchaseOrderId)
+      && (hasMoney(i.lineTotalMmk) || purchaseOrders.some((po) => po.id === i.purchaseOrderId && po.pendingSync === true))),
+    supplierPayments: snapshot.supplierPayments.filter((p) => inScope(viewer.supplierPayments, p.shopId)
+      && (p.pendingSync === true || hasMoney(p.amountMmk))),
     auditLogs: snapshot.auditLogs.filter((a) => inScope(viewer.audit, a.shopId ?? null)),
   };
 }

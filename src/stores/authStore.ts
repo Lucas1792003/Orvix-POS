@@ -525,6 +525,14 @@ export const useAuthStore = create<AuthState>()((set) => ({
       adminVerified: isAdmin ? isAal2 || isVerifiedThisSession(authUser.id) : true,
     });
     void cacheAppUser(authUser.id, user, hasTotp);
+    // A sign-in the server just accepted supersedes any earlier "sign in again" flag: it may have been written by the
+    // PREVIOUS session (a load or drain that finished after sign-out), and nothing else clears it when the queue is empty
+    // (AppLayout is not mounted on /login; the drain returns before its session check) — while it stays set, offline
+    // selling and the periodic drain are off (Step 6, review 2 finding 3a).
+    try {
+      const { clearNeedsReauth } = await import("./data/outbox");
+      await clearNeedsReauth();
+    } catch { /* the drain's own session check clears it later */ }
     return { error: null, role: user.role, shopId: user.shop_id ?? undefined };
   },
 

@@ -912,7 +912,16 @@ export async function drainOutbox(): Promise<DrainResult> {
   }
 }
 
+// The signed-in user a drain pass started for. A pass still running when that user signs out (or another signs in) must
+// not flag the next session as "sign in again" (Step 6, review 2 finding 3b).
+let drainPassUserId: string | null = null;
+async function setNeedsReauthForPass(reason: string): Promise<void> {
+  if (useAuthStore.getState().currentUserId !== drainPassUserId) return;
+  await setNeedsReauth(reason);
+}
+
 async function runDrainPass(): Promise<DrainResult> {
+  drainPassUserId = useAuthStore.getState().currentUserId;
   // D2: we hold the drain lock, so a `syncing` row is not a request of this
   // instance in flight. The first pass after startup frees them all; every
   // later pass (the loop resuming after an error, offline period, backoff)
@@ -940,7 +949,7 @@ async function runDrainPass(): Promise<DrainResult> {
     // A recovery-aware server that did not accept this sign-in (after one refresh): the same
     // sign-in prompt as the 085 path below. The queue is kept; nothing was sent.
     if (error instanceof RecoveryV1Blocked && error.reason === "authorization") {
-      await setNeedsReauth("The server did not accept this device's sign-in. Sign in again to resume syncing.");
+      await setNeedsReauthForPass("The server did not accept this device's sign-in. Sign in again to resume syncing.");
       return "needs-reauth";
     }
     useSyncStore.getState().setStatus({ lastTransientError: error instanceof Error ? error.message : "Recovery evidence unavailable; queue preserved." });
@@ -987,7 +996,7 @@ async function runDrainPass(): Promise<DrainResult> {
   const session = await ensureSessionForDrain();
   if (session === "network") return "network";
   if (session === "needs-reauth") {
-    await setNeedsReauth("The server rejected this device's sign-in. Sign in again to resume syncing.");
+    await setNeedsReauthForPass("The server rejected this device's sign-in. Sign in again to resume syncing.");
     return "needs-reauth";
   }
   await clearNeedsReauth();
@@ -1641,7 +1650,7 @@ async function holdOrRetry(entry: SyncOutboxEntry, error: RpcError): Promise<Dra
       }
     }
     if (!refreshed) {
-      await setNeedsReauth("The server rejected this device's sign-in. Sign in again to resume syncing.");
+      await setNeedsReauthForPass("The server rejected this device's sign-in. Sign in again to resume syncing.");
       return "needs-reauth";
     }
   }

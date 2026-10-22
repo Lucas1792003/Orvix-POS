@@ -149,7 +149,8 @@ test("E3 one UI operation re-sent under a NEW idempotency key (test hook) -> sec
   await T.posAddByCard("QA Product One");
   const sold = await T.posCheckout(1000);
   expect(sold.receiptNo).not.toBe("PENDING");
-  const orig = [...T.rpcBodies].reverse().find((b) => b.name === "complete_sale" && b.body);
+  // the operation as the till sent it (086+: inside op_execute); replayed DIRECTLY under a fresh v4 key, as a buggy client would
+  const orig = [...T.logicalCalls("complete_sale")].reverse().find((b) => b.body);
   expect(orig).toBeTruthy();
   const freshKey = crypto.randomUUID();
   const replay = await T.rpcAsPageUser("complete_sale", { ...orig!.body, p_idempotency_key: freshKey });

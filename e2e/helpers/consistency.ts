@@ -41,9 +41,11 @@ export async function assertConsistency(label: string, terminals: Terminal[] = [
   //    2 s", which flagged two distinct queued sales of the same basket and
   //    missed a replay that landed later than 2 s.)
   const qaKeys = await rows("idempotency_keys", {}, (q) => q.eq("rpc", "complete_sale").like("response->sale->>shopId", "qa-%"));
-  const clientCalls = terminals.flatMap((t, i) => t.rpcBodies
-    .filter((b) => b.name === "complete_sale")
+  // the operation the client meant, whatever route it took (086+: op_execute / op_execute_v87 / split): matching the URL
+  // alone saw no call at all after 086 and left this check vacuous (Step 6)
+  const clientCalls = terminals.flatMap((t, i) => t.logicalCalls("complete_sale")
     .map((b) => ({ terminal: `${t.kind}#${i}`, key: (b.body?.p_idempotency_key as string) ?? null, createdAt: (b.body?.p_created_at as string) ?? null })));
+  notes.push(`terminal complete_sale calls seen: ${clientCalls.length}`);
   const ledger = saleLedgerViolations({ sales, keys: qaKeys, clientCalls });
   violations.push(...ledger.violations);
   notes.push(...ledger.notes);

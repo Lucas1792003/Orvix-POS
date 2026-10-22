@@ -10,18 +10,20 @@
 # on storage.objects), exactly like a fresh production install.
 
 NET=phf-iso-net
-DB=phf-iso-db; AUTH=phf-iso-auth; REST=phf-iso-rest; STORE=phf-iso-storage; FN=phf-iso-fn; GW=phf-iso-gw
+DB=phf-iso-db; AUTH=phf-iso-auth; REST=phf-iso-rest; STORE=phf-iso-storage; FN=phf-iso-fn; GW=phf-iso-gw; RT=phf-iso-realtime
 DB_IMAGE="${PHF_ISO_DB_IMAGE:-supabase/postgres:17.6.1.136}"
 AUTH_IMAGE="${PHF_ISO_AUTH_IMAGE:-supabase/gotrue:v2.196.0}"
 REST_IMAGE="${PHF_ISO_REST_IMAGE:-postgrest/postgrest:v14.17}"
 STORE_IMAGE="${PHF_ISO_STORAGE_IMAGE:-supabase/storage-api:v1.74.0}"
 EDGE_IMAGE="${PHF_ISO_EDGE_IMAGE:-supabase/edge-runtime:v1.76.2}"
 NODE_IMAGE="${PHF_ISO_NODE_IMAGE:-node:24-slim}"
+# opt-in (PHF_ISO_REALTIME=1): the production Realtime service, for the specs that need live updates (Step 6)
+RT_IMAGE="${PHF_ISO_REALTIME_IMAGE:-public.ecr.aws/supabase/realtime:v2.129.0}"
 # Upstream self-hosted router (pinned; sha-checked against functions-router.sh)
 UPSTREAM_COMMIT=564eab8ad7840b13324f68b1bfac074ef8d51c21
 
 stack_down() {
-  docker rm -f "$GW" "$FN" "$REST" "$STORE" "$AUTH" "$DB" >/dev/null 2>&1 || true
+  docker rm -f "$GW" "$RT" "$FN" "$REST" "$STORE" "$AUTH" "$DB" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
   docker volume rm phf-iso-storage-data >/dev/null 2>&1 || true
 }
@@ -136,6 +138,10 @@ ALTER ROLE postgres WITH LOGIN PASSWORD '%s';\n" "$AUTH_PW" "$AUTH_PW" "$AUTH_PW
   fi
   su_psql < "$BASELINE_SQL" > "$WORK/baseline.log" 2>&1 || { tail -30 "$WORK/baseline.log"; die "baseline restore"; }
   su_psql < "$REPO/supabase/migrations/016_product_images_storage.sql" > "$WORK/016.log" 2>&1 || { tail -10 "$WORK/016.log"; die "016"; }
+  # production's documented state before 083 (083 header "WHY"): product-images drifted from 016 to allowed_mime_types =
+  # NULL and file_size_limit = NULL. Model that drift, so the pre-083 audit stages see what production saw (storage-0273 had
+  # expected PNG to be accepted there and failed only because this stack kept 016's jpeg/webp list); 083 sets the limits.
+  su_psql -c "UPDATE storage.buckets SET allowed_mime_types = NULL, file_size_limit = NULL WHERE id = 'product-images'" >/dev/null || die "pre-083 bucket drift"
   local f n applied=""
   for f in "$REPO"/supabase/migrations/*.sql; do
     n="$(basename "$f" | cut -d_ -f1)"
@@ -165,6 +171,22 @@ SQL
     -e PGRST_DB_USE_LEGACY_GUCS=false -e PGRST_APP_SETTINGS_JWT_SECRET="$JWT_SECRET" -e PGRST_APP_SETTINGS_JWT_EXP=3600 \
     "$REST_IMAGE" >/dev/null || die "rest run failed"
 
+  if [ "${PHF_ISO_REALTIME:-0}" = 1 ]; then
+    # Same settings as the upstream self-hosted compose. The tenant comes from the Host header's first label, hence the
+    # alias realtime-dev.<container>; its own random superuser password (stdin only) for the _realtime schema and slots.
+    log "realtime ($RT_IMAGE, opt-in)"
+    local rt_pw; rt_pw="$(openssl rand -hex 16)"
+    printf "CREATE SCHEMA IF NOT EXISTS _realtime;\nALTER SCHEMA _realtime OWNER TO supabase_admin;\nALTER ROLE supabase_admin WITH PASSWORD '%s';\n" "$rt_pw" | su_psql >/dev/null || die "realtime prerequisites"
+    [ "$(su_psql -Atc 'show wal_level')" = logical ] || die "realtime needs wal_level=logical"
+    ( umask 077; printf 'DB_PASSWORD=%s\n' "$rt_pw" > "$WORK/realtime.env" )   # never on a command line
+    docker run -d --name "$RT" --network "$NET" --network-alias "realtime-dev.$RT" --memory 512m --env-file "$WORK/realtime.env" \
+      -e PORT=4000 -e DB_HOST="$DB" -e DB_PORT=5432 -e DB_USER=supabase_admin -e DB_NAME=postgres \
+      -e DB_AFTER_CONNECT_QUERY='SET search_path TO _realtime' -e DB_ENC_KEY=supabaserealtime -e API_JWT_SECRET="$JWT_SECRET" \
+      -e SECRET_KEY_BASE="$(openssl rand -hex 32)" -e METRICS_JWT_SECRET="$(openssl rand -hex 32)" -e ERL_AFLAGS='-proto_dist inet_tcp' -e DNS_NODES="''" -e RLIMIT_NOFILE=10000 \
+      -e APP_NAME=realtime -e SEED_SELF_HOST=true -e RUN_JANITOR=true "$RT_IMAGE" >/dev/null || die "realtime run failed"
+    unset rt_pw
+  fi
+
   log "edge-runtime ($EDGE_IMAGE, VERIFY_JWT=true, patched upstream router)"
   fetch_upstream_router
   local mounts=() d
@@ -189,6 +211,16 @@ SQL
   wait_http "$GW_URL/rest/v1/" '^(200|401)$' 90 || die "PostgREST via gateway"
   wait_http "$GW_URL/auth/v1/health" '^200$' 60 || die "GoTrue via gateway"
   wait_http "$GW_URL/storage/v1/status" '^200$' 60 || die "storage via gateway"
+  if [ "${PHF_ISO_REALTIME:-0}" = 1 ]; then
+    # up = Realtime itself answers HTTP through the gateway (the gateway's own "upstream unavailable" is a 502)
+    local rc=000
+    for i in $(seq 1 120); do
+      rc=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$GW_URL/realtime/v1/api/ping" || true)
+      case "$rc" in 000|502) sleep 1;; *) break;; esac
+    done
+    case "$rc" in 000|502) docker logs "$RT" 2>&1 | tail -30; die "realtime did not come up";; esac
+    echo "realtime up (tenant realtime-dev)"
+  fi
   wait_http "$GW_URL/functions/v1/phone-upload-page" '^200$' 180 || { docker logs "$FN" 2>&1 | sed -E 's/eyJ[A-Za-z0-9_.-]+/<jwt>/g' | tail -20; die "edge-runtime"; }
   # warm every function (npm:@supabase/supabase-js loads on first use)
   for d in admin-2fa email-sales-report phone-upload-token staff-admin; do   # platform-console retired (G0-2)

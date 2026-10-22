@@ -133,7 +133,7 @@ test("C2 read-only session: allowed at 23 h, logged out at 25 h; sign-in restore
     `cachedAt ${at23} (23 h) -> offline boot still signed in as ${user23}, POS visible, badge shows the queued action; cachedAt ${at25} (25 h) -> offline boot lands on ${loggedOut}; queue kept (entry ${entry.localId}); offline sign-in attempt -> "${offlineLoginError}" (queue kept); online sign-in -> drained: sales ${salesBefore}->${salesBefore + 1}, key row present, stock ${q0 - 1}; cachedAt refreshed to now`);
 });
 
-test("C3 cashier deactivated while offline -> queued sale rejected on replay as a permanent conflict", async () => {
+test("C3 cashier deactivated while offline -> queued sale refused on replay (086: held for re-authentication, never executed, never final)", async () => {
   await A.gotoPos();
   const q0 = await inv(ids.shop, ids.prod1);
   const salesBefore = await count("sales", { shop_id: ids.shop });
@@ -146,25 +146,32 @@ test("C3 cashier deactivated while offline -> queued sale rejected on replay as 
   const deactivated = setUserActive(ids.cashA, false);
   expect(deactivated).toBe(`${ids.cashA}:false`);
   await A.setOffline(false);
-  await expect.poll(async () => (await A.outbox())[0]?.status, { timeout: 90_000 }).toBe("conflict");
+  // 086 (op_execute): an inactive caller is refused with OP_NOT_AUTHENTICATED, NOT recorded server-side (class 'auth'), and
+  // the till holds the entry for re-authentication: an operation is never finalised because of who is signed in. Before
+  // 086 this was a permanent conflict. Either the till sends it and is refused, or it drops to /login first; in both cases
+  // the entry stays pending and nothing executes.
+  await expect.poll(async () => {
+    const e = (await A.outbox())[0];
+    return /OP_NOT_AUTHENTICATED/.test(e?.lastError ?? "") || A.currentRoute().startsWith("/login") ? "held" : `${e?.status}:${e?.lastError ?? ""}`;
+  }, { timeout: 90_000 }).toBe("held");
   const conflict = (await A.outbox())[0];
-  expect(conflict).toMatchObject({ localId: entry.localId, failureKind: "permanent" });
-  expect(conflict.lastError).toMatch(/Not authenticated/i);
-  // The reconnect full load no longer sees the cashier's own users row
-  // (RLS hides inactive accounts), so the till drops to /login; the
-  // conflict badge is then shown to whoever signs in on this till.
+  expect(conflict).toMatchObject({ localId: entry.localId, status: "pending" });
+  if (conflict.lastError) expect(conflict).toMatchObject({ failureKind: "transient", heldReason: "reauth" });
   await sleep(1500);
   const landedOn = A.currentRoute();
-  const badgeForCashier = landedOn.startsWith("/login") ? "n/a (signed out)" : await A.badge(/1 sync conflict needs attention/).isVisible();
+  const badgeForCashier = landedOn.startsWith("/login") ? "n/a (signed out)" : await A.badge(/1 action waiting to sync/).isVisible();
   expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore);
   expect((await keyRows([entry.idempotencyKey!])).length).toBe(0);
   expect(await inv(ids.shop, ids.prod1)).toBe(q0);
   const localKept = (await A.localSales()).find((s: any) => s.receiptNo === "PENDING");
   expect(localKept?.pendingSync).toBe(true);
-  // The server is the authority: a direct replay with this user's own token fails the same way.
-  const direct = await A.rpcAsPageUser("complete_sale", conflict.args as Record<string, unknown>);
+  // The server is the authority: the same operation through the executor with this user's own token is refused the same way.
+  const { p_idempotency_key: replayKey, ...replayArgs } = conflict.args as Record<string, unknown>;
+  const direct = await A.rpcAsPageUser("op_execute", { p_key: replayKey, p_rpc: "complete_sale", p_args: replayArgs, p_actor_id: ids.cashA });
+  expect(direct.status).toBeGreaterThanOrEqual(400);
+  expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore);
   record("C", "deactivated cashier: queued sale rejected on replay", "PASS",
-    `users.is_active=false set server-side while offline; reconnect -> replay rejected: entry ${entry.localId} status=conflict/permanent, lastError "${conflict.lastError}"; DB: no sale, no key row, stock ${q0}; local PENDING sale kept flagged for manual reconciliation; till landed on ${landedOn} (conflict badge for the cashier: ${badgeForCashier}); direct replay with the same token -> HTTP ${direct.status} "${direct.body?.message}"`);
+    `users.is_active=false set server-side while offline; reconnect -> refused (086: held for re-auth, not recorded): entry ${entry.localId} status=${conflict.status}/${conflict.failureKind ?? "-"} held=${conflict.heldReason ?? "-"}, lastError "${conflict.lastError ?? "(not sent: signed out first)"}"; DB: no sale, no key row, stock ${q0}; local PENDING sale kept flagged for manual reconciliation; till landed on ${landedOn} (conflict badge for the cashier: ${badgeForCashier}); direct replay with the same token -> HTTP ${direct.status} "${direct.body?.message}"`);
 
   // Re-activate, dismiss the conflict (admin's call on this till), sign back in.
   expect(setUserActive(ids.cashA, true)).toBe(`${ids.cashA}:true`);
@@ -174,10 +181,11 @@ test("C3 cashier deactivated while offline -> queued sale rejected on replay as 
   const secret = qaTotpSecret();
   await A.loginAdminWithTotp(emails.admin, pw, secret);
   await A.waitForApp();
-  await expect(A.badge(/1 sync conflict needs attention/)).toBeVisible();
+  // the admin's session never executes the cashier's operation (086: run only in the creator's session); it is still pending
+  await expect(A.badge(/1 action waiting to sync/)).toBeVisible();
   await A.navigate("/app/admin/sync-conflicts");
-  await expect(A.page.getByText("Needs action")).toBeVisible();
-  await expect(A.page.getByText("1 conflict · 0 entries still syncing")).toBeVisible();
+  await expect(A.page.getByText("0 conflicts · 1 entry still syncing")).toBeVisible();
+  expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore);
   await A.toastsNow();
   // RC2 (audit D1): export, then set the rejected sale aside — kept on the till, never sent
   await A.exportAndSetAside("POS Sale", path.join(RESULTS_DIR, `c3-export-${Date.now()}.spqx`), "qa-c3-export-pass");

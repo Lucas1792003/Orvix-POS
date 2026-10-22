@@ -3,6 +3,7 @@ import { Button } from "../ui/Button";
 import { Select } from "../ui/Select";
 import { Input } from "../ui/Input";
 import { MoneyInput } from "../forms/MoneyInput";
+import { ReasonDialog } from "../ui/ReasonDialog";
 import { useToast } from "../ui/Toast";
 import { formatDateTime, formatMmk } from "../../lib/utils";
 import { getErrorMessage } from "../../lib/errors";
@@ -41,13 +42,16 @@ export const CashMovementsCard = ({ shiftId, cash, canManage, onChanged }: CashM
   const [amount, setAmount] = useState<number | undefined>(undefined);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
+  // (every hook above the early return below: a hook after it changes the hook count when PFIN-D appears or disappears)
+  const [reversing, setReversing] = useState<CashMovement | null>(null);
 
   if (cash.status === "unavailable" && cash.reason === "NOT_INSTALLED") return null;
 
   const reasonOk = reason.trim().length >= 3 && reason.trim().length <= 300;
   const canSubmit = !busy && cash.status === "ok" && reasonOk && (amount ?? 0) > 0;
 
-  const submit = async (input: { kind: CashMovementKind; amountMmk: number | null; reason: string; reversesId?: string }) => {
+  // resolves true when the movement was recorded (a refusal is reported here, as a toast)
+  const submit = async (input: { kind: CashMovementKind; amountMmk: number | null; reason: string; reversesId?: string }): Promise<boolean> => {
     setBusy(true);
     try {
       const { expectedCashMmk } = await recordCashMovement({ shiftId, ...input });
@@ -56,20 +60,29 @@ export const CashMovementsCard = ({ shiftId, cash, canManage, onChanged }: CashM
         description: expectedCashMmk !== null ? t("fin", "expectedNow", { amount: formatMmk(expectedCashMmk) }) : undefined,
         variant: "success",
       });
-      setAmount(undefined);
-      setReason("");
+      if (!input.reversesId) { setAmount(undefined); setReason(""); }   // a reversal leaves a half-typed new movement alone
       onChanged();
+      return true;
     } catch (error) {
       toast({ title: t("fin", "movementFailed"), description: getErrorMessage(error, t("fin", "movementFailed")), variant: "error" });
+      return false;
     } finally {
       setBusy(false);
     }
   };
 
-  const reverse = (m: CashMovement) => {
-    const why = window.prompt(t("fin", "reversePrompt"));
-    if (!why || why.trim().length < 3) return;
-    void submit({ kind: "REVERSAL", amountMmk: null, reason: why.trim(), reversesId: m.id });
+  // The reason comes from a ReasonDialog, never window.prompt(): Electron has no prompt() (it returns null at once), so a
+  // reversal silently did nothing on the desktop app (ORV-013; found again in Step 6, W09).
+  const reverse = (m: CashMovement) => { if (!busy && !reversing) setReversing(m); };
+  const confirmReverse = async (why: string) => {
+    const m = reversing;
+    if (!m) return;
+    if (why.trim().length < 3 || why.trim().length > 300) {   // the server's rule (3–300); the dialog itself allows 500
+      toast({ title: t("fin", "movementFailed"), description: t("fin", "reversePrompt"), variant: "error" });
+      throw new Error("reason too short");   // keeps the dialog open with the typed reason
+    }
+    // a refusal keeps the dialog open with the typed reason (ReasonDialog closes only when onConfirm resolves)
+    if (!(await submit({ kind: "REVERSAL", amountMmk: null, reason: why.trim(), reversesId: m.id }))) throw new Error("reversal refused");
   };
 
   const reversed = new Set(cash.status === "ok" ? cash.data.movements.map((m) => m.reversesId).filter(Boolean) : []);
@@ -119,6 +132,18 @@ export const CashMovementsCard = ({ shiftId, cash, canManage, onChanged }: CashM
         {busy ? t("pos", "processing") : t("fin", "recordMovement")}
       </Button>
       {!canManage ? <p className="text-xs text-slate-500">{t("fin", "managerOnlyNote")}</p> : null}
+      <ReasonDialog
+        key={reversing ? `reverse:${reversing.id}` : "closed"}
+        open={reversing !== null}
+        title={t("fin", "reverse")}
+        label={t("fin", "reversePrompt")}
+        confirmLabel={t("fin", "reverse")}
+        cancelLabel={t("common", "back")}
+        requiredMessage={t("transfers", "reasonRequired")}
+        destructive
+        onConfirm={confirmReverse}
+        onClose={() => setReversing(null)}
+      />
     </div>
   );
 };

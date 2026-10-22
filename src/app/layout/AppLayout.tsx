@@ -264,36 +264,38 @@ export const AppLayout = () => {
     <div className="buyer-container">
       <Sidebar />
       <main className="main">
-        {needsReauth && (
-          <div
-            role="alert"
-            className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900 print-hidden"
-          >
-            <span>
-              Your sign-in has expired on the server. Sales and other actions recorded on this device are saved
-              {pendingCount > 0 ? ` (${pendingCount} waiting)` : ""} and will sync after you sign in again.
-            </span>
-            <Button size="sm" onClick={() => void handleSignInAgain()}>Sign in again</Button>
-          </div>
-        )}
-        {quarantinedCount > 0 && (
-          <div
-            role="alert"
-            data-testid="quarantine-banner"
-            className="flex flex-wrap items-center justify-between gap-3 border-b border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-900 print-hidden"
-          >
-            <span>
-              {quarantinedCount} {quarantinedCount === 1 ? "transaction was" : "transactions were"} recorded on this till by an
-              older app version for a different server. {quarantinedCount === 1 ? "It" : "They"} will NOT be sent from here.
-              Export {quarantinedCount === 1 ? "it" : "them"} and give the file to the owner; nothing has been deleted.
-            </span>
-            <Button size="sm" onClick={() => setExportOpen(true)} data-testid="quarantine-export">
-              {t("queueExport", "button")}
-            </Button>
-          </div>
-        )}
         <div className="app-content">
-          {/* (inside the content column: .main is a row flexbox) */}
+          {/* Every banner lives INSIDE the content column: .main is a row flexbox, so a banner placed beside .app-content
+              became a column of its own and squeezed the page to a sliver (the page was unusable while "sign in again" or
+              the quarantine notice showed — Step 6, W10 / m087 C4). */}
+          {needsReauth && (
+            <div
+              role="alert"
+              className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900 print-hidden"
+            >
+              <span>
+                Your sign-in has expired on the server. Sales and other actions recorded on this device are saved
+                {pendingCount > 0 ? ` (${pendingCount} waiting)` : ""} and will sync after you sign in again.
+              </span>
+              <Button size="sm" onClick={() => void handleSignInAgain()}>Sign in again</Button>
+            </div>
+          )}
+          {quarantinedCount > 0 && (
+            <div
+              role="alert"
+              data-testid="quarantine-banner"
+              className="flex flex-wrap items-center justify-between gap-3 border-b border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-900 print-hidden"
+            >
+              <span>
+                {quarantinedCount} {quarantinedCount === 1 ? "transaction was" : "transactions were"} recorded on this till by an
+                older app version for a different server. {quarantinedCount === 1 ? "It" : "They"} will NOT be sent from here.
+                Export {quarantinedCount === 1 ? "it" : "them"} and give the file to the owner; nothing has been deleted.
+              </span>
+              <Button size="sm" onClick={() => setExportOpen(true)} data-testid="quarantine-export">
+                {t("queueExport", "button")}
+              </Button>
+            </div>
+          )}
           <RecoveryBanner />
           <Outlet />
         </div>

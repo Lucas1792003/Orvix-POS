@@ -1,3 +1,4 @@
+import { ReasonDialog } from "../components/ui/ReasonDialog";
 import { useMemo, useState } from "react";
 import { useCanViewCost } from "../lib/useCanViewCost";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -94,6 +95,7 @@ export const SupplierDetailPage = () => {
   const [lumpSumOpen, setLumpSumOpen] = useState(false);
   const [unlinkingId, setUnlinkingId] = useState<string | null>(null);
   const [voidingPaymentId, setVoidingPaymentId] = useState<string | null>(null);
+  const [voidDialogPaymentId, setVoidDialogPaymentId] = useState<string | null>(null);
   const [createPoOpen, setCreatePoOpen] = useState(false);
   const [receivePoId, setReceivePoId] = useState<string | null>(null);
   const [paymentPoId, setPaymentPoId] = useState<string | null>(null);
@@ -186,10 +188,15 @@ export const SupplierDetailPage = () => {
   const paymentPo = paymentPoId ? supplierOrders.find((po) => po.id === paymentPoId) ?? null : null;
   const linkedProductIds = new Set(linkedProducts.map((product) => product.id));
 
-  const handleVoidPayment = async (paymentId: string) => {
-    if (voidingPaymentId) return;
-    const reason = prompt(t("suppliers", "voidReasonPrompt"));
-    if (!reason || !reason.trim()) return;
+  // The reason comes from a ReasonDialog, never prompt(): Electron has no prompt(), so voiding silently did nothing on the
+  // desktop app (ORV-013; found in Step 6).
+  const handleVoidPayment = (paymentId: string) => {
+    if (voidingPaymentId || voidDialogPaymentId) return;
+    setVoidDialogPaymentId(paymentId);
+  };
+  const confirmVoidPayment = async (reason: string) => {
+    const paymentId = voidDialogPaymentId;
+    if (!paymentId || voidingPaymentId) return;
     setVoidingPaymentId(paymentId);
     try {
       await voidSupplierPayment({ paymentId, reason: reason.trim() });
@@ -200,6 +207,7 @@ export const SupplierDetailPage = () => {
         title: t("suppliers", "couldNotVoid"),
         description: getErrorMessage(error, t("suppliers", "tryAgain")),
       });
+      throw error;   // keeps the reason dialog open with the typed reason
     } finally {
       setVoidingPaymentId(null);
     }
@@ -558,6 +566,18 @@ export const SupplierDetailPage = () => {
           </table>
         </div>
       )}
+      <ReasonDialog
+        key={voidDialogPaymentId ? `void:${voidDialogPaymentId}` : "closed"}
+        open={voidDialogPaymentId !== null}
+        title={t("suppliers", "voidAction")}
+        label={t("suppliers", "voidReasonPrompt")}
+        confirmLabel={t("suppliers", "voidAction")}
+        cancelLabel={t("common", "back")}
+        requiredMessage={t("transfers", "reasonRequired")}
+        destructive
+        onConfirm={confirmVoidPayment}
+        onClose={() => setVoidDialogPaymentId(null)}
+      />
     </div>
   );
 

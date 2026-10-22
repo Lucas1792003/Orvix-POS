@@ -82,8 +82,10 @@ test("B1 network disconnected before checkout -> queued, receipt PENDING; reconn
   expect(k).toMatchObject({ rpc: "complete_sale", actor_id: ids.cashA });
   expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore + 1);
   expect(await inv(ids.shop, ids.prod1)).toBe(q0 - 1);
-  const rpcCalls = A.requestsMatching(/rpc\/complete_sale/, t0);
+  // the operation as the client sent it (086+: through op_execute), not the URL
+  const rpcCalls = A.logicalCalls("complete_sale", t0);
   expect(rpcCalls.length).toBe(1);
+  expect(rpcCalls[0].body?.p_idempotency_key).toBe(entry.idempotencyKey);
   const localReal = (await A.localSales()).find((s: any) => s.idempotencyKey === entry.idempotencyKey || s.receiptNo === k?.key);
   expect((await A.localSales()).some((s: any) => s.receiptNo === "PENDING")).toBe(false);
   record("B", "network disconnected before checkout", "PASS",
@@ -94,28 +96,41 @@ test("B2 network cut after the DB commits but before the response -> exactly one
   const q0 = await inv(ids.shop, ids.prod3);
   const salesBefore = await count("sales", { shop_id: ids.shop });
   const hit = { hits: 0, serverStatus: 0 };
-  const glob = await A.routeCommitThenAbort("/rest/v1/rpc/complete_sale", hit);
+  const unroute = await A.routeRpcCommitThenAbort("complete_sale", hit);
   await A.posAddByCard("QA Product Three");
   const t0 = Date.now();
-  const first = await A.posCheckout(3000);
+  // Batch 2A write-ahead (src/stores/data/writeAhead.ts, PosPage isPendingConfirmation): a lost reply is an UNKNOWN
+  // outcome — the cashier is told "Pending confirmation" (never "Sale recorded", never "failed"), the cart is cleared so
+  // it is not rung up again under a new key, and the durable row is kept in doubt under its original key.
+  const first = await A.posCheckoutExpect(3000, /Pending confirmation|Sale recorded|Checkout failed/);
+  expect(first.toast).toMatch(/Pending confirmation/);
+  expect(first.toast).not.toMatch(/Sale recorded|Checkout failed/);
   // The server committed (HTTP 200 observed by the interceptor) but the app
   // never saw the reply: it must have fallen back to the queue.
   expect(hit.hits).toBe(1);
   expect(hit.serverStatus).toBe(200);
-  expect(first.receiptNo).toBe("PENDING");
   const [entry] = await A.outbox();
-  expect(entry.name).toBe("complete_sale");
+  expect(entry).toMatchObject({ name: "complete_sale", status: "pending", inDoubt: true });
+  expect(await A.outbox()).toHaveLength(1);
+  // staged under the offline rules: a provisional local sale, flagged unconfirmed (receipt PENDING) until the server answers
+  const provisional = (await A.localSales()).filter((s: any) => s.receiptNo === "PENDING");
+  expect(provisional).toHaveLength(1);
+  expect(provisional[0].pendingSync).toBe(true);
   const committed = await keyRows([entry.idempotencyKey!]);
   expect(committed).toHaveLength(1);
   expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore + 1);
-  await A.unroutePath(glob);
+  await unroute();
   // Reconnect-style drain: offline -> online transition triggers the full
   // reload + drain (the queue would also be retried by the 30 s tick).
   await A.setOffline(true);
   await A.setOffline(false);
   await expect.poll(async () => (await A.outbox()).length, { timeout: 60_000 }).toBe(0);
-  const replays = A.requestsMatching(/rpc\/complete_sale/, t0);
-  expect(replays.length).toBe(2);
+  // the in-doubt operation is resolved under its ORIGINAL key only: a resend (replay returns the original) or, on an 086
+  // server, an op_status lookup of that key; never a second key
+  const replays = A.logicalCalls("complete_sale", t0);
+  expect(replays.length).toBeGreaterThanOrEqual(1);
+  for (const r of replays) expect(r.body?.p_idempotency_key).toBe(entry.idempotencyKey);
+  const lookups = A.logicalCalls("op_status", t0).length;
   const sale = await latestSale(ids.shop, ids.cashA);
   expect(sale.total_mmk).toBe(3000);
   expect(Date.parse(sale.created_at)).toBeGreaterThan(t0 - 60_000);
@@ -127,7 +142,7 @@ test("B2 network cut after the DB commits but before the response -> exactly one
   expect(local?.receiptNo).toBe(sales[0].receipt_no);
   expect((await A.localSales()).some((s: any) => s.receiptNo === "PENDING")).toBe(false);
   record("B", "network cut after commit, before response", "PASS",
-    `interceptor let complete_sale reach the server (HTTP ${hit.serverStatus}) then dropped the reply; app queued a provisional sale (PENDING) while the key row ${entry.idempotencyKey!.slice(0, 8)}… already existed; replay (${replays.length - 1} extra call, same key) returned the original response: exactly 1 sale ${sales[0].receipt_no}, stock ${q0}->${q0 - 1}, 1 SALE_OUT, provisional reconciled to the real receipt`);
+    `interceptor let complete_sale reach the server (HTTP ${hit.serverStatus}) then dropped the reply; app showed "Pending confirmation" (not "Sale recorded"), kept the write-ahead row in doubt and staged a provisional sale (PENDING) while the key row ${entry.idempotencyKey!.slice(0, 8)}… already existed; ${replays.length - 1} resend(s) + ${lookups} op_status lookup(s), all on the same key, resolved it to the original: exactly 1 sale ${sales[0].receipt_no}, stock ${q0}->${q0 - 1}, 1 SALE_OUT, provisional reconciled to the real receipt`);
 });
 
 test("B3 prolonged disconnection: several queued sales + a shift close -> all drained once, in order", async () => {
@@ -175,7 +190,7 @@ test("B3 prolonged disconnection: several queued sales + a shift close -> all dr
   expect(krows).toHaveLength(4);
   const order = keys.map((k) => krows.find((r) => r.key === k)!.created_at);
   for (let i = 1; i < order.length; i++) expect(Date.parse(order[i])).toBeGreaterThanOrEqual(Date.parse(order[i - 1]));
-  const calls = A.requestsMatching(/rpc\/(complete_sale|close_shift)/, t0).map((r) => r.url.split("/rpc/")[1]);
+  const calls = A.logicalCalls(undefined, t0).map((c) => c.name).filter((n) => n === "complete_sale" || n === "close_shift");
   expect(calls).toEqual(["complete_sale", "complete_sale", "complete_sale", "close_shift"]);
   expect(await count("sales", { shift_id: shift.id })).toBe(salesBefore + 3);
   const closed = await row("shifts", { id: shift.id });
@@ -277,7 +292,7 @@ test("B6 expired/tampered JWT during sync -> refresh and continue", async () => 
   const claims = (jwt: string) => JSON.parse(Buffer.from(jwt.split(".")[1], "base64url").toString("utf8"));
   expect(claims(after!.access_token).session_id).toBe(claims(before!.access_token).session_id);
   expect(claims(after!.access_token).iat).toBeGreaterThan(claims(before!.access_token).iat);
-  const rpcReqs = A.requestsMatching(/rpc\/complete_sale/, t0);
+  const rpcReqs = A.logicalCalls("complete_sale", t0);
   expect(rpcReqs.length).toBe(1);
   expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore + 1);
   expect((await keyRows([entry.idempotencyKey!])).length).toBe(1);
@@ -411,28 +426,38 @@ test("B9 Supabase API temporarily unavailable (503) -> backoff and recovery, no 
   const q0 = await inv(ids.shop, ids.prod1);
   const salesBefore = await count("sales", { shop_id: ids.shop });
   const hits = { hits: 0 };
-  const glob = await A.routeStatus("/rest/v1/rpc/complete_sale", 503, { message: "Service Unavailable" }, hits);
+  const unroute = await A.routeRpcStatus("complete_sale", 503, { message: "Service Unavailable" }, hits);
   await A.posScan(st.barcodeValue);
   const t0 = Date.now();
-  const queued = await A.posCheckout(1000);
-  // Online path hit the 503 (a gateway status) and fell back to the queue.
-  expect(queued.receiptNo).toBe("PENDING");
+  // Online path hit the 503 (a gateway status) and fell back to the queue. Since Batch 2A (src/lib/failureClass.ts) a
+  // 503 whose body does not prove the origin was never reached is an UNKNOWN outcome: the cashier sees "Pending
+  // confirmation" (never "Sale recorded", never "failed"), the sale is staged under the offline rules (receipt PENDING)
+  // and the entry is kept in doubt with its original key.
+  const queued = await A.posCheckoutExpect(1000, /Pending confirmation|Sale recorded|Checkout failed/);
+  expect(queued.toast).toMatch(/Pending confirmation/);
+  expect(queued.toast).not.toMatch(/Sale recorded|Checkout failed/);
   const [entry] = await A.outbox();
-  expect(entry.name).toBe("complete_sale");
-  // Let the periodic drain (30 s) hit the 503 at least once more: backoff grows.
-  await expect.poll(async () => (await A.outbox())[0]?.attempts ?? 0, { timeout: 90_000, intervals: [1000] }).toBeGreaterThanOrEqual(1);
+  expect(entry).toMatchObject({ name: "complete_sale", status: "pending", inDoubt: true });
+  const provisional = (await A.localSales()).filter((s: any) => s.receiptNo === "PENDING");
+  expect(provisional).toHaveLength(1);
+  expect(provisional[0].pendingSync).toBe(true);
+  // Let the periodic drain (30 s) hit the 503 at least once more: backoff grows. (Since 2A the write-ahead row already
+  // counts the online attempt — attempts=1, resent promptly, no backoff yet — so "once more" is attempts >= 2.)
+  expect(entry.attempts).toBe(1);
+  await expect.poll(async () => (await A.outbox())[0]?.attempts ?? 0, { timeout: 90_000, intervals: [1000] }).toBeGreaterThanOrEqual(2);
   const during = (await A.outbox())[0];
   expect(during).toMatchObject({ status: "pending", failureKind: "transient" });
   expect(during.nextAttemptAt && Date.parse(during.nextAttemptAt) > Date.now() - 1000).toBe(true);
   expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore);
   const hitsDuring = hits.hits;
-  await A.unroutePath(glob);
+  expect(hitsDuring).toBeGreaterThanOrEqual(2);
+  await unroute();
   await expect.poll(async () => (await A.outbox()).length, { timeout: 120_000, intervals: [1000] }).toBe(0);
   const recoveredMs = Date.now() - t0;
   expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore + 1);
   expect((await keyRows([entry.idempotencyKey!])).length).toBe(1);
   expect(await inv(ids.shop, ids.prod1)).toBe(q0 - 1);
-  const rpcCalls = A.requestsMatching(/rpc\/complete_sale/, t0).length;
+  const rpcCalls = A.logicalCalls("complete_sale", t0).length;
   record("B", "API unavailable (503) then restored", "PASS",
     `complete_sale answered 503 ${hitsDuring}x (online attempt + ${hitsDuring - 1} replay(s)); entry stayed pending/transient with attempts=${during.attempts}, backoff nextAttemptAt set; after release the queue drained in ${Math.round(recoveredMs / 1000)} s, ${rpcCalls} total calls; exactly 1 sale (sales ${salesBefore}->${salesBefore + 1}), stock ${q0 - 1}, 1 key row`);
 });
@@ -618,17 +643,34 @@ test("B13 server outage for minutes while TWO tills keep selling (online, API re
     [A, "A", "p2"], [Bt, "B", "p1"],
   ];
   const slots = plan.map((_, i) => tCut + 5_000 + Math.round((i * (OUTAGE_MS - 60_000)) / (plan.length - 1)));
-  const receipts: string[] = [];
+  // Since Batch 2A a refused connection while the browser reports itself online is an UNKNOWN outcome (fetch cannot tell
+  // "refused before sending" from "reset after sending"; src/lib/failureClass.ts): each sale is staged under the offline
+  // rules and the cashier sees "Pending confirmation" (never "Sale recorded", never "failed"); its write-ahead row stays
+  // in doubt with its own key. Ringing the same basket again while the earlier one is unconfirmed makes the till ASK
+  // (writeAhead.ts re-entry guard); every sale here is a separate customer's, so the cashier answers "A different one
+  // (another customer)" — the earlier one is still confirmed with its own key.
+  const toasts: string[] = [];
+  const prompts: string[] = [];
   for (let i = 0; i < plan.length; i++) {
-    const [t, , kind] = plan[i];
+    const [t, k, kind] = plan[i];
     // the two A "p1" sales are rung up back to back (same basket, seconds apart)
     if (i !== 1) await sleep(Math.max(0, slots[i] - Date.now()));
-    if (kind === "p1") await t.posScan(st.barcodeValue);
-    else await t.posAddByCard("QA Product Two");
-    const r = await t.posCheckout(kind === "p1" ? 1000 : 2000);
-    receipts.push(r.receiptNo);
+    let r: Awaited<ReturnType<Terminal["posCheckoutExpect"]>>;
+    try {
+      if (kind === "p1") await t.posScan(st.barcodeValue);
+      else await t.posAddByCard("QA Product Two");
+      r = await t.posCheckoutExpect(kind === "p1" ? 1000 : 2000, /Pending confirmation|Sale recorded|Checkout failed|Nothing was sent/, { unresolvedPrompt: "additional" });
+    } catch (e) {
+      throw new Error(`B13 sale #${i} (${k}, ${kind}) at +${Math.round((Date.now() - tCut) / 1000)} s: ${(e as Error).message.split("\n")[0]}; toasts so far ${JSON.stringify(toasts)}; A console: ${A.consoleErrors.slice(-6).join(" || ")}; B console: ${Bt.consoleErrors.slice(-3).join(" || ")}`);
+    }
+    toasts.push(r.toast);
+    if (r.prompted) prompts.push(`${k}#${i}`);
   }
-  expect(receipts).toEqual(plan.map(() => "PENDING"));
+  for (const t of toasts) expect(t).toMatch(/Pending confirmation/);
+  // the back-to-back identical basket on A (#1) must have been asked about (others may be, depending on the re-entry window)
+  expect(prompts).toContain("A#1");
+  expect((await A.localSales()).filter((s: any) => s.receiptNo === "PENDING")).toHaveLength(3);
+  expect((await Bt.localSales()).filter((s: any) => s.receiptNo === "PENDING")).toHaveLength(3);
   await sleep(Math.max(0, tCut + OUTAGE_MS - Date.now()));
   const queuedA = await A.outbox();
   const queuedB = await Bt.outbox();
@@ -667,7 +709,7 @@ test("B13 server outage for minutes while TWO tills keep selling (online, API re
   expect((await Bt.localSales()).some((s: any) => s.receiptNo === "PENDING")).toBe(false);
   await assertConsistency("B13 long outage, two tills", [A, Bt]);
   record("B", "server outage for minutes, two tills selling -> restored", "PASS",
-    `API refused for ${outageS} s on both tills (navigator online; ${refused.A}+${refused.B} refused requests); A queued 3 (incl. the same basket twice in a row), B queued 3; max attempts during outage ${Math.max(...attempts)} (backoff), 0 sales landed; restored -> both drained on their own in ${recoveryS} s: 6 keys -> 6 distinct sales (A 3, B 3), sales ${salesBefore}->${salesBefore + 6}, prod1 ${q1}->${q1 - 4}, prod2 ${q2}->${q2 - 2}; sales keep their ring-up time (synced ${Math.min(...lag)}-${Math.max(...lag)} s later); consistency gate PASS`);
+    `API refused for ${outageS} s on both tills (navigator online; ${refused.A}+${refused.B} refused requests); each sale "Pending confirmation" (unknown outcome, staged locally); A queued 3 (incl. the same basket twice in a row), B queued 3; re-entry prompts answered "another customer": ${prompts.join(",")}; max attempts during outage ${Math.max(...attempts)} (backoff), 0 sales landed; restored -> both drained on their own in ${recoveryS} s: 6 keys -> 6 distinct sales (A 3, B 3), sales ${salesBefore}->${salesBefore + 6}, prod1 ${q1}->${q1 - 4}, prod2 ${q2}->${q2 - 2}; sales keep their ring-up time (synced ${Math.min(...lag)}-${Math.max(...lag)} s later); consistency gate PASS`);
 });
 
 test("B12 no request ever left for the hosted project", async () => {

@@ -1085,21 +1085,23 @@ BEGIN
 END $$;
 -- containment needs no owner: suspend (reversible only by the owner) or revoke (permanent for that key and device id)
 CREATE FUNCTION recovery_v1.device_contain(p_org text, p_enrollment uuid, p_action text, p_reason text, p_actor text) RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
-DECLARE e recovery_v1.device_enrollments;
+DECLARE e recovery_v1.device_enrollments; v_ev bigint;
 BEGIN
  SELECT * INTO e FROM recovery_v1.device_enrollments WHERE enrollment_id = p_enrollment AND org_id = p_org;
  IF e.enrollment_id IS NULL OR p_action NOT IN ('suspend', 'revoke') OR length(btrim(coalesce(p_reason, ''))) NOT BETWEEN 3 AND 300 THEN
   RAISE EXCEPTION 'RECOVERY_V1_DEVICE_CONTAIN_INVALID: enrollment of this organization, action suspend|revoke and a reason (3-300 characters) required' USING ERRCODE='22023';
  END IF;
- INSERT INTO recovery_v1.device_events(enrollment_id, org_id, kind, reason, by_actor) VALUES (e.enrollment_id, p_org, CASE p_action WHEN 'suspend' THEN 'suspended' ELSE 'revoked' END, btrim(p_reason), left(p_actor, 200));
+ INSERT INTO recovery_v1.device_events(enrollment_id, org_id, kind, reason, by_actor) VALUES (e.enrollment_id, p_org, CASE p_action WHEN 'suspend' THEN 'suspended' ELSE 'revoked' END, btrim(p_reason), left(p_actor, 200))
+ RETURNING id INTO v_ev;
  IF p_action = 'revoke' THEN
   INSERT INTO recovery_v1.revoked_device_keys(key_fingerprint, org_id, enrollment_id) VALUES (e.key_fingerprint, p_org, e.enrollment_id) ON CONFLICT DO NOTHING;
   INSERT INTO recovery_v1.device_revocations(org_id, device_id, reason, revoked_by) VALUES (p_org, e.device_id, btrim(p_reason), left(p_actor, 200)) ON CONFLICT DO NOTHING;
  END IF;
  INSERT INTO recovery_v1.audit(org_id, kind, detail) VALUES (p_org, CASE p_action WHEN 'suspend' THEN 'device_suspended' ELSE 'device_revoked' END,
-   jsonb_build_object('enrollmentId', e.enrollment_id, 'deviceId', e.device_id, 'reason', btrim(p_reason), 'by', left(p_actor, 200)));
+   jsonb_build_object('enrollmentId', e.enrollment_id, 'deviceId', e.device_id, 'reason', btrim(p_reason), 'by', left(p_actor, 200), 'eventId', v_ev));
+ -- Step 6: the event id is what an owner's device-reinstate authorization must name (suspensionEventId)
  RETURN jsonb_build_object('outcome', CASE p_action WHEN 'suspend' THEN 'suspended' ELSE 'revoked' END, 'enrollmentId', e.enrollment_id,
-   'state', recovery_v1.device_enrollment_state(e.enrollment_id));
+   'state', recovery_v1.device_enrollment_state(e.enrollment_id), 'eventId', v_ev);
 END $$;
 -- what a till (or an admin screen) needs to know about one device id; includes the owner-signed approval so the TILL can
 -- verify it against its own pinned owner keys (the server's word is never the till's trust anchor)
@@ -1431,7 +1433,12 @@ BEGIN
    'devices', jsonb_build_object(
       'pendingRequests', (SELECT count(*) FROM recovery_v1.device_requests q WHERE q.org_id = p_org AND NOT EXISTS (SELECT 1 FROM recovery_v1.device_enrollments e WHERE e.enrollment_id = q.request_id)),
       'enrollments', (SELECT coalesce(jsonb_agg(jsonb_build_object('enrollmentId', e.enrollment_id, 'shopId', e.shop_id, 'deviceId', e.device_id, 'keyFingerprint', e.key_fingerprint,
-          'state', recovery_v1.device_enrollment_state(e.enrollment_id), 'notAfter', e.not_after, 'replaces', e.replaces) ORDER BY e.approved_at), '[]'::jsonb)
+          'state', recovery_v1.device_enrollment_state(e.enrollment_id), 'notAfter', e.not_after, 'replaces', e.replaces,
+          -- Step 6: the current suspension (the event a device-reinstate authorization must name), NULL unless suspended
+          'suspensionEventId', CASE WHEN recovery_v1.device_enrollment_state(e.enrollment_id) = 'SUSPENDED' THEN
+                                 (SELECT CASE WHEN x.kind = 'suspended' THEN x.id END FROM recovery_v1.device_events x
+                                   WHERE x.enrollment_id = e.enrollment_id AND x.kind IN ('suspended', 'reinstated') ORDER BY x.id DESC LIMIT 1) END)
+          ORDER BY e.approved_at), '[]'::jsonb)
         FROM recovery_v1.device_enrollments e WHERE e.org_id = p_org)),
    'ownerAuthority', (SELECT coalesce(jsonb_agg(jsonb_build_object('keyId', k.key_id, 'fingerprint', k.fingerprint, 'scope', k.scope)), '[]'::jsonb)
         FROM recovery_v1.owner_keys k WHERE (recovery_v1.trusted_owner_key(k.key_id)).key_id IS NOT NULL AND k.scope IN ('*', p_org)));

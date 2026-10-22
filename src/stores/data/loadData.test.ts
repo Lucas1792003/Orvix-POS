@@ -242,3 +242,37 @@ describe("M2: list order after complete (key-ordered) reads", () => {
     expect(sortedBy("v")(err)).toBe(err);
   });
 });
+
+describe("cache fast path: the route guards never see 'loaded, not loading' before the server answers", () => {
+  // e2e C3 (2026-10-22): the mirror held the previous account's RLS view (a just-deactivated cashier: no users rows).
+  // An admin signed in, login() reset isLoaded, and the load rendered that mirror with isLoaded=true while isLoading was
+  // still false (raised only after the queue classification awaits). RequireRole read "loaded, and the signed-in user is
+  // not in users" and bounced a valid sign-in to /login. Online, isLoading must already be true when the cache is shown.
+  it("online: every state with the cached rows shown is still 'loading' until the server load lands", async () => {
+    await persistSnapshotToLocal({ ...emptySnapshot, products: [{ id: "cached-1", name: "Cached" } as never] });
+    serve({ products: [product(1)] });
+    const seen: { isLoaded: boolean; isLoading: boolean; ids: string }[] = [];
+    const unsub = useDataStore.subscribe((s) => seen.push({ isLoaded: s.isLoaded, isLoading: s.isLoading, ids: s.products.map((p) => p.id).join(",") }));
+    try {
+      await load();
+    } finally {
+      unsub();
+    }
+    const cachedShown = seen.filter((s) => s.ids === "cached-1" && s.isLoaded);
+    expect(cachedShown.length).toBeGreaterThan(0);
+    expect(cachedShown.every((s) => s.isLoading)).toBe(true);
+    const end = useDataStore.getState();
+    expect(end).toMatchObject({ isLoaded: true, isLoading: false });
+    expect(end.products.map((p) => p.id)).toEqual(["prod-00001"]);
+  });
+
+  it("offline: the cache is shown as loaded and NOT loading (no server load follows)", async () => {
+    vi.stubGlobal("navigator", { onLine: false });
+    await persistSnapshotToLocal({ ...emptySnapshot, products: [{ id: "cached-1", name: "Cached" } as never] });
+    serve({});
+    await load();
+    const s = useDataStore.getState();
+    expect(s).toMatchObject({ isLoaded: true, isLoading: false });
+    expect(s.products.map((p) => p.id)).toEqual(["cached-1"]);
+  });
+});

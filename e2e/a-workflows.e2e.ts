@@ -453,15 +453,20 @@ test("A8 sync badges + Sync Conflicts page: pending count, transient vs permanen
 
   // Reconnect behind a 503 gateway: transient, auto-retrying
   const hits = { hits: 0 };
-  const glob503 = await A.routeStatus("/rest/v1/rpc/complete_sale", 503, { message: "Service Unavailable" }, hits);
+  const unroute503 = await A.routeRpcStatus("complete_sale", 503, { message: "Service Unavailable" }, hits);
   await A.setOffline(false);
   // The reconnect full load drains the queue; the 503 makes the entry a
   // transient failure (pending, backing off). The page lists on demand.
   await expect.poll(async () => (await A.outbox())[0]?.failureKind, { timeout: 60_000 }).toBe("transient");
   await A.page.getByRole("button", { name: "Refresh" }).click();
-  await expect(A.page.getByText(/Retrying automatically/)).toBeVisible();
+  // Since Batch 2A (src/lib/failureClass.ts) a 503 whose body neither proves the origin was not reached nor comes from
+  // PostgREST is UNKNOWN_OUTCOME (it may have committed): the entry stays pending/transient AND in doubt, so the page
+  // labels it "Awaiting confirmation — resent with its original key" rather than the plain "Retrying automatically".
+  // Same property: transient, kept pending, retried automatically with the same key, never final.
+  await expect(A.page.getByText("Awaiting confirmation — resent with its original key")).toBeVisible();
   entries = await A.outbox();
-  expect(entries[0]).toMatchObject({ status: "pending", failureKind: "transient" });
+  expect(entries[0]).toMatchObject({ status: "pending", failureKind: "transient", inDoubt: true });
+  expect(entries[0].nextAttemptAt).toBeTruthy();
   const attemptsAfter503 = entries[0].attempts;
   await A.toastsNow();
   await A.page.getByRole("button", { name: "Retry" }).click();
@@ -470,7 +475,8 @@ test("A8 sync badges + Sync Conflicts page: pending count, transient vs permanen
   expect(await inv(ids.shop, ids.prod3)).toBe(q0);
 
   // Gateway back: Retry succeeds, exactly one sale
-  await A.unroutePath(glob503);
+  expect(hits.hits).toBeGreaterThan(0);
+  await unroute503();
   await A.toastsNow();
   await A.page.getByRole("button", { name: "Retry" }).click();
   const retried = await A.toast(/Retried/);
@@ -485,28 +491,43 @@ test("A8 sync badges + Sync Conflicts page: pending count, transient vs permanen
   expect(localSynced?.receiptNo).toBe(synced[0].receipt_no);
   expect((await A.localSales()).some((s: any) => s.receiptNo === "PENDING")).toBe(false);
   record("A", "sync badges + Sync Conflicts: transient (503) -> Retry", "PASS",
-    `offline sale -> receipt PENDING, badge "1 action waiting to sync", page "0 conflicts · 1 entry still syncing" / Queued; reconnect behind 503 (${hits.hits} gateway hits) -> "Retrying automatically", attempts=${attemptsAfter503}, Retry -> toast "${stillUnreachable}", no key row, stock ${q0}; gateway restored -> Retry -> toast "${retried}", exactly 1 sale ${synced[0].receipt_no} (key row actor ${k.actor_id}), stock ${q0 - 1}, local PENDING record replaced`);
+    `offline sale -> receipt PENDING, badge "1 action waiting to sync", page "0 conflicts · 1 entry still syncing" / Queued; reconnect behind 503 (${hits.hits} gateway hits) -> outcome unknown: "Awaiting confirmation — resent with its original key" (pending/transient/inDoubt), attempts=${attemptsAfter503}, Retry -> toast "${stillUnreachable}", no key row, stock ${q0}; gateway restored -> Retry -> toast "${retried}", exactly 1 sale ${synced[0].receipt_no} (key row actor ${k.actor_id}), stock ${q0 - 1}, local PENDING record replaced`);
 
-  // Permanent conflict: the queued sale's shift is closed before replay.
+  // Permanent conflict: the queued sale is refused DEFINITIVELY on replay. Before 086 this closed the sale's shift; since
+  // 086 "No open shift for this cashier and shop" is a 'dependency' refusal by design (op_classify_refusal, migration
+  // 086: a queued shift change from another till may still arrive) — not recorded, held and retried, never final — and a
+  // stock shortfall is no refusal for this ADMIN (pos:override_stock). A definitive refusal for any role: the price level
+  // the sale was rung up under is deactivated before it reaches the server ("Price level … is not active" is on 086's
+  // audited 'rejected' list). The server records the refusal; the till keeps it as a conflict a person must handle,
+  // never resent. The level is re-activated right after.
   await A.gotoPos();
   await A.setOffline(true);
   await A.posAddByCard("QA Product Three");
   const queued2 = await A.posCheckout(3000);
   expect(queued2.receiptNo).toBe("PENDING");
   const entry2 = (await A.outbox())[0];
-  const closedBySql = runSql(`UPDATE shifts SET ended_at = now() WHERE id = '${adminShiftId}' AND ended_at IS NULL RETURNING id;`).trim();
-  expect(closedBySql).toBe(adminShiftId);
-  await A.setOffline(false);
-  await expect(A.badge(/1 sync conflict needs attention/)).toBeVisible({ timeout: 60_000 });
-  await A.navigate("/app/admin/sync-conflicts");
-  await expect(A.page.getByText("1 conflict · 0 entries still syncing")).toBeVisible();
-  await expect(A.page.getByText("Needs action")).toBeVisible();
-  const lastError = (await A.page.locator("td span[title]").first().getAttribute("title")) ?? "";
-  expect(lastError).toMatch(/No open shift/i);
-  const conflictEntry = (await A.outbox())[0];
-  expect(conflictEntry).toMatchObject({ localId: entry2.localId, status: "conflict", failureKind: "permanent" });
-  expect((await keyRows([entry2.idempotencyKey!])).length).toBe(0);
-  expect(await count("sales", { shift_id: adminShiftId })).toBe(adminSalesBefore + 1);
+  const levelId = String(((entry2.args as any)?.p_items ?? [])[0]?.price_level_id ?? "");
+  expect(levelId, "the queued sale names its price level").toMatch(/^[A-Za-z0-9_.:-]+$/);
+  expect(runSql(`UPDATE price_levels SET is_active = false WHERE id = '${levelId}' AND is_active RETURNING id;`).trim()).toBe(levelId);
+  let ledger2 = "";
+  let lastError = "";
+  try {
+    await A.setOffline(false);
+    await expect(A.badge(/1 sync conflict needs attention/)).toBeVisible({ timeout: 60_000 });
+    await A.navigate("/app/admin/sync-conflicts");
+    await expect(A.page.getByText("1 conflict · 0 entries still syncing")).toBeVisible();
+    await expect(A.page.getByText("Refused by the server — final, never resent")).toBeVisible();
+    lastError = (await A.page.locator("td span[title]").first().getAttribute("title")) ?? "";
+    expect(lastError).toMatch(/Price level .* is not active/i);
+    const conflictEntry = (await A.outbox())[0];
+    expect(conflictEntry).toMatchObject({ localId: entry2.localId, status: "conflict", serverOutcome: "rejected" });
+    ledger2 = runSql(`SELECT coalesce((SELECT state || '/' || coalesce(outcome_code, '') FROM idempotency_keys WHERE key = '${entry2.idempotencyKey}'::uuid), '<none>');`).trim();
+    expect(ledger2).toMatch(/^rejected\//);
+    expect(await count("sales", { shift_id: adminShiftId })).toBe(adminSalesBefore + 1);
+    expect(await inv(ids.shop, ids.prod3)).toBe(q0 - 1);
+  } finally {
+    runSql(`UPDATE price_levels SET is_active = true WHERE id = '${levelId}';`);
+  }
   await A.toastsNow();
   // RC2 (audit D1): no Dismiss; the owner exports, then sets the conflict aside (kept, never sent)
   const dismissed = await A.exportAndSetAside("POS Sale", path.join(RESULTS_DIR, `a8-export-${Date.now()}.spqx`), "qa-a8-export-pass");
@@ -519,7 +540,7 @@ test("A8 sync badges + Sync Conflicts page: pending count, transient vs permanen
   expect(await count("sales", { shift_id: adminShiftId })).toBe(adminSalesBefore + 1);
   expect(await inv(ids.shop, ids.prod3)).toBe(q0 - 1);
   record("A", "sync conflicts: permanent rejection -> Needs action -> export + Set aside", "PASS",
-    `second offline sale queued, its shift ${adminShiftId} closed server-side; reconnect -> badge "1 sync conflict needs attention", page "1 conflict · 0 entries still syncing", Needs action, last error "${lastError}", entry status=conflict/permanent, no key row, DB still 1 sale; export + Set aside -> toast "${dismissed}", row kept as archived (same key), local PENDING record kept flagged pendingSync, stock unchanged (${q0 - 1})`);
+    `second offline sale queued, its price level ${levelId} deactivated server-side before it synced (re-activated after); reconnect -> badge "1 sync conflict needs attention", page "1 conflict · 0 entries still syncing", "Refused by the server — final, never resent", last error "${lastError}", entry status=conflict serverOutcome=rejected, ledger ${ledger2}, DB still 1 sale; export + Set aside -> toast "${dismissed}", row kept as archived (same key), local PENDING record kept flagged pendingSync, stock unchanged (${q0 - 1})`);
 });
 
 test("A9 close shift: variance reason gate, then close (cashier A)", async () => {

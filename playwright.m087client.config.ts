@@ -19,7 +19,8 @@ export default defineConfig({
   reporter: [["list"]],
   globalSetup: "./e2e/global-setup.ts",
   globalTeardown: "./e2e/global-teardown.ts",
-  use: { baseURL: BASE_URL, trace: "off", screenshot: "only-on-failure" },
+  // one action may not consume the whole 10-minute test (C4 hung on a single wait): fail fast with evidence
+  use: { baseURL: BASE_URL, trace: "off", screenshot: "only-on-failure", actionTimeout: 60_000 },
   webServer: {
     command: `npx vite --port ${PORT} --strictPort`,
     url: BASE_URL,

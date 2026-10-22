@@ -217,6 +217,28 @@ describe("account switch on the same device", () => {
     expect(d.payments).toEqual(["pay-1:20000", "pay-2:-", "pay-offline:7000"]);
   });
 
+  it("OWNER logs out -> MANAGER of shop-1 signs in: rows whose money the logout scrubbed are not shown from the cache (no undefined amounts); the server load brings them back", async () => {
+    // e2e A5 (2026-10-22): the Purchases page crashed on po.totalMmk.toLocaleString() of a scrubbed cached row.
+    await ownerMirror();
+    signedInAs("u-admin");
+    await useAuthStore.getState().logout();
+    expect((await diskMoney()).pos).toEqual(["po-1:-:-", "po-2:-:-"]);
+    offline();
+    signedInAs("u-mgr");
+    await load().catch(() => undefined);
+    const s = useDataStore.getState();
+    expect(s.purchaseOrders.every((po) => typeof po.totalMmk === "number")).toBe(true);
+    expect(s.purchaseOrderItems.every((i) => typeof i.lineTotalMmk === "number")).toBe(true);
+    expect(s.supplierPayments.every((p) => typeof p.amountMmk === "number")).toBe(true);
+    expect(memMoney().payments).toEqual(["pay-offline:7000"]);          // the queued operation is never hidden
+    expect((await diskMoney()).pos).toEqual(["po-1:-:-", "po-2:-:-"]);   // rows kept on disk (ids for continuity)
+    serve({ ...adminServer(), purchase_orders: adminServer().purchase_orders.filter((p) => p.shop_id === "shop-1"),
+      purchase_order_items: adminServer().purchase_order_items.filter((i) => i.purchase_order_id === "po-1"),
+      supplier_payments: adminServer().supplier_payments.filter((p) => p.shop_id === "shop-1") });
+    await load();
+    expect(memMoney().pos).toEqual(["po-1:55000"]);
+  });
+
   it("the SAME owner restarting offline keeps everything (no needless scrub)", async () => {
     await ownerMirror();
     offline();

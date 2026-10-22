@@ -17,6 +17,8 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
+  // E2E_REPEAT_EACH=N (with E2E_GREP): repeat one flaky case to reproduce it; never a retry
+  repeatEach: Number(process.env.E2E_REPEAT_EACH ?? 1),
   timeout: 300_000,
   expect: { timeout: 20_000 },
   // No JSON reporter and no traces: both would serialise keys / bearer tokens.

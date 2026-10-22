@@ -35,6 +35,10 @@ export interface OutboxRow {
   idempotencyKey?: string;
   lastError?: string;
   failureKind?: string;
+  /** why a retryable entry is held (e.g. "reauth", an offline capability refusal) */
+  heldReason?: string;
+  /** sent and the outcome is unknown (may have committed): resent only with the same key */
+  inDoubt?: boolean;
   nextAttemptAt?: string;
   createdAt: string;
   args?: Record<string, unknown>;
@@ -67,6 +71,20 @@ const LANG_INIT = `try { if (!localStorage.getItem("pos-language")) localStorage
 const ONLINE_INIT = `try { delete navigator.onLine; } catch (e) {}`;
 
 export interface RequestLogEntry { url: string; method: string; at: number; status?: number }
+/** One RPC as the CLIENT meant it. Since migration 086 the client sends allow-listed financial RPCs through the executor
+ *  (POST /rpc/op_execute {p_key, p_rpc, p_args}; 087: op_execute_v87; a split-payment sale: fin_complete_sale_split), so
+ *  the URL names the executor, not the operation. Specs that count or intercept "complete_sale" must look at this. */
+export interface LogicalCall { name: string; at: number; via: string; body: Record<string, unknown> | null }
+export function logicalRpc(fn: string, body: any): Omit<LogicalCall, "at"> {
+  if (fn === "op_execute" || fn === "op_execute_v87") {
+    return { name: String(body?.p_rpc ?? ""), via: fn, body: body?.p_args ? { ...body.p_args, p_idempotency_key: body.p_key } : null };
+  }
+  if (fn === "fin_complete_sale_split") {
+    return { name: "complete_sale", via: `${fn}/${body?.p_route ?? ""}`, body: body?.p_args ? { ...body.p_args, p_idempotency_key: body.p_key } : null };
+  }
+  return { name: fn, via: "direct", body };
+}
+
 
 /** E2E_LOOPBACK_ONLY=1 (tools/m086-verify): every non-loopback request any
  *  terminal attempted (aborted). Empty otherwise. */
@@ -123,6 +141,9 @@ export class Terminal {
     });
     page.on("console", (m) => { if (m.text().startsWith("[phone-upload]")) this.phoneUploadMarkers.push({ at: Date.now(), text: m.text().slice(0, 400) }); });
     page.on("console", (m) => { if (m.type() === "error" || m.type() === "warning") this.consoleErrors.push(`${new Date().toISOString()} ${m.type()}: ${m.text().slice(0, 300)}`); });
+    // lifecycle evidence for a terminal that disappears mid-spec
+    page.on("crash", () => this.consoleErrors.push(`${new Date().toISOString()} e2e: page CRASHED`));
+    page.on("close", () => this.consoleErrors.push(`${new Date().toISOString()} e2e: page closed (url ${page.url()})`));
     // Hard guard: the hosted project must never be touched. Any request to
     // a *.supabase.co host (any scheme — Realtime's wss:// included) is
     // aborted, remembered, and turned into a failure of the run by
@@ -194,7 +215,11 @@ export class Terminal {
     let release: () => void = () => undefined;
     if (options.holdRpc) {
       const gate = new Promise<void>((resolve) => { release = resolve; });
-      await context.route(`${liveCfg().url}/rest/v1/rpc/${options.holdRpc}`, async (route) => {
+      const held = options.holdRpc;
+      await context.route(`${liveCfg().url}/rest/v1/rpc/**`, async (route) => {
+        const m = /\/rpc\/([A-Za-z0-9_]+)/.exec(route.request().url());
+        let b: any = null; try { b = route.request().postDataJSON(); } catch { b = null; }
+        if (!m || logicalRpc(m[1], b).name !== held) return route.fallback();
         await gate;
         await route.continue().catch(() => undefined);
       });
@@ -426,11 +451,27 @@ export class Terminal {
     await this.login(email, password);
     await this.waitForRoute("/verify");
     const code = await freshTotpCode(secret, notThisCode);
+    const tSubmit = Date.now();
+    // route trace for the failure message (where the sign-in went, and when)
+    const trace: string[] = [];
+    let tracing = true;
+    void (async () => {
+      while (tracing) {
+        const r = this.currentRoute();
+        if (trace[trace.length - 1]?.split("@")[0] !== r) trace.push(`${r}@+${Date.now() - tSubmit}ms`);
+        await new Promise((res) => setTimeout(res, 50));
+      }
+    })();
     await this.submitVerifyCode(code);
     const outcome = await Promise.race([
-      expect.poll(() => this.currentRoute(), { timeout: 30_000 }).toMatch(/^\/app/).then(() => "app" as const),
-      this.page.locator('form [role="alert"]').waitFor({ state: "visible", timeout: 30_000 }).then(() => "error" as const),
+      expect.poll(() => this.currentRoute(), { timeout: 30_000 }).toMatch(/^\/app/).then(() => "app" as const, () => "timeout" as const),
+      this.page.locator('form [role="alert"]').waitFor({ state: "visible", timeout: 30_000 }).then(() => "error" as const, () => "timeout" as const),
     ]);
+    tracing = false;
+    if (outcome === "timeout") {
+      const reqs = this.requestsMatching(/rest\/v1\/|auth\/v1\//, tSubmit - 1000).map((r) => `${r.method} ${r.url.split("/v1/")[1]?.slice(0, 60)} -> ${r.status}`);
+      throw new Error(`admin verification did not reach /app (route ${this.currentRoute()}; trace ${trace.join(" > ")}); console: ${this.consoleErrors.slice(-8).join(" || ")}; requests: ${reqs.join(" | ")}`);
+    }
     if (outcome === "error") {
       const text = (await this.page.locator('form [role="alert"]').innerText()).replace(/\s+/g, " ").trim();
       throw new Error(`admin verification failed: ${text} (route ${this.currentRoute()})`);
@@ -631,6 +672,15 @@ export class Terminal {
    *  with the receipt number from the "Sale recorded" toast ("PENDING" when
    *  queued offline). */
   async posCheckout(paid: number, options: { print?: boolean } = {}): Promise<{ receiptNo: string; toast: string }> {
+    return this.posCheckoutExpect(paid, /Sale recorded/, options);
+  }
+
+  /** posCheckout answered by the first toast matching `expected` (e.g. 2A+: an online sale whose reply was lost is
+   *  "Pending confirmation" — never "Sale recorded", never "failed"). */
+  async posCheckoutExpect(
+    paid: number, expected: RegExp,
+    options: { print?: boolean; unresolvedPrompt?: "additional" } = {},
+  ): Promise<{ receiptNo: string; toast: string; prompted?: string }> {
     await this.page.keyboard.press(options.print ? "F3" : "F2");
     const amount = this.page.getByLabel("Amount received");
     await amount.waitFor({ state: "visible" });
@@ -644,9 +694,26 @@ export class Terminal {
     await expect.poll(() => amount.inputValue(), { timeout: 5_000 }).toBe(String(paid));
     await this.toastsNow();
     await amount.press("Enter");
-    const toast = await this.toast(/Sale recorded/, 60_000);
+    // 2A re-entry guard: an identical / similar earlier sale whose outcome is still unknown makes the till ASK (it never
+    // guesses). A spec that rings a genuinely separate sale answers "A different one (another customer)".
+    let prompted: string | undefined;
+    if (options.unresolvedPrompt === "additional") {
+      const additional = this.page.getByRole("button", { name: /^A different one \(another customer\)/ });
+      const deadline = Date.now() + 60_000;
+      for (;;) {
+        if ((await this.toastTexts(expected, true)).length) break;
+        if (await additional.isVisible().catch(() => false)) {
+          prompted = (await this.page.locator(".fixed.inset-0.z-50", { has: additional }).last().innerText().catch(() => "")).replace(/\s+/g, " ").trim();
+          await additional.click();
+          break;
+        }
+        if (Date.now() > deadline) break;
+        await this.page.waitForTimeout(100);
+      }
+    }
+    const toast = await this.toast(expected, 60_000);
     const m = toast.match(/Receipt (\S+)/);
-    return { receiptNo: m?.[1] ?? "", toast };
+    return { receiptNo: m?.[1] ?? "", toast, prompted };
   }
 
   /** Same as posCheckout but expects the checkout to be refused. */
@@ -696,6 +763,44 @@ export class Terminal {
 
   isOffline(): boolean {
     return this.offline;
+  }
+
+  /** The calls of one logical RPC (or all) since `since`, whatever route the client used (see logicalRpc). */
+  logicalCalls(name?: string, since = 0): LogicalCall[] {
+    return this.rpcBodies.filter((b) => b.at >= since).map((b) => ({ at: b.at, ...logicalRpc(b.name, b.body) }))
+      .filter((c) => !name || c.name === name);
+  }
+
+  /** Intercept ONE logical RPC on whichever route the client uses; every other request falls through. Returns the unroute. */
+  async routeRpc(rpc: string, handler: (route: Route) => Promise<void>): Promise<() => Promise<void>> {
+    const glob = `${liveCfg().url}/rest/v1/rpc/**`;
+    const fn = async (route: Route) => {
+      const m = /\/rpc\/([A-Za-z0-9_]+)/.exec(route.request().url());
+      let body: any = null; try { body = route.request().postDataJSON(); } catch { body = null; }
+      if (!m || logicalRpc(m[1], body).name !== rpc) return route.fallback();
+      await handler(route);
+    };
+    await this.page.route(glob, fn);
+    return () => this.page.unroute(glob, fn);
+  }
+
+  /** routeStatus for one logical RPC. */
+  routeRpcStatus(rpc: string, status: number, body: unknown, counter?: { hits: number }): Promise<() => Promise<void>> {
+    return this.routeRpc(rpc, async (r) => {
+      if (counter) counter.hits++;
+      await r.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+    });
+  }
+
+  /** routeCommitThenAbort for one logical RPC: the server executes it, the reply is dropped. */
+  routeRpcCommitThenAbort(rpc: string, c: { hits: number; serverStatus?: number; cut?: number }): Promise<() => Promise<void>> {
+    return this.routeRpc(rpc, async (r) => {
+      c.hits++;
+      const res = await r.fetch();
+      c.serverStatus = res.status();
+      await r.abort("connectionreset").catch(() => {});
+      c.cut = (c.cut ?? 0) + 1;
+    });
   }
 
   /** Answer every request to `pathPart` with an HTTP `status` and body

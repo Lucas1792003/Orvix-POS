@@ -245,6 +245,22 @@ def device_use(x, a):
     r3 = x.call(A_ADMIN, 'device.reinstate', {'authorization': au, 'signature': sg}, 'reinstate')
     s2, _ = x.sale(A_A1, a, label='sale-reinstated')
     r4 = x.call(A_ADMIN, 'device.reinstate', {'authorization': au, 'signature': sg}, 'reinstate-replay')
+    # Step 6: the suspension event a reinstatement must name is visible WITHOUT database access — in the suspend result and
+    # in the ADMIN's / operator's overview (recovery_overview), and cleared once reinstated
+    r5 = x.call(A_ADMIN, 'device.suspend', {'enrollmentId': a['enrollmentId'], 'reason': 'synthetic suspicion (again)'}, 'suspend-2')
+    ov = x.call(A_ADMIN, 'recovery.overview', {}, 'overview-suspended')
+    shown = next((e for e in ov.get('devices', {}).get('enrollments', []) if e.get('enrollmentId') == a['enrollmentId']), {})
+    au5, sg5 = x.owner.authorize('device-reinstate', {'scope': 'org-test', 'ownerId': s5lib.FIXTURE_OWNER, 'device': {
+        'enrollmentId': a['enrollmentId'], 'keyFingerprint': shown.get('keyFingerprint'), 'suspensionEventId': shown.get('suspensionEventId')}})
+    r6 = x.call(A_ADMIN, 'device.reinstate', {'authorization': au5, 'signature': sg5}, 'reinstate-from-overview')
+    ov2 = x.call(A_ADMIN, 'recovery.overview', {}, 'overview-reinstated')
+    after = next((e for e in ov2.get('devices', {}).get('enrollments', []) if e.get('enrollmentId') == a['enrollmentId']), {})
+    x.record('D23b', 'the current suspension event is returned by the suspension and shown in the overview; a reinstatement built only from that succeeds; it is cleared afterwards',
+             'eventId == suspensionEventId; reinstated; null after',
+             {'eventId': r5.get('eventId'), 'shown': shown.get('suspensionEventId'), 'state': shown.get('state'), 'reinstate': r6.get('outcome') or r6.get('reason', '')[:80],
+              'after': after.get('suspensionEventId'), 'afterState': after.get('state')},
+             r5.get('outcome') == 'suspended' and isinstance(r5.get('eventId'), int) and shown.get('suspensionEventId') == r5.get('eventId')
+             and shown.get('state') == 'SUSPENDED' and r6.get('outcome') == 'reinstated' and after.get('suspensionEventId') is None and after.get('state') == 'ACTIVE')
     x.record('D23', 'a suspended device cannot sell; only an owner-signed reinstatement (not another key, not a replay) restores it',
              'suspended refused; attacker refused; owner reinstates; replay refused',
              {'suspend': r.get('outcome'), 'sale': s1[:80], 'attacker': r2.get('reason', '')[:80], 'reinstate': r3.get('outcome'), 'sale2': s2[:20], 'replay': r4.get('reason', '')[:60]},

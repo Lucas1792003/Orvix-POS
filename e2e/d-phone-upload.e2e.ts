@@ -39,8 +39,8 @@
 // case also saves the product and checks that products.image_url is the
 // SERVER-DERIVED URL (public.app_config origin + /storage/v1/object/public/
 // product-images/<session path>). QA data only; every QA storage object is
-// removed through the Storage API in afterAll, and the non-QA objects (574,
-// incl. the 17 orphans) are proven byte-identical.
+// removed through the Storage API in afterAll, and the non-QA objects (the
+// target's baseline, E2E_STORAGE_BASELINE) are proven byte-identical.
 import { expect, test, type Route } from "@playwright/test";
 import { rmSync } from "node:fs";
 import path from "node:path";
@@ -95,8 +95,8 @@ const sql1 = (q: string) => runSql(q).trim();
 const secs = (ms: number) => (ms / 1000).toFixed(1);
 
 // Non-QA objects, every column but last_accessed_at (a public read may touch it).
-const STORAGE_FP = `SELECT count(*) || ' objects, md5 ' || md5(string_agg((to_jsonb(z) - 'last_accessed_at')::text, '|' ORDER BY z.bucket_id, z.name)) FROM storage.objects z WHERE z.name NOT LIKE 'org/qa-%';`;
-const ORPHANS_FP = `SELECT count(*) || ' orphans, md5 ' || md5(string_agg((to_jsonb(o) - 'last_accessed_at')::text, '|' ORDER BY o.name)) FROM storage.objects o
+const STORAGE_FP = `SELECT count(*) || ' objects, md5 ' || coalesce(md5(string_agg((to_jsonb(z) - 'last_accessed_at')::text, '|' ORDER BY z.bucket_id, z.name)), 'empty') FROM storage.objects z WHERE z.name NOT LIKE 'org/qa-%';`;
+const ORPHANS_FP = `SELECT count(*) || ' orphans, md5 ' || coalesce(md5(string_agg((to_jsonb(o) - 'last_accessed_at')::text, '|' ORDER BY o.name)), 'empty') FROM storage.objects o
   WHERE o.bucket_id = '${BUCKET}' AND (
         (o.name LIKE 'temp/%' AND NOT EXISTS (SELECT 1 FROM product_image_upload_sessions s WHERE s.storage_path = o.name))
      OR (o.name LIKE 'products/%' AND o.name NOT LIKE 'products/brand/%' AND NOT EXISTS (SELECT 1 FROM products p WHERE o.name LIKE 'products/' || p.id || '/%')));`;
@@ -163,9 +163,13 @@ const qrPaths = (value: string): string[] =>
 async function assertQrEncodesPhonePage(token: string): Promise<string> {
   const url = expectedQrUrl(token);
   const u = new URL(url);
-  expect(u.protocol).toBe("https:");
+  expect(u.protocol).toBe(process.env.E2E_LOOPBACK_ONLY === "1" ? "http:" : "https:");   // loopback-only disposable stack: http
   expect(u.origin).toBe(new URL(cfg.url).origin);
-  expect(u.origin).not.toBe(new URL(DEV_SERVER_URL).origin);
+  // Untestable in the loopback-only topology (tools/e2e-local/run-main.sh): there the stack itself is reached THROUGH the
+  // Vite dev server's proxy (E2E_SUPABASE_URL = DEV_SERVER_URL = http://localhost:5179), so the stack origin and the dev
+  // server origin are identical by construction. The path checks below (and the QR != dev-server page check) still
+  // prove the QR points at the backend-served phone page, not the renderer's own route.
+  if (process.env.E2E_LOOPBACK_ONLY !== "1") expect(u.origin).not.toBe(new URL(DEV_SERVER_URL).origin);
   expect(u.pathname).toBe(PAGE_PATH);
   expect(u.search).toBe("");
   const shown = await A.page
@@ -386,14 +390,22 @@ function assertTokenResponse(c: FnCall, s: Sess): void {
 test.beforeAll(async () => {
   storageBefore = sql1(STORAGE_FP);
   orphansBefore = sql1(ORPHANS_FP);
-  expect(storageBefore.startsWith("574 objects")).toBe(true);
-  expect(orphansBefore.startsWith("17 orphans")).toBe(true);
+  // The expected baseline belongs to the TARGET (it was 574 objects / 17 orphans on the self-hosted stack this suite was
+  // first written against). Disposable stacks pass E2E_STORAGE_BASELINE=0,0. The real property — non-QA storage
+  // byte-identical before and after — is checked in afterAll whatever the baseline.
+  const baseline = process.env.E2E_STORAGE_BASELINE;
+  expect(baseline, "E2E_STORAGE_BASELINE=<objects>,<orphans> of this target is required").toMatch(/^\d+,\d+$/);
+  const [wantObjects, wantOrphans] = baseline!.split(",");
+  expect(storageBefore.startsWith(`${wantObjects} objects`)).toBe(true);
+  expect(orphansBefore.startsWith(`${wantOrphans} orphans`)).toBe(true);
   record("phone-upload", "storage baseline", "INFO", `${storageBefore}; ${orphansBefore}`);
 
   schemaVersion = sql1(`SELECT max(version) FROM supabase_migrations.schema_migrations;`);
   record("phone-upload", "schema", "INFO", `schema ${schemaVersion}; 081 rate-limit cases ${schemaVersion >= "081" ? "RUN" : "SKIPPED (not deployed)"}; 083 G5 cases ${schemaVersion >= "083" ? "RUN (completion through the function only)" : "SKIPPED (not deployed)"}`);
   trustedBase = sql1(`SELECT value FROM public.app_config WHERE key = 'supabase_public_url';`);
-  expect(trustedBase, "080 app_config.supabase_public_url must be set").toMatch(/^https:\/\/[a-z0-9.-]+(:\d+)?$/);
+  // https everywhere except a loopback-only disposable run, where migration 080's own CHECK allows loopback http
+  expect(trustedBase, "080 app_config.supabase_public_url must be set").toMatch(process.env.E2E_LOOPBACK_ONLY === "1"
+    ? /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/ : /^https:\/\/[a-z0-9.-]+(:\d+)?$/);
   expect(trustedBase, "the stack's trusted origin is the origin the apps are built for").toBe(cfg.url);
   const localNames: LocalFunctionName[] = [
     ...(FN_MODE === "local" ? (["phone-upload-token"] as const) : []),
@@ -415,7 +427,15 @@ test.beforeAll(async () => {
   }
   if (FN_MODE === "deployed") {
     // smoke: the deployed route answers the function's own generic 404 (no data written)
-    const r = await fetch(`${cfg.url}${FN_PATH}`, { method: "POST", headers: { Authorization: `Bearer ${cfg.anonKey}`, apikey: cfg.anonKey, "content-type": "application/json" }, body: JSON.stringify({ token: "short" }) });
+    // A freshly started stack's edge runtime answers 502 while the function's worker cold-boots (seen 2026-10-22 when
+    // spec D ran 2.6 min after the stack came up): wait for the function itself to answer (<= 60 s), then assert.
+    const smoke = () => fetch(`${cfg.url}${FN_PATH}`, { method: "POST", headers: { Authorization: `Bearer ${cfg.anonKey}`, apikey: cfg.anonKey, "content-type": "application/json" }, body: JSON.stringify({ token: "short" }) });
+    let r = await smoke();
+    for (let i = 0; i < 30 && [502, 503, 504].includes(r.status); i++) {
+      await r.body?.cancel().catch(() => undefined);
+      await sleep(2_000);
+      r = await smoke();
+    }
     const body = await r.json().catch(() => null);
     expect(r.status).toBe(404);
     expect(body).toEqual({ error: "Invalid upload link.", code: "invalid" });

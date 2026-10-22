@@ -125,11 +125,12 @@ test("I1 owner reconciles a rejected (conflict) sale as CANCELLED; the guard no 
 
   // online: open_shift syncs, complete_sale is rejected permanently -> conflict
   const hits = { hits: 0 };
-  const g = await A.routeStatus("/rest/v1/rpc/complete_sale", 400, { code: "P0001", message: "e2e: rejected (spec I1)" }, hits);
+  const g = await A.routeRpcStatus("complete_sale", 400, { code: "P0001", message: "e2e: rejected (spec I1)" }, hits);
   await A.setOffline(false);
   await expect.poll(async () => byName(await A.outbox(), "complete_sale")?.status, { timeout: 120_000 }).toBe("conflict");
   await expect.poll(async () => (await A.outbox()).length, { timeout: 60_000 }).toBe(1);
-  await A.unroutePath(g);
+  expect(hits.hits).toBeGreaterThan(0);
+  await g();
 
   await A.logout();
   await A.loginAdminWithTotp(emails.admin, pw, qaTotpSecret());
@@ -184,13 +185,13 @@ test("I2 response lost: server committed, reply cut; owner sets it aside and rec
   // the first complete_sale reaches the server (commits) and its reply is cut;
   // every later send gets 503 so the entry stays queued
   const cut = { hits: 0 } as { hits: number; serverStatus?: number; cut?: number };
-  const gCut = await A.routeCommitThenAbort("/rest/v1/rpc/complete_sale", cut);
+  const gCut = await A.routeRpcCommitThenAbort("complete_sale", cut);
   await A.setOffline(false);
   // wait until the server's answer was captured and the reply cut (not just until the request started)
   await expect.poll(() => cut.cut ?? 0, { timeout: 120_000 }).toBeGreaterThan(0);
-  await A.unroutePath(gCut);
+  await gCut();
   const held = { hits: 0 };
-  const g503 = await A.routeStatus("/rest/v1/rpc/complete_sale", 503, { message: "e2e: held (spec I2)" }, held);
+  const g503 = await A.routeRpcStatus("complete_sale", 503, { message: "e2e: held (spec I2)" }, held);
   expect(cut.serverStatus).toBe(200);
   await expect.poll(async () => count("sales", { shop_id: ids.shop }), { timeout: 30_000 }).toBe(salesBefore + 1);
   const serverSale = (await rows("sales", { shop_id: ids.shop }, (q: any) => q.order("created_at", { ascending: false }).limit(1)))[0];
@@ -219,7 +220,7 @@ test("I2 response lost: server committed, reply cut; owner sets it aside and rec
   expect(r.reconciliation).toMatchObject({ resolution: "matched", serverRef: { saleId: serverSale.id, receiptNo: serverSale.receipt_no }, check: { result: "recorded" } });
   expect((await guardReport()).unsynced).toBe(0);
 
-  await A.unroutePath(g503);
+  await g503();
   await A.page.waitForTimeout(5_000); // a drain pass: a reconciled row is never sent
   expect(byId(await A.outbox(), sale.localId).status).toBe("reconciled");
   expect(await count("sales", { shop_id: ids.shop })).toBe(salesBefore + 1);
